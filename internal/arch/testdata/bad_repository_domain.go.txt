@@ -1,0 +1,9 @@
+package domain
+
+import (
+	"database/sql" // infra in domain — forbidden (invariant 16)
+
+	_ "github.com/gitfrok/backend/modules/identity/internal/domain" // cross-module internal — forbidden (invariant 14)
+)
+
+var _ = sql.ErrNoRows
