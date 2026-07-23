@@ -1,0 +1,19 @@
+version: v2
+# Generate Go from governance/contracts into backend's own gen/ tree.
+# Managed mode overrides the proto go_package prefix so the output is importable under
+# THIS repo's module path (github.com/gitfrok/backend/gen/...), keeping the
+# dependency one-way: backend imports governance contracts, never the reverse (invariant 22).
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/gitfrok/backend/gen
+inputs:
+  - directory: ../governance/contracts
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen
+    opt: paths=source_relative

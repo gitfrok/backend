@@ -1,0 +1,3 @@
+# Go build artifacts (source + generated gen/ are committed for reproducible offline builds)
+*.test
+/bin/
