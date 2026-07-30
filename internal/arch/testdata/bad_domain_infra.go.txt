@@ -1,0 +1,9 @@
+// Fixture for T-0002 AC1: a module's domain package must never import infrastructure
+// (invariant 16). Kept as .txt so it is not part of the build tree.
+package domain
+
+import (
+	"database/sql"
+)
+
+var _ = sql.ErrNoRows

@@ -1,0 +1,7 @@
+// Fixture for T-0002 AC2: a module may not import another module's internal/* — cross-module
+// traffic goes through the target's api/ package or the in-process bus (invariant 14).
+package app
+
+import (
+	_ "github.com/gitfrok/backend/modules/identity/internal/domain"
+)

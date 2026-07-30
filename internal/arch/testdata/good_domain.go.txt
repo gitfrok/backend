@@ -1,0 +1,17 @@
+// Fixture guarding against false positives: a domain package using only the standard library and
+// its own module's internal packages must produce no violations.
+package domain
+
+import (
+	"errors"
+	"time"
+
+	_ "github.com/gitfrok/backend/modules/repository/internal/domain"
+)
+
+var ErrNotFound = errors.New("not found")
+
+type Ref struct {
+	Name      string
+	UpdatedAt time.Time
+}
