@@ -1,0 +1,18 @@
+// Fixture guarding against false positives: a legitimate api/ package exposes only domain-shaped
+// types and standard library values, and must produce no violations.
+package api
+
+import (
+	"context"
+	"time"
+)
+
+type Repo struct {
+	ID        string
+	Name      string
+	CreatedAt time.Time
+}
+
+type Reader interface {
+	Get(ctx context.Context, id string) (Repo, error)
+}

@@ -1,0 +1,47 @@
+# T-0002 AC5: the boundary/arch fitness functions run on every PR and block merge on violation.
+# Invariants 14–18/20 are enforced here, not by review discipline (ADR-0022, ADR-0025).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build + vet + arch gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Floor comes from go.mod (ADR-0023 pins Go 1.26); keep the two in step.
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # The boundary gate. internal/arch scans the real tree AND proves each forbidden edge is
+      # caught by a fixture, so the gate cannot pass vacuously.
+      - name: architecture boundary gates
+        run: go test ./internal/arch/... -v
+
+      - name: go test
+        run: go test ./...

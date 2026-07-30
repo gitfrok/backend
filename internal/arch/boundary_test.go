@@ -19,7 +19,8 @@ func repoRoot(t *testing.T) string {
 }
 
 // TestNoBoundaryViolations is the fitness function: the real backend tree must contain no
-// cross-module internal imports and no infra imports inside domain (invariants 14, 16).
+// cross-module internal imports, no infra imports inside domain, and no infra imports on a
+// module's api/ surface (invariants 14, 16, 20).
 func TestNoBoundaryViolations(t *testing.T) {
 	root := repoRoot(t)
 	fset := token.NewFileSet()
@@ -53,36 +54,98 @@ func TestNoBoundaryViolations(t *testing.T) {
 	}
 }
 
-// TestFixtureIsRejected proves the checker actually fails on a reverse/forbidden edge — a
-// domain file that imports another module's internal AND pulls in infrastructure. Without
-// this, a broken checker would pass TestNoBoundaryViolations vacuously.
-func TestFixtureIsRejected(t *testing.T) {
-	content, err := os.ReadFile(filepath.Join("testdata", "bad_repository_domain.go.txt"))
+// placeFixture writes a testdata fixture at relDir under a temp tree and returns its path, so a
+// forbidden edge is checked through exactly the same code path as real source.
+func placeFixture(t *testing.T, fixture, relDir string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join("testdata", fixture))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Place the fixture at a realistic module-domain path so both rules can fire.
-	dir := filepath.Join(t.TempDir(), "modules", "repository", "internal", "domain")
+	dir := filepath.Join(t.TempDir(), filepath.FromSlash(relDir))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	file := filepath.Join(dir, "bad.go")
+	file := filepath.Join(dir, "fixture.go")
 	if err := os.WriteFile(file, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return file
+}
 
-	vs, err := Scan(token.NewFileSet(), file)
-	if err != nil {
-		t.Fatal(err)
+// TestForbiddenEdgesAreRejected is the reverse test for T-0002 AC1, AC2 and AC4: each fixture
+// deliberately violates one rule and must be caught. Without these the tree scan above would pass
+// vacuously if the checker were broken.
+func TestForbiddenEdgesAreRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		fixture string
+		relDir  string
+		want    string
+	}{
+		{
+			name:    "AC1 domain imports infra",
+			fixture: "bad_domain_infra.go.txt",
+			relDir:  "modules/repository/internal/domain",
+			want:    RuleDomainImportsInfra,
+		},
+		{
+			name:    "AC2 module imports another module's internal",
+			fixture: "bad_cross_module_internal.go.txt",
+			relDir:  "modules/repository/internal/app",
+			want:    RuleCrossModuleInternal,
+		},
+		{
+			name:    "AC4 api package imports infra",
+			fixture: "bad_api_infra.go.txt",
+			relDir:  "modules/repository/api",
+			want:    RuleAPIExposesInfra,
+		},
 	}
-	rules := map[string]bool{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file := placeFixture(t, tc.fixture, tc.relDir)
+			vs, err := Scan(token.NewFileSet(), file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasRule(vs, tc.want) {
+				t.Errorf("expected rule %q to fire, got %v", tc.want, vs)
+			}
+		})
+	}
+}
+
+// TestLegitimateCodeIsAccepted guards against a checker so blunt it blocks correct code: an api/
+// package over standard-library types, and a domain package importing its own module's internal.
+func TestLegitimateCodeIsAccepted(t *testing.T) {
+	cases := []struct {
+		name    string
+		fixture string
+		relDir  string
+	}{
+		{"clean api surface", "good_api.go.txt", "modules/repository/api"},
+		{"domain using own module internal", "good_domain.go.txt", "modules/repository/internal/domain"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file := placeFixture(t, tc.fixture, tc.relDir)
+			vs, err := Scan(token.NewFileSet(), file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(vs) != 0 {
+				t.Errorf("expected no violations, got %v", vs)
+			}
+		})
+	}
+}
+
+func hasRule(vs []Violation, rule string) bool {
 	for _, v := range vs {
-		rules[v.Rule] = true
+		if v.Rule == rule {
+			return true
+		}
 	}
-	if !rules["cross-module-internal-import"] {
-		t.Error("expected cross-module-internal-import violation, got none")
-	}
-	if !rules["domain-imports-infra"] {
-		t.Error("expected domain-imports-infra violation, got none")
-	}
+	return false
 }

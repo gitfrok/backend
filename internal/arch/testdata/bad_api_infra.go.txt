@@ -1,0 +1,12 @@
+// Fixture for T-0002 AC4: a module's api/ package must expose no infrastructure types, so it
+// must not import infrastructure at all (invariant 20, ADR-0026 extraction-readiness).
+package api
+
+import (
+	"github.com/jackc/pgx/v5"
+)
+
+// Reader leaks a pg type across the module boundary — exactly what AC4 forbids.
+type Reader interface {
+	Load(tx pgx.Tx, id string) error
+}
