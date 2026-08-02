@@ -7,9 +7,19 @@ and `../governance/docs/` **first**; obey invariants 1–25.
 `modules/<ctx>/{api,internal/{domain,app,adapters}}`, `cmd/{dataplane-app,controlplane-app}`,
 `platform/{ids,bus,telemetry}`, plus `git-storaged`, the `agent`, and the `operator`.
 
+## Module layout
+Each `modules/<ctx>/` has three importable levels:
+- `api/` — the public in-process surface. Plain data + ports, no infra types (invariant 20).
+- `module.go` (package `<ctx>`) — the **composition root**. It assembles the internals and returns
+  `api/` interfaces. It exists because Go's `internal/` rule stops `cmd/` from naming an internal
+  type, so without it "wire in `cmd/`" (ADR-0025) is not expressible. One constructor per adapter
+  choice; `cmd/` picks one and passes the infrastructure it needs.
+- `internal/{domain,app,adapters}` — everything else; unimportable from outside the module.
+
 ## Strict
 - **Modular monolith** (ADR-0025): one binary per plane; cross-module only via `api/` or the
   in-process bus; **never** import another module's `internal/*` (Go `internal/` enforces it).
+- Cross-module wiring lives in `cmd/`, never in a module. A module never constructs another.
 - Each module **owns its schema**; no cross-module DB access. Prefer events over sync.
 - `domain` imports no infra. All authZ via the **PDP**; every query **tenant-scoped** + RLS.
 - gRPC/events must match `../governance/contracts/` (additive-only, changed in governance first).

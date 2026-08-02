@@ -43,5 +43,7 @@ jobs:
       - name: architecture boundary gates
         run: go test ./internal/arch/... -v
 
+      # -race matters here: the in-process bus (T-0008) is shared by every module in a plane
+      # binary, and its concurrency test is close to vacuous without the detector.
       - name: go test
-        run: go test ./...
+        run: go test -race ./...
