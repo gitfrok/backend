@@ -20,10 +20,15 @@ import (
 
 // Budgets are the thresholds a trigger signal is compared against.
 //
-// PROVISIONAL. ADR-0026 trigger 4 says the monolith's build/test time crosses "an agreed budget"
-// without stating one, and agreeing it is a decision, not an implementation detail (invariant 12).
-// These values are proposed in ADR-0030 and are not yet Accepted; they are set where they would
-// catch a real regression today without firing on ordinary growth. Change them there, not here.
+// The values come from ADR-0030 (Accepted) — the "agreed budget" ADR-0026 trigger 4 refers to and
+// never stated. They are set where they catch a real regression without firing on ordinary growth,
+// and ADR-0030 schedules a revisit at Phase-1 exit, when the monolith holds the git plane rather
+// than two modules.
+//
+// Raising one is a decision, not a fix: change ADR-0030 first, then these. A breach means the
+// build is past its budget or a boundary is in the wrong place; the answer may legitimately be
+// "make it faster" rather than "extract something", and under BYO each extraction adds a pod to
+// the customer's cluster (G8).
 type Budgets struct {
 	// MonolithBuildSeconds bounds a cold `go build` of the product packages. Crossing it means
 	// the binary has grown past what one build can serve — ADR-0026 trigger 4.
@@ -36,7 +41,7 @@ type Budgets struct {
 	ModuleFanOut int
 }
 
-// DefaultBudgets are the provisional thresholds described above.
+// DefaultBudgets are the ADR-0030 thresholds described above.
 func DefaultBudgets() Budgets {
 	return Budgets{
 		MonolithBuildSeconds: 120,
