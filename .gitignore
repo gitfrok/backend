@@ -1,3 +1,7 @@
 # Go build artifacts (source + generated gen/ are committed for reproducible offline builds)
 *.test
 /bin/
+
+# ADR-0026 extraction-trigger report (T-0009). A measurement of this machine, not source;
+# CI keeps it as a build artifact so the trend is readable across runs.
+/arch-report.json
