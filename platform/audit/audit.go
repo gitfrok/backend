@@ -10,19 +10,28 @@
 // published and dropped. That is deliberate: the emission point is the part that must live at the
 // place the violation is detected, and retrofitting it later means auditing the code paths again.
 //
-// CONSEQUENCE OF THAT: EventName below is a *provisional* routing key. Every other event in this
-// repo mirrors a protobuf full name in contracts/events and is held to it by a parity test
-// (see modules/repository/api/events_contract_test.go). This one cannot be, because the contract
-// does not exist yet. T-0006 must either adopt this name additively or change it — and since
-// nothing subscribes, changing it costs nothing today and considerably more later.
+// RESOLVED BY T-0006: the routing key is no longer provisional. contracts/events/audit/v1 now
+// defines a single generic AuditEvent, so this event's name is that message's full name and the
+// specific case is carried in `action`. T-0004 flagged the rename as free while nothing subscribed;
+// this is that rename, made on exactly those terms.
 package audit
 
 import "time"
 
-// EventTenantIsolationViolation is the routing key for a rejected cross-tenant access attempt.
+// EventAudit is the routing key: the protobuf full name of the contracts/events message, matching
+// how every other event in this repo is keyed.
+const EventAudit = "gitsaas.events.audit.v1.AuditEvent"
+
+// ActionTenantIsolationViolation is the `action` value for a write refused by row-level security.
+// The dotted vocabulary lives in the contract's comment; adding one is additive by construction.
+const ActionTenantIsolationViolation = "tenant.isolation.violation"
+
+// EventTenantIsolationViolation is retained as a deprecated alias for one release so that anything
+// still keying off T-0004's provisional name fails loudly at compile time rather than silently
+// subscribing to a topic nothing publishes.
 //
-// PROVISIONAL — see the package comment. T-0006 owns the real contracts/events name.
-const EventTenantIsolationViolation = "gitsaas.events.audit.v1.TenantIsolationViolation"
+// Deprecated: use EventAudit with ActionTenantIsolationViolation.
+const EventTenantIsolationViolation = EventAudit
 
 // TenantIsolationViolation records that a request scoped to one tenant tried to write outside that
 // scope and the database refused it.
@@ -47,8 +56,11 @@ type TenantIsolationViolation struct {
 	OccurredAt time.Time
 }
 
-// EventName is the routing key. See the package comment on why this one is provisional.
-func (TenantIsolationViolation) EventName() string { return EventTenantIsolationViolation }
+// EventName is the routing key — the contract's message full name (T-0006).
+func (TenantIsolationViolation) EventName() string { return EventAudit }
+
+// Action is the dotted action this event records, carried in the contract's `action` field.
+func (TenantIsolationViolation) Action() string { return ActionTenantIsolationViolation }
 
 // Tenant reports the scope the attempt was made under. The bus refuses an event without one
 // (invariant 1), which is also why this cannot be emitted for an unscoped request — there is no

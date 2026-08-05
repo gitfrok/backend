@@ -256,7 +256,7 @@ func TestAC3_RejectedCrossTenantWriteEmitsAnAuditEvent(t *testing.T) {
 
 	b := bus.NewInProcess()
 	var got []bus.Event
-	b.Subscribe(audit.EventTenantIsolationViolation, func(_ context.Context, e bus.Event) error {
+	b.Subscribe(audit.EventAudit, func(_ context.Context, e bus.Event) error {
 		got = append(got, e)
 		return nil
 	})
