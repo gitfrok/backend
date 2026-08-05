@@ -10,6 +10,6 @@ import (
 func main() {
 	// The CP terminates the agent gateway stream (agent.proto); referenced to keep the
 	// contract wired into the plane from commit one.
-	_ = agentv1.Cloud_GKE
+	_ = agentv1.Cloud_CLOUD_GKE
 	fmt.Println("gitfrok controlplane-app: baseline (T-0001)")
 }
