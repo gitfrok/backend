@@ -44,7 +44,7 @@ func main() {
 	dp := newDataplane()
 	// Compile-time proof that the generated contracts compose into this plane alongside the
 	// modules; the agent gateway itself is wired in Phase 3.
-	_ = agentv1.HealthState_HEALTHY
+	_ = agentv1.HealthState_HEALTH_STATE_HEALTHY
 	_ = dp
 	fmt.Println("gitfrok dataplane-app: repository + codesearch wired on the in-process bus (T-0008)")
 }
