@@ -1,0 +1,7 @@
+CREATE TABLE repo.leaky (
+  id   TEXT PRIMARY KEY,
+  name TEXT NOT NULL
+);
+ALTER TABLE repo.leaky ENABLE ROW LEVEL SECURITY;
+ALTER TABLE repo.leaky FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON repo.leaky FOR ALL USING (true);
