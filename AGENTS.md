@@ -21,7 +21,10 @@ Each `modules/<ctx>/` has three importable levels:
   in-process bus; **never** import another module's `internal/*` (Go `internal/` enforces it).
 - Cross-module wiring lives in `cmd/`, never in a module. A module never constructs another.
 - Each module **owns its schema**; no cross-module DB access. Prefer events over sync.
-- `domain` imports no infra. All authZ via the **PDP**; every query **tenant-scoped** + RLS.
+- `domain` imports no infra. All authZ via the **PDP** — `modules/policy/api.DecisionPoint`, never
+  an inline check (invariant 2; the `inline-permission-check` fitness function fails the build, with
+  a `//arch:allow-inline-authz <reason>` waiver for the rare false positive). The rules themselves
+  live in `../governance/policies` and are changed there. Every query **tenant-scoped** + RLS.
 - gRPC/events must match `../governance/contracts/` (additive-only, changed in governance first).
 - **TDD**: failing tests from the spec's acceptance criteria before code.
 - Do not expose infra types in a module's `api/` (fitness-checked — T-0009).

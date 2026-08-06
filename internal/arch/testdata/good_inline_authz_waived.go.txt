@@ -1,0 +1,11 @@
+package fixture
+
+// The escape hatch, used as intended: this is a display label, not a decision. A heuristic with no
+// waiver gets deleted the first time it misfires, and a deleted gate protects nothing.
+func roleLabel(role string) string {
+	//arch:allow-inline-authz formatting a label for display, decides no access
+	if role == "owner" {
+		return "Owner"
+	}
+	return role
+}

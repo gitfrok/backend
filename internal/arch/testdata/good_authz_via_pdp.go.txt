@@ -1,0 +1,17 @@
+package fixture
+
+import "context"
+
+// The sanctioned shape: ask the PDP and act on the answer. It names no role and decides nothing,
+// which is why it must not trip the rule — otherwise the gate would penalise the correct code.
+type decisionPoint interface {
+	Decide(ctx context.Context, action string) (bool, error)
+}
+
+func readRepo(ctx context.Context, pdp decisionPoint) error {
+	allowed, err := pdp.Decide(ctx, "repo.read")
+	if err != nil || !allowed {
+		return errDenied
+	}
+	return nil
+}

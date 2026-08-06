@@ -8,25 +8,46 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
 	"github.com/gitfrok/backend/modules/codesearch"
 	csapi "github.com/gitfrok/backend/modules/codesearch/api"
+	"github.com/gitfrok/backend/modules/policy"
+	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/repository"
 	repoapi "github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/platform/bus"
 )
+
+// policyBundleDirEnv names the directory holding the OPA bundle from governance/policies.
+//
+// Per-environment configuration, never a compiled-in path (invariant 13): in dev it is a mount of
+// the governance checkout, in a cluster it is whatever the deployment puts there. The backend does
+// not embed the bundle, because a copy of the rules inside this binary would be a second source of
+// truth for something governance owns (invariant 21).
+const policyBundleDirEnv = "GITFROK_POLICY_BUNDLE_DIR"
 
 // dataplane is the composed plane: every context, held by its api/ port.
 type dataplane struct {
 	bus          *bus.InProcess
 	repositories repoapi.Repositories
 	searchIndex  csapi.Index
+	policy       policyapi.DecisionPoint
 }
 
-// newDataplane wires the plane. Concrete implementations are chosen here and injected; the fields
-// are the api/ interfaces, so nothing downstream can depend on which implementation it got.
-func newDataplane() *dataplane {
+// newDataplane wires the plane. Concrete implementations are chosen in main and injected here; the
+// fields are the api/ interfaces, so nothing downstream can depend on which implementation it got.
+//
+// The PDP is a parameter rather than something this function builds, because building it needs
+// configuration and can fail — and because it makes the dependency impossible to forget. There is
+// no "without a PDP" plane: a nil one would mean authorization silently had no answer, so it is
+// refused here rather than discovered on the first protected request.
+func newDataplane(pdp policyapi.DecisionPoint) *dataplane {
+	if pdp == nil {
+		panic("dataplane: no PDP — every protected action needs a decision (invariant 2)")
+	}
+
 	b := bus.NewInProcess()
 
 	// Repository context, on the in-memory adapter until the Postgres one lands with the tenancy
@@ -37,14 +58,36 @@ func newDataplane() *dataplane {
 	// against — the only two in-process routes a module may take (invariant 14).
 	searchIndex := codesearch.New(b, repositories)
 
-	return &dataplane{bus: b, repositories: repositories, searchIndex: searchIndex}
+	return &dataplane{bus: b, repositories: repositories, searchIndex: searchIndex, policy: pdp}
 }
 
 func main() {
-	dp := newDataplane()
+	bundleDir := os.Getenv(policyBundleDirEnv)
+	if bundleDir == "" {
+		fmt.Fprintf(os.Stderr, "%s is not set: the plane has no policy bundle and every "+
+			"authorization decision would be unanswerable (ADR-0006, invariant 2)\n", policyBundleDirEnv)
+		os.Exit(1)
+	}
+
+	// The bus the PDP audits its refusals to. It is the same bus the plane runs on, built here
+	// and handed to newDataplane below — one process, one bus.
+	b := bus.NewInProcess()
+
+	// Fail the rollout, not the requests. A plane that starts with an unusable bundle denies
+	// everything, which reaches an operator as an unexplained total outage rather than as a
+	// deployment that refused to come up and said why.
+	pdp, err := policy.NewOPADecisionPoint(bundleDir, b)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "policy bundle at %s is unusable: %v\n", bundleDir, err)
+		os.Exit(1)
+	}
+
+	dp := newDataplane(pdp)
 	// Compile-time proof that the generated contracts compose into this plane alongside the
 	// modules; the agent gateway itself is wired in Phase 3.
 	_ = agentv1.HealthState_HEALTH_STATE_HEALTHY
-	_ = dp
-	fmt.Println("gitfrok dataplane-app: repository + codesearch wired on the in-process bus (T-0008)")
+	// The PDP's gRPC door for out-of-process PEPs (the BFF). Serving it is the transport work
+	// T-0011 owns; constructing it here proves the contract composes with the module.
+	_ = policy.NewGRPCServer(dp.policy)
+	fmt.Printf("gitfrok dataplane-app: repository + codesearch on the in-process bus, PDP on %s\n", bundleDir)
 }

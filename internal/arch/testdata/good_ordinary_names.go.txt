@@ -1,0 +1,12 @@
+package fixture
+
+import "strings"
+
+// Ordinary Go that must not trip the rule. Every one of these starts with an authorization verb
+// and continues into something that has nothing to do with permission — if the gate fired on these
+// it would be waived everywhere within a week, which is the same as being switched off.
+func hasPrefix(s string) bool  { return strings.HasPrefix(s, "x") }
+func canRetry(n int) bool      { return n < 3 }
+func isReady() bool            { return true }
+func validateName(s string) error { return nil }
+func checkSum(b []byte) int    { return len(b) }

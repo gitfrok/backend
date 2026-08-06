@@ -1,0 +1,4 @@
+{
+  "revision": "test-bundle-no-decision",
+  "roots": ["gitsaas"]
+}

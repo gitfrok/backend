@@ -1,0 +1,14 @@
+package fixture
+
+// A function named for an authorization question. Whatever its body does, the name says this code
+// decides whether something is permitted — and that decision belongs to the PDP (invariant 2).
+type user struct{ roles []string }
+
+func hasPermission(u user, action string) bool {
+	for _, r := range u.roles {
+		if r == action {
+			return true
+		}
+	}
+	return false
+}
