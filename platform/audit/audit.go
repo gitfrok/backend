@@ -26,6 +26,11 @@ const EventAudit = "gitsaas.events.audit.v1.AuditEvent"
 // The dotted vocabulary lives in the contract's comment; adding one is additive by construction.
 const ActionTenantIsolationViolation = "tenant.isolation.violation"
 
+// ActionPolicyDecisionDenied is the `action` value for a request the PDP refused (T-0005,
+// SPEC-0002's G5 mapping). Adding it needed no contracts change, which is the property the generic
+// AuditEvent with a string `action` was chosen for.
+const ActionPolicyDecisionDenied = "policy.decision.denied"
+
 // EventTenantIsolationViolation is retained as a deprecated alias for one release so that anything
 // still keying off T-0004's provisional name fails loudly at compile time rather than silently
 // subscribing to a topic nothing publishes.
@@ -66,3 +71,45 @@ func (TenantIsolationViolation) Action() string { return ActionTenantIsolationVi
 // (invariant 1), which is also why this cannot be emitted for an unscoped request — there is no
 // tenant to attribute it to, and such a request is denied before it reaches the database anyway.
 func (v TenantIsolationViolation) Tenant() string { return v.TenantID }
+
+// PolicyDecisionDenied records that the PDP refused an action (ADR-0006, SPEC-0002 G5 mapping).
+//
+// Only denials are recorded. Auditing every allow would put a write on the hot path of every
+// authorized request and bury the refusals — and refusals are what an investigation looks for, the
+// same reason the audit contract calls them "the more interesting half". A record of everything
+// that was permitted is the request log's job, not the audit trail's.
+//
+// It carries no policy text and no rule name. The reason a caller is given is deliberately coarse
+// (see contracts/proto/policy/v1), and an audit event that named the failing rule would reintroduce
+// through the trail exactly the oracle the coarse reason exists to close — audit readers are
+// investigators, but events flow to exports and dashboards where the audience is wider.
+type PolicyDecisionDenied struct {
+	// TenantID is the scope the request was made under.
+	TenantID string
+	// ActorID is the subject that was refused; empty for an anonymous caller, which is a
+	// legitimate thing to be refused.
+	ActorID string
+	// DeniedAction is the dotted action that was refused, e.g. "repo.read". Named to leave the
+	// Action method — which reports this event's own audit action — unambiguous.
+	DeniedAction string
+	// Resource is the opaque identifier acted on, never its contents.
+	Resource string
+	// DecisionID correlates this event with the decision the PDP returned to the caller, so a
+	// support question about one denial is answerable without a timestamp search.
+	DecisionID string
+	// PolicyRevision is the bundle revision that produced the refusal. Without it a denial cannot
+	// be reproduced later: the rules will have moved on, and "it was denied under the rules of the
+	// day" is the only defensible answer to an audit question about a past decision.
+	PolicyRevision string
+	// OccurredAt is when the decision was made.
+	OccurredAt time.Time
+}
+
+// EventName is the routing key — the contract's message full name, as for every audit event.
+func (PolicyDecisionDenied) EventName() string { return EventAudit }
+
+// Action is the dotted action this event records, carried in the contract's `action` field.
+func (PolicyDecisionDenied) Action() string { return ActionPolicyDecisionDenied }
+
+// Tenant reports the scope the refusal happened under; the bus refuses an event without one.
+func (e PolicyDecisionDenied) Tenant() string { return e.TenantID }

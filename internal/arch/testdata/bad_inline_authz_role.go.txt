@@ -1,0 +1,7 @@
+package fixture
+
+// A comparison against a role literal: the grant table in governance/policies, reimplemented in Go
+// one branch at a time. This is the shape that grows quietly — one privileged case, then another.
+func canDelete(role string) bool {
+	return role == "owner"
+}
