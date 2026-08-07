@@ -15,9 +15,9 @@ jobs:
     name: build + vet + arch gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Floor comes from go.mod (ADR-0023 pins Go 1.26); keep the two in step.
           go-version-file: go.mod
@@ -48,7 +48,7 @@ jobs:
       # fails the step above, and that is exactly the run whose numbers someone needs to read.
       - name: extraction-trigger report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: arch-report
           path: arch-report.json
