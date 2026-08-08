@@ -32,10 +32,12 @@
 set -euo pipefail
 
 # Submodule-boundary detection lives next door, shared with the dispatch hook (SPEC-0013 AC8).
-_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-submodule-scope.sh"
-[ -f "$_lib" ] || { echo "ceremony: missing $_lib" >&2; exit 3; }
-# shellcheck source=/dev/null
-. "$_lib"
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _lib in lib-submodule-scope.sh lib-pr-declaration.sh; do
+  [ -f "$_here/$_lib" ] || { echo "ceremony: missing $_here/$_lib" >&2; exit 3; }
+  # shellcheck source=/dev/null
+  . "$_here/$_lib"
+done
 
 base=${CEREMONY_BASE:-origin/main}
 
@@ -47,7 +49,10 @@ fi
 
 # Absence is not a waiver — no declaration means full, which requires everything.
 tier=full
-declared=$(printf '%s\n' "$body" | sed -n 's/^[[:space:]]*Ceremony:[[:space:]]*\([A-Za-z]*\).*$/\1/p' | head -1)
+# Not a plain grep — a PR body documents this syntax and the example must not win. See
+# lib-pr-declaration.sh.
+declared=$(printf '%s\n' "$body" | pr_declaration Ceremony)
+declared=${declared%% *}
 case "$declared" in
   full|quick|bugfix) tier=$declared ;;
   '') ;;

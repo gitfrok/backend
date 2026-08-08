@@ -74,3 +74,15 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           CEREMONY_BASE: origin/${{ github.base_ref }}
+
+      # SPEC-0013: the pre-commit scope hook is skipped by --no-verify, so the boundary only binds
+      # if CI checks the pushed diff too. Invariant 23 is asserted unconditionally here — the
+      # ceremony gate above only reaches its span check under the `bugfix` tier, which left a
+      # `full`-tier PR spanning two submodules unchecked. The path half is opt-in via a `Scope:`
+      # line in the PR body and says so when absent.
+      - name: dispatch scope
+        if: github.event_name == 'pull_request'
+        run: ./scripts/check-dispatch-scope.sh
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          SCOPE_BASE: origin/${{ github.base_ref }}
