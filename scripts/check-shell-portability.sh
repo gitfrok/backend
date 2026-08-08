@@ -58,8 +58,15 @@ else
   parse_bash=$(command -v bash || true)
 fi
 
-[ -n "$parse_bash" ] && [ -x "$parse_bash" ] || {
-  echo "portability: no usable bash at '${parse_bash:-<unset>}'" >&2; exit 3; }
+# Spelled as a plain `if` rather than `A && B || C`: shellcheck's SC2015 is right that the two are
+# not the same thing, and this repo's five lanes do not all run the same shellcheck version — the
+# super-repo and governance pin 0.11.0, webfrontend uses the runner's preinstalled copy, and only
+# the older one reported it. A construct that is fine under one linter and not another is not worth
+# defending.
+if [ -z "$parse_bash" ] || [ ! -x "$parse_bash" ]; then
+  echo "portability: no usable bash at '${parse_bash:-<unset>}'" >&2
+  exit 3
+fi
 
 fail=0
 report() { echo "PORTABILITY VIOLATION: $1"; fail=1; }
