@@ -25,8 +25,12 @@ spanned_submodules() {
 
     while IFS= read -r sub; do
         [ -n "$sub" ] || continue
-        # `^sub$` catches the gitlink itself — a pointer bump — and `^sub/` catches a file inside it.
-        if printf '%s\n' "$paths" | grep -q "^${sub}\$\|^${sub}/"; then
+        # ONLY `^sub/` — a file inside the submodule. A bare `^sub$` is the gitlink itself, which
+        # means a pin bump, and a pin bump is not a boundary violation: ADR-0027 rule 5 requires the
+        # super-repo to move pointers, and moving four at once is the normal shape of a cross-repo
+        # change landing. Counting those as a span made this gate reject the very workflow its own
+        # error message tells you to follow.
+        if printf '%s\n' "$paths" | grep -q "^${sub}/"; then
             printf '%s\n' "$sub"
         fi
     done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}')
