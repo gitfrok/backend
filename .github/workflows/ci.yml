@@ -86,3 +86,28 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           SCOPE_BASE: origin/${{ github.base_ref }}
+
+      # SPEC-0014 AC8: the flag audit binds on the Linux lane too, so a contributor with no Mac finds
+      # a GNU-only construct here rather than on the macOS one. The userland assertion does not apply
+      # on this OS and the gate says so on its own output line rather than passing silently.
+      - name: shell portability audit
+        run: ./scripts/check-shell-portability.sh
+
+  # SPEC-0014, T-0003 AC4. "Works on macOS and Linux" had never been run on macOS; what stood in for
+  # it was a bash:3.2 container that is Alpine plus busybox, with no lineage to Darwin. This is the
+  # real thing, and it is free because the repo is public.
+  #
+  # A SEPARATE JOB, WHICH MEANS A SEPARATE REQUIRED-CHECK CONTEXT. This job's name is registered
+  # alongside the one above by the super-repo's scripts/apply-rulesets.sh; until `make
+  # rulesets-apply` runs, this lane reports and does not block. Named here rather than found later.
+  portability:
+    name: macOS portability
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Part 3 of the gate asserts the bash and the userland before anything else runs, so a runner
+      # image that put Homebrew's GNU coreutils ahead of /usr/bin fails loudly here instead of
+      # quietly turning this lane into a second Linux one.
+      - name: shell portability gate
+        run: ./scripts/check-shell-portability.sh
