@@ -54,13 +54,19 @@ if [ -n "$want_paths" ]; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     matched=0
-    # Word-split on purpose: `paths` is a space-separated glob list, and each needs to be a pattern
-    # rather than a literal.
+    # `set -f` is load-bearing. Unquoted $want_paths needs word-splitting — the list is
+    # space-separated — but WITHOUT it bash also does pathname expansion, so a glob like `.github/**`
+    # is replaced by whatever files happen to exist before it is ever used as a pattern. That is not
+    # theoretical: the CI-side twin of this loop rejected `.github/workflows/ci.yml` against a scope
+    # that plainly covered it, and the first tests passed only because their fixtures expanded to
+    # exactly the file under test.
+    set -f
     # shellcheck disable=SC2086
     for glob in $want_paths; do
       # shellcheck disable=SC2254
       case "$f" in $glob) matched=1; break ;; esac
     done
+    set +f
     [ "$matched" -eq 1 ] || report "$f is outside the declared scope: $want_paths"
   done <<<"$staged"
 fi
