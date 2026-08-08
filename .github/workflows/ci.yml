@@ -15,7 +15,12 @@ jobs:
     name: build + vet + arch gates
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 so the ceremony gate below can diff against the base branch. With the
+      # default depth of 1 there is no merge base and the gate exits 3 rather than passing
+      # quietly — a shallow clone is exactly the case SPEC-0012 AC6 refuses to wave through.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v7
         with:
@@ -58,3 +63,14 @@ jobs:
       # binary, and its concurrency test is close to vacuous without the detector.
       - name: go test
         run: go test -race ./...
+
+      # SPEC-0012: the ceremony tier a PR declares must match what its diff does. Only meaningful
+      # on a pull request — a push to main carries no declaration, and inventing one is not the
+      # gate's business. The script is generated from governance canonical/agent-surfaces/
+      # (ADR-0037); never hand-edit it, and `make surfaces-check` in the composition fails on drift.
+      - name: ceremony tier
+        if: github.event_name == 'pull_request'
+        run: ./scripts/check-ceremony-tier.sh
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          CEREMONY_BASE: origin/${{ github.base_ref }}
