@@ -31,6 +31,12 @@
 # Exit: 0 the declared tier holds · 1 it does not · 3 the diff could not be determined
 set -euo pipefail
 
+# Submodule-boundary detection lives next door, shared with the dispatch hook (SPEC-0013 AC8).
+_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib-submodule-scope.sh"
+[ -f "$_lib" ] || { echo "ceremony: missing $_lib" >&2; exit 3; }
+# shellcheck source=/dev/null
+. "$_lib"
+
 base=${CEREMONY_BASE:-origin/main}
 
 body=${PR_BODY:-}
@@ -101,21 +107,11 @@ case "$tier" in
       report "'bugfix' waives the spec because the failing test is the spec — this diff adds no test"
     fi
 
-    # Only meaningful in the composition; a submodule's own diff cannot span two of them.
-    if [ -f .gitmodules ]; then
-      subs=$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | awk '{print $2}')
-      touched=0
-      hits=""
-      while IFS= read -r s; do
-        [ -n "$s" ] || continue
-        if printf '%s\n' "$changed" | grep -q "^${s}\$\|^${s}/"; then
-          touched=$((touched + 1))
-          hits="$hits $s"
-        fi
-      done <<<"$subs"
-      if [ "$touched" -gt 1 ]; then
-        report "this diff spans${hits} — invariant 23, one commit never spans two submodules"
-      fi
+    # Only meaningful in the composition; a submodule's own diff cannot span two of them. The
+    # detection is shared with the dispatch pre-commit hook (SPEC-0013) rather than copied.
+    spanned=$(printf '%s\n' "$changed" | spanned_submodules)
+    if [ "$(printf '%s\n' "$spanned" | grep -c .)" -gt 1 ]; then
+      report "this diff spans $(printf '%s\n' "$spanned" | tr '\n' ' ')— invariant 23, one commit never spans two submodules"
     fi
     ;;
 esac
