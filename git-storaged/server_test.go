@@ -148,6 +148,28 @@ func TestUploadPackWrongTenantIsUnavailableAndNeverStartsGit(t *testing.T) {
 	}
 }
 
+// SPEC-0016 AC3 / ADR-0041: front doors authenticate, but git-storaged makes
+// the authorization decision. The verified role set must therefore survive
+// the internal operation context and become the PDP subject, never an allow
+// assertion supplied by a client.
+func TestPreparePassesVerifiedActorRolesToPDP(t *testing.T) {
+	root, tenantID, repositoryID, _ := seededRepository(t)
+	pdp := &recordingPDP{decision: policyapi.Decision{Allowed: true}}
+	server, err := NewServer(Config{RepositoryRoot: root, PDP: pdp, Events: bus.NewInProcess()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = server.prepare(context.Background(), &gitv1.OperationContext{
+		TenantId: tenantID, RepositoryId: repositoryID, ActorId: "actor-a", RequestId: "request-1", ActorRoles: []string{"owner", "member"},
+	}, "repo.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pdp.request.Subject.Roles; len(got) != 2 || got[0] != "owner" || got[1] != "member" {
+		t.Fatalf("PDP subject roles = %v, want [owner member]", got)
+	}
+}
+
 func TestReceivePackPublishesRefUpdated(t *testing.T) {
 	root := t.TempDir()
 	tenantID, repositoryID := "tenant-a", "repo-a"
@@ -226,6 +248,16 @@ type allowPDP struct{}
 
 func (allowPDP) Decide(context.Context, policyapi.Request) (policyapi.Decision, error) {
 	return policyapi.Decision{Allowed: true}, nil
+}
+
+type recordingPDP struct {
+	decision policyapi.Decision
+	request  policyapi.Request
+}
+
+func (p *recordingPDP) Decide(_ context.Context, request policyapi.Request) (policyapi.Decision, error) {
+	p.request = request
+	return p.decision, nil
 }
 
 type fuseMount struct{}
