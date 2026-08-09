@@ -44,3 +44,19 @@ func TestSSHKeyAuthenticatesToSamePrincipalShape(t *testing.T) {
 		t.Fatal("unknown key authenticated")
 	}
 }
+
+func TestListPATsIsTenantAndActorScoped(t *testing.T) {
+	s := NewService([]byte("test-key"))
+	if _, _, err := s.IssuePAT("tenant-a", "actor-a", "a", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.IssuePAT("tenant-b", "actor-b", "b", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ListPATs("tenant-a", "actor-a"); len(got) != 1 || got[0].TenantID != "tenant-a" {
+		t.Fatalf("got=%+v", got)
+	}
+	if got := s.ListPATs("tenant-a", "actor-b"); len(got) != 0 {
+		t.Fatalf("cross actor got=%+v", got)
+	}
+}
