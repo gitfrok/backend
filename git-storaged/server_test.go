@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -160,13 +161,13 @@ func TestPreparePassesVerifiedActorRolesToPDP(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = server.prepare(context.Background(), &gitv1.OperationContext{
-		TenantId: tenantID, RepositoryId: repositoryID, ActorId: "actor-a", RequestId: "request-1", ActorRoles: []string{"owner", "member"},
+		TenantId: tenantID, RepositoryId: repositoryID, ActorId: "actor-a", RequestId: "request-1", ActorRoles: []string{"test-a", "test-b"},
 	}, "repo.read")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := pdp.request.Subject.Roles; len(got) != 2 || got[0] != "owner" || got[1] != "member" {
-		t.Fatalf("PDP subject roles = %v, want [owner member]", got)
+	if got, want := pdp.request.Subject.Roles, []string{"test-a", "test-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("PDP subject roles = %v, want %v", got, want)
 	}
 }
 
