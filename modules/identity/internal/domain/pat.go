@@ -19,14 +19,15 @@ type PAT struct {
 	Revoked                                bool
 }
 type Service struct {
-	mu   sync.RWMutex
-	key  []byte
-	pats map[string]*PAT
-	keys map[string]Principal
+	mu         sync.RWMutex
+	key        []byte
+	pats       map[string]*PAT
+	byVerifier map[string]string
+	keys       map[string]Principal
 }
 
 func NewService(key []byte) *Service {
-	return &Service{key: append([]byte(nil), key...), pats: map[string]*PAT{}, keys: map[string]Principal{}}
+	return &Service{key: append([]byte(nil), key...), pats: map[string]*PAT{}, byVerifier: map[string]string{}, keys: map[string]Principal{}}
 }
 
 func (s *Service) RegisterSSHKey(publicKey, tenant, actor string, roles []string) error {
@@ -58,15 +59,20 @@ func (s *Service) IssuePAT(tenant, actor, label string, scopes []string) (PAT, s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pats[id] = p
+	s.byVerifier[p.verifier] = id
 	return s.public(*p), token, nil
 }
 func (s *Service) AuthenticatePAT(token string) (Principal, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, p := range s.pats {
-		if !p.Revoked && hmac.Equal([]byte(p.verifier), []byte(s.hash(token))) {
-			return Principal{TenantID: p.TenantID, ActorID: p.ActorID}, true
-		}
+	verifier := s.hash(token)
+	id, found := s.byVerifier[verifier]
+	if !found {
+		return Principal{}, false
+	}
+	p := s.pats[id]
+	if p != nil && !p.Revoked && hmac.Equal([]byte(p.verifier), []byte(verifier)) {
+		return Principal{TenantID: p.TenantID, ActorID: p.ActorID}, true
 	}
 	return Principal{}, false
 }
