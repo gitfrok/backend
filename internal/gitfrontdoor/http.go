@@ -2,6 +2,7 @@ package gitfrontdoor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -30,8 +31,8 @@ func (h SmartHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	handle, service, discovery, ok := smartHTTPPath(r.URL.Path)
-	if !ok || (discovery && (r.Method != http.MethodGet || r.URL.Query().Get("service") != service)) || (!discovery && r.Method != http.MethodPost) {
+	handle, service, discovery, ok := smartHTTPPath(r.URL.Path, r.URL.Query().Get("service"))
+	if !ok || (discovery && r.Method != http.MethodGet) || (!discovery && r.Method != http.MethodPost) {
 		http.NotFound(w, r)
 		return
 	}
@@ -51,8 +52,12 @@ func (h SmartHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if discovery {
-		w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
-		_, _ = io.WriteString(w, "001e# service=git-upload-pack\n0000")
+		w.Header().Set("Content-Type", "application/x-"+service+"-advertisement")
+		_, _ = io.WriteString(w, pktLine("# service="+service+"\n")+"0000")
+		if service == "git-receive-pack" {
+			_ = h.Storage.ReceivePack(r.Context(), operation, strings.NewReader(""), w)
+			return
+		}
 		if err := h.Storage.UploadPack(r.Context(), operation, strings.NewReader(""), w); err != nil {
 			return
 		}
@@ -76,7 +81,7 @@ func httpUnauthorized(w http.ResponseWriter) {
 	http.Error(w, "authentication required", http.StatusUnauthorized)
 }
 
-func smartHTTPPath(path string) (handle, service string, discovery, ok bool) {
+func smartHTTPPath(path, queryService string) (handle, service string, discovery, ok bool) {
 	const prefix = "/git/"
 	if !strings.HasPrefix(path, prefix) {
 		return "", "", false, false
@@ -88,10 +93,18 @@ func smartHTTPPath(path string) (handle, service string, discovery, ok bool) {
 	handle = parts[0] + "/" + parts[1]
 	switch {
 	case len(parts) == 4 && parts[2] == "info" && parts[3] == "refs":
-		return handle, "git-upload-pack", true, true
+		if queryService != "git-upload-pack" && queryService != "git-receive-pack" {
+			return "", "", false, false
+		}
+		return handle, queryService, true, true
 	case len(parts) == 3 && (parts[2] == "git-upload-pack" || parts[2] == "git-receive-pack"):
 		return handle, parts[2], false, true
 	default:
 		return "", "", false, false
 	}
+}
+
+// pktLine length-prefixes one pkt-line payload, per the Git wire protocol.
+func pktLine(payload string) string {
+	return fmt.Sprintf("%04x%s", len(payload)+4, payload)
 }

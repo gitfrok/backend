@@ -372,7 +372,7 @@ func TestGitCommandArgsSelectsTransportFraming(t *testing.T) {
 		{name: "http discovery", binary: "git-upload-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY, want: []string{"--stateless-rpc", "--advertise-refs", "/repos/tenant/repo.git"}, valid: true},
 		{name: "http upload rpc", binary: "git-upload-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC, want: []string{"--stateless-rpc", "/repos/tenant/repo.git"}, valid: true},
 		{name: "http receive rpc", binary: "git-receive-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC, want: []string{"--stateless-rpc", "/repos/tenant/repo.git"}, valid: true},
-		{name: "receive discovery denied", binary: "git-receive-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY},
+		{name: "http receive discovery", binary: "git-receive-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY, want: []string{"--stateless-rpc", "--advertise-refs", "/repos/tenant/repo.git"}, valid: true},
 		{name: "unspecified denied", binary: "git-upload-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_UNSPECIFIED},
 	} {
 		t.Run(test.name, func(t *testing.T) {
