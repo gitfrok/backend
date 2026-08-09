@@ -10,9 +10,11 @@ import (
 )
 
 type fakeAuthenticator struct {
-	principal identityapi.Principal
-	ok        bool
-	seenToken string
+	principal    identityapi.Principal
+	ok           bool
+	sshPrincipal identityapi.Principal
+	sshOK        bool
+	seenToken    string
 }
 
 func (f *fakeAuthenticator) AuthenticatePAT(_ context.Context, token string) (identityapi.Principal, bool) {
@@ -21,7 +23,7 @@ func (f *fakeAuthenticator) AuthenticatePAT(_ context.Context, token string) (id
 }
 
 func (f *fakeAuthenticator) AuthenticateSSHKey(context.Context, string, string) (identityapi.Principal, bool) {
-	return identityapi.Principal{}, false
+	return f.sshPrincipal, f.sshOK
 }
 func (f *fakeAuthenticator) IssuePAT(context.Context, string, string, string, []string, *time.Time) (identityapi.PAT, string, error) {
 	panic("not used")
