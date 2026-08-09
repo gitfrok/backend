@@ -124,6 +124,31 @@ func TestRepositoryReaderWrongTenantSendsNoContent(t *testing.T) {
 	}
 }
 
+func TestRepositoryReaderPDPDenialSendsNoFileContent(t *testing.T) {
+	root, tenantID, repositoryID, head := seededRepository(t)
+	called := false
+	client, closeClient := newReaderClientWithConfig(t, Config{RepositoryRoot: root, PDP: denyPDP{}, Events: bus.NewInProcess(), command: func(context.Context, string, ...string) *exec.Cmd {
+		called = true
+		return exec.Command("false")
+	}})
+	defer closeClient()
+
+	stream, err := client.GetFile(context.Background(), &repositoryv1.GetFileRequest{Context: readContext(tenantID, repositoryID), Revision: head, Path: "README.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = stream.Recv()
+	if status.Code(err) != codes.NotFound || called {
+		t.Fatalf("PDP denial error=%v command-started=%t", err, called)
+	}
+}
+
+type denyPDP struct{}
+
+func (denyPDP) Decide(context.Context, policyapi.Request) (policyapi.Decision, error) {
+	return policyapi.Decision{}, nil
+}
+
 func newReaderClient(t *testing.T, root string, pdp policyapi.DecisionPoint) (repositoryv1.RepositoryReaderClient, func()) {
 	t.Helper()
 	return newReaderClientWithConfig(t, Config{RepositoryRoot: root, PDP: pdp, Events: bus.NewInProcess(), command: testGitCommand})
