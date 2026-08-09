@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/pem"
 	"net"
 	"os"
@@ -110,12 +109,12 @@ func (a sshTransportAuthenticator) ListPATs(context.Context, string, string) ([]
 
 func writeOpenSSHPrivateKey(t *testing.T, key ed25519.PrivateKey) string {
 	t.Helper()
-	encoded, err := x509.MarshalPKCS8PrivateKey(key)
+	encoded, err := ssh.MarshalPrivateKey(key, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "id_ed25519")
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded}), 0o600); err != nil {
+	if err := os.WriteFile(path, pem.EncodeToMemory(encoded), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
