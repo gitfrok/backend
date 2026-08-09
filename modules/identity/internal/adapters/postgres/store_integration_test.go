@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func TestPostgresPATRevocationDeniesNextResolverLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	principal, ok := auth.AuthenticatePAT(context.Background(), token)
-	if !ok || principal.TenantID != tenantID || principal.ActorID != actorID || len(principal.Roles) != 1 || principal.Roles[0] != "member" {
+	if !ok || principal.TenantID != tenantID || principal.ActorID != actorID || !reflect.DeepEqual(principal.Roles, []string{"member"}) {
 		t.Fatalf("resolved principal=%+v ok=%v", principal, ok)
 	}
 	if _, err := auth.RevokePAT(lifecycleCtx, tenantID, actorID, pat.ID); err != nil {
