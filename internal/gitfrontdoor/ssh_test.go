@@ -8,6 +8,7 @@ import (
 	"net"
 	"testing"
 
+	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	"golang.org/x/crypto/ssh"
 )
@@ -81,5 +82,8 @@ func TestSSHServesOnlyVerifiedForcedGitCommand(t *testing.T) {
 	}
 	if storage.called != "upload" || output.String() != "advertisement" {
 		t.Fatalf("storage=%q output=%q", storage.called, output.String())
+	}
+	if storage.context.GetTransport() != gitv1.GitTransport_GIT_TRANSPORT_SSH {
+		t.Fatalf("transport = %s", storage.context.GetTransport())
 	}
 }

@@ -29,7 +29,7 @@ type Router struct {
 // RoutePAT resolves token before interpreting any storage operation. The
 // tenant portion of handle must equal the authenticated tenant; a client can
 // therefore never select another tenant by changing a URL segment.
-func (r Router) RoutePAT(ctx context.Context, handle, token, requestID string) (*gitv1.OperationContext, error) {
+func (r Router) RoutePAT(ctx context.Context, handle, token, requestID string, transport gitv1.GitTransport) (*gitv1.OperationContext, error) {
 	if r.Authenticator == nil {
 		return nil, ErrDenied
 	}
@@ -37,7 +37,7 @@ func (r Router) RoutePAT(ctx context.Context, handle, token, requestID string) (
 	if !ok {
 		return nil, ErrDenied
 	}
-	return r.route(handle, requestID, principal)
+	return r.route(handle, requestID, principal, transport)
 }
 
 // RouteSSH has the same boundary as RoutePAT after the transport has verified
@@ -51,10 +51,10 @@ func (r Router) RouteSSH(ctx context.Context, handle, publicKey, verifierKeyID, 
 	if !ok {
 		return nil, ErrDenied
 	}
-	return r.route(handle, requestID, principal)
+	return r.route(handle, requestID, principal, gitv1.GitTransport_GIT_TRANSPORT_SSH)
 }
 
-func (r Router) route(handle, requestID string, principal identityapi.Principal) (*gitv1.OperationContext, error) {
+func (r Router) route(handle, requestID string, principal identityapi.Principal, transport gitv1.GitTransport) (*gitv1.OperationContext, error) {
 	tenantID, repositoryID, err := ParseHandle(handle)
 	if err != nil || requestID == "" || principal.TenantID != tenantID || principal.ActorID == "" {
 		return nil, ErrDenied
@@ -65,6 +65,7 @@ func (r Router) route(handle, requestID string, principal identityapi.Principal)
 		ActorId:      principal.ActorID,
 		RequestId:    requestID,
 		ActorRoles:   append([]string(nil), principal.Roles...),
+		Transport:    transport,
 	}, nil
 }
 

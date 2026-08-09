@@ -242,6 +242,7 @@ type repositoryOperation struct {
 	tenantID     string
 	repositoryID string
 	actorID      string
+	actorRoles   []string
 	path         string
 	before       map[string]string
 }
@@ -250,6 +251,9 @@ type receive func() (data []byte, close bool, err error)
 type send func([]byte) error
 
 func (s *Server) exchange(ctx context.Context, op *gitv1.OperationContext, action, binary string, incoming receive, outgoing send) (repositoryOperation, error) {
+	if op == nil || !validGitTransport(op.GetTransport()) {
+		return repositoryOperation{}, unavailable()
+	}
 	repository, err := s.prepare(ctx, op, action)
 	if err != nil {
 		return repositoryOperation{}, err
@@ -261,9 +265,9 @@ func (s *Server) exchange(ctx context.Context, op *gitv1.OperationContext, actio
 		}
 	}
 
-	args := []string{repository.path}
-	if binary == "git-upload-pack" {
-		args = append([]string{"--strict"}, args...)
+	args, err := gitCommandArgs(binary, op.GetTransport(), repository.path)
+	if err != nil {
+		return repositoryOperation{}, unavailable()
 	}
 	command := s.command(ctx, binary, args...)
 	stdin, err := command.StdinPipe()
@@ -358,7 +362,33 @@ func (s *Server) prepare(ctx context.Context, op *gitv1.OperationContext, action
 	if err != nil || !info.IsDir() {
 		return repositoryOperation{}, unavailable()
 	}
-	return repositoryOperation{tenantID: op.GetTenantId(), repositoryID: op.GetRepositoryId(), actorID: op.GetActorId(), path: path}, nil
+	return repositoryOperation{tenantID: op.GetTenantId(), repositoryID: op.GetRepositoryId(), actorID: op.GetActorId(), actorRoles: append([]string(nil), op.GetActorRoles()...), path: path}, nil
+}
+
+func validGitTransport(transport gitv1.GitTransport) bool {
+	return transport == gitv1.GitTransport_GIT_TRANSPORT_SSH || transport == gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY || transport == gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC
+}
+
+func gitCommandArgs(binary string, transport gitv1.GitTransport, repositoryPath string) ([]string, error) {
+	switch binary {
+	case "git-upload-pack":
+		switch transport {
+		case gitv1.GitTransport_GIT_TRANSPORT_SSH:
+			return []string{"--strict", repositoryPath}, nil
+		case gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY:
+			return []string{"--stateless-rpc", "--advertise-refs", repositoryPath}, nil
+		case gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC:
+			return []string{"--stateless-rpc", repositoryPath}, nil
+		}
+	case "git-receive-pack":
+		switch transport {
+		case gitv1.GitTransport_GIT_TRANSPORT_SSH:
+			return []string{repositoryPath}, nil
+		case gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC:
+			return []string{"--stateless-rpc", repositoryPath}, nil
+		}
+	}
+	return nil, errors.New("git-storaged: invalid transport framing")
 }
 
 func (s *Server) publishRefUpdates(ctx context.Context, repository repositoryOperation) error {
@@ -376,6 +406,7 @@ func (s *Server) publishRefUpdates(ctx context.Context, repository repositoryOpe
 				OldSha:     zeroSHA(oldSHA),
 				NewSha:     zeroSHA(newSHA),
 				ActorID:    repository.actorID,
+				ActorRoles: append([]string(nil), repository.actorRoles...),
 				OccurredAt: time.Now().UTC(),
 			}); err != nil {
 				return unavailable()
@@ -392,6 +423,7 @@ func (s *Server) publishRefUpdates(ctx context.Context, repository repositoryOpe
 				OldSha:     zeroSHA(oldSHA),
 				NewSha:     strings.Repeat("0", 40),
 				ActorID:    repository.actorID,
+				ActorRoles: append([]string(nil), repository.actorRoles...),
 				OccurredAt: time.Now().UTC(),
 			}); err != nil {
 				return unavailable()

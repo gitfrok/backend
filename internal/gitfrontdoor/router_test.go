@@ -39,11 +39,11 @@ func TestRoutePATBindsAuthenticatedPrincipalToOpaqueRepositoryHandle(t *testing.
 	auth := &fakeAuthenticator{principal: identityapi.Principal{TenantID: "tenant-a", ActorID: "actor-a", Roles: []string{"member"}}, ok: true}
 	router := Router{Authenticator: auth}
 
-	context, err := router.RoutePAT(context.Background(), "tenant-a/repo-a.git", "pat-secret", "request-1")
+	context, err := router.RoutePAT(context.Background(), "tenant-a/repo-a.git", "pat-secret", "request-1", gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := &gitv1.OperationContext{TenantId: "tenant-a", RepositoryId: "repo-a", ActorId: "actor-a", ActorRoles: []string{"member"}, RequestId: "request-1"}
+	want := &gitv1.OperationContext{TenantId: "tenant-a", RepositoryId: "repo-a", ActorId: "actor-a", ActorRoles: []string{"member"}, RequestId: "request-1", Transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC}
 	if !sameContext(context, want) {
 		t.Fatalf("operation context = %+v, want %+v", context, want)
 	}
@@ -62,7 +62,7 @@ func TestRoutePATDeniesBeforeStorageForInvalidOrCrossTenantIdentity(t *testing.T
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			router := Router{Authenticator: test.auth}
-			if _, err := router.RoutePAT(context.Background(), "tenant-a/repo-a.git", "secret", "request-1"); err == nil {
+			if _, err := router.RoutePAT(context.Background(), "tenant-a/repo-a.git", "secret", "request-1", gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC); err == nil {
 				t.Fatal("RoutePAT succeeded for a denied credential")
 			}
 		})
@@ -78,7 +78,7 @@ func TestParseHandleRejectsFilesystemPathsAndMalformedNames(t *testing.T) {
 }
 
 func sameContext(got, want *gitv1.OperationContext) bool {
-	if got == nil || got.GetTenantId() != want.GetTenantId() || got.GetRepositoryId() != want.GetRepositoryId() || got.GetActorId() != want.GetActorId() || got.GetRequestId() != want.GetRequestId() || len(got.GetActorRoles()) != len(want.GetActorRoles()) {
+	if got == nil || got.GetTenantId() != want.GetTenantId() || got.GetRepositoryId() != want.GetRepositoryId() || got.GetActorId() != want.GetActorId() || got.GetRequestId() != want.GetRequestId() || got.GetTransport() != want.GetTransport() || len(got.GetActorRoles()) != len(want.GetActorRoles()) {
 		return false
 	}
 	for i := range want.GetActorRoles() {

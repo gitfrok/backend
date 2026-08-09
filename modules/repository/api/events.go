@@ -50,6 +50,7 @@ type RefUpdated struct {
 	OldSha     string
 	NewSha     string
 	ActorID    string
+	ActorRoles []string
 	OccurredAt time.Time
 }
 

@@ -40,7 +40,11 @@ func (h SmartHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpUnauthorized(w)
 		return
 	}
-	operation, err := h.Router.RoutePAT(r.Context(), handle, token, h.RequestID())
+	transport := gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC
+	if discovery {
+		transport = gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY
+	}
+	operation, err := h.Router.RoutePAT(r.Context(), handle, token, h.RequestID(), transport)
 	if err != nil {
 		httpUnauthorized(w)
 		return

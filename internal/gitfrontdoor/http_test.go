@@ -53,6 +53,9 @@ func TestSmartHTTPAuthenticatesBeforeOpeningStorageAndStreamsAdvertisement(t *te
 	if storage.context.GetTenantId() != "tenant-a" || storage.context.GetRepositoryId() != "repo-a" || storage.context.GetActorId() != "actor-a" {
 		t.Fatalf("storage context = %+v", storage.context)
 	}
+	if storage.context.GetTransport() != gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY {
+		t.Fatalf("transport = %s", storage.context.GetTransport())
+	}
 }
 
 func TestSmartHTTPDeniedCredentialNeverOpensStorage(t *testing.T) {
@@ -80,5 +83,8 @@ func TestSmartHTTPReceivePackStreamsRequestWithoutFilesystemAccess(t *testing.T)
 
 	if response.Code != http.StatusOK || storage.called != "receive" || string(storage.input) != "pack-bytes" || response.Body.String() != "receive-status" {
 		t.Fatalf("status=%d storage=%q input=%q output=%q", response.Code, storage.called, storage.input, response.Body.String())
+	}
+	if storage.context.GetTransport() != gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC {
+		t.Fatalf("transport = %s", storage.context.GetTransport())
 	}
 }

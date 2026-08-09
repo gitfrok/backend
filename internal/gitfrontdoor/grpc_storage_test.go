@@ -62,7 +62,7 @@ func TestGRPCStorageStreamsContextThenChunksBidirectionally(t *testing.T) {
 
 	storage := GRPCStorage{Client: gitv1.NewGitStorageClient(connection)}
 	var output bytes.Buffer
-	operation := &gitv1.OperationContext{TenantId: "tenant-a", RepositoryId: "repo-a", ActorId: "actor-a", RequestId: "request-1"}
+	operation := &gitv1.OperationContext{TenantId: "tenant-a", RepositoryId: "repo-a", ActorId: "actor-a", RequestId: "request-1", Transport: gitv1.GitTransport_GIT_TRANSPORT_SSH}
 	if err := storage.UploadPack(context.Background(), operation, &chunkReader{chunks: [][]byte{[]byte("one"), []byte("two")}}, &output); err != nil {
 		t.Fatal(err)
 	}
