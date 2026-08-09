@@ -3,12 +3,14 @@ package identity
 import (
 	"context"
 	"github.com/gitfrok/backend/modules/identity/api"
+	identitygrpc "github.com/gitfrok/backend/modules/identity/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/identity/internal/domain"
 )
 
 type service struct{ domain *domain.Service }
 
-func NewInMemory(key []byte) api.Authenticator { return service{domain.NewService(key)} }
+func NewInMemory(key []byte) api.Authenticator                  { return service{domain.NewService(key)} }
+func NewGRPCServer(auth api.Authenticator) *identitygrpc.Server { return identitygrpc.NewServer(auth) }
 func (s service) AuthenticatePAT(_ context.Context, token string) (api.Principal, bool) {
 	p, ok := s.domain.AuthenticatePAT(token)
 	return api.Principal{TenantID: p.TenantID, ActorID: p.ActorID, Roles: p.Roles}, ok
