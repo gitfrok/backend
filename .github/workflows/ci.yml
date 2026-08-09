@@ -64,6 +64,11 @@ jobs:
       - name: go test
         run: go test -race ./...
 
+      # T-0021 / ADR-0035: each plane image must build and retain its scratch, non-root, no-shell
+      # posture. The script also runs the control plane with a read-only root filesystem.
+      - name: container images
+        run: bash scripts/test-container-images.sh
+
       # SPEC-0012: the ceremony tier a PR declares must match what its diff does. Only meaningful
       # on a pull request — a push to main carries no declaration, and inventing one is not the
       # gate's business. The script is generated from governance canonical/agent-surfaces/
