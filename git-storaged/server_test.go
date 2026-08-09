@@ -311,6 +311,7 @@ func seededRepository(t *testing.T) (root, tenantID, repositoryID, head string) 
 	mustRunGit(t, work, "commit", "-m", "initial")
 	mustRunGit(t, work, "remote", "add", "origin", bare)
 	mustRunGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	mustRunGit(t, bare, "symbolic-ref", "HEAD", "refs/heads/main")
 	head = mustGitOutput(t, work, "rev-parse", "HEAD")
 	return root, tenantID, repositoryID, head
 }
