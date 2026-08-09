@@ -1,0 +1,106 @@
+# T-0021 / ADR-0035 + ADR-0044: PR CI builds and posture-tests both plane
+# images in ci.yml. This protected-main workflow publishes only immutable
+# digests, then signs and attests those same bytes with the protected key.
+name: Publish plane images
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: build plane images
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dataplane-app
+            dockerfile: Dockerfile.dataplane
+          - name: controlplane-app
+            dockerfile: Dockerfile.controlplane
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+
+  publish:
+    name: publish signed plane images
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # The organization must protect this environment and keep COSIGN_PRIVATE_KEY
+    # and COSIGN_PASSWORD here. Pull-request jobs never reference it.
+    environment: image-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dataplane-app
+            dockerfile: Dockerfile.dataplane
+          - name: controlplane-app
+            dockerfile: Dockerfile.controlplane
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ghcr.io/gitfrok/${{ matrix.name }}:${{ github.sha }}
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: sign immutable digest
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          IMAGE: ghcr.io/gitfrok/${{ matrix.name }}@${{ steps.image.outputs.digest }}
+        run: cosign sign --yes --key env://COSIGN_PRIVATE_KEY "$IMAGE"
+
+      # anchore/sbom-action runs Syft. The attached SPDX statement is bound to
+      # the pushed digest; no mutable tag, source, or credential is attested.
+      - id: sbom
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/gitfrok/${{ matrix.name }}@${{ steps.image.outputs.digest }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/${{ matrix.name }}.spdx.json
+
+      - name: attest SBOM
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          IMAGE: ghcr.io/gitfrok/${{ matrix.name }}@${{ steps.image.outputs.digest }}
+          PREDICATE: ${{ runner.temp }}/${{ matrix.name }}.spdx.json
+        run: cosign attest --yes --key env://COSIGN_PRIVATE_KEY --type spdxjson --predicate "$PREDICATE" "$IMAGE"
+
+      # Report-only per ADR-0035 decision 6. The blocking threshold is T-0021
+      # follow-up work; an empty scan is never converted into a silent pass.
+      - name: Grype scan (report)
+        uses: anchore/scan-action@v7
+        with:
+          image: ghcr.io/gitfrok/${{ matrix.name }}@${{ steps.image.outputs.digest }}
+          fail-build: false
+          output-format: table
