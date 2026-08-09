@@ -26,3 +26,11 @@ func (s service) IssuePAT(_ context.Context, t, a, l string, scopes []string) (a
 func (s service) RevokePAT(_ context.Context, t, a, id string) error {
 	return s.domain.RevokePAT(t, a, id)
 }
+func (s service) ListPATs(_ context.Context, t, a string) []api.PAT {
+	ps := s.domain.ListPATs(t, a)
+	out := make([]api.PAT, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, api.PAT{ID: p.ID, TenantID: p.TenantID, ActorID: p.ActorID, Label: p.Label, Scopes: p.Scopes, Revoked: p.Revoked})
+	}
+	return out
+}

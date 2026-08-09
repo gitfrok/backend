@@ -17,4 +17,5 @@ type Authenticator interface {
 	AuthenticateSSHKey(ctx context.Context, key string) (Principal, bool)
 	IssuePAT(ctx context.Context, tenantID, actorID, label string, scopes []string) (PAT, string, error)
 	RevokePAT(ctx context.Context, tenantID, actorID, patID string) error
+	ListPATs(ctx context.Context, tenantID, actorID string) []PAT
 }

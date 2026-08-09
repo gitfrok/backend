@@ -43,6 +43,11 @@ func (s *Server) RevokePAT(ctx context.Context, req *identityv1.RevokePATRequest
 	}
 	return &identityv1.RevokePATResponse{}, nil
 }
-func (s *Server) ListPATs(context.Context, *identityv1.ListPATsRequest) (*identityv1.ListPATsResponse, error) {
-	return &identityv1.ListPATsResponse{}, nil
+func (s *Server) ListPATs(ctx context.Context, req *identityv1.ListPATsRequest) (*identityv1.ListPATsResponse, error) {
+	ps := s.auth.ListPATs(ctx, req.GetTenantId(), req.GetActorId())
+	out := make([]*identityv1.PATMetadata, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, &identityv1.PATMetadata{PatId: p.ID, Label: p.Label, ScopeLabels: p.Scopes})
+	}
+	return &identityv1.ListPATsResponse{Pats: out}, nil
 }

@@ -86,6 +86,17 @@ func (s *Service) RevokePAT(tenant, actor, id string) error {
 	p.Revoked = true
 	return nil
 }
+func (s *Service) ListPATs(tenant, actor string) []PAT {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []PAT{}
+	for _, p := range s.pats {
+		if p.TenantID == tenant && p.ActorID == actor {
+			out = append(out, s.public(*p))
+		}
+	}
+	return out
+}
 func (s *Service) hash(token string) string {
 	h := hmac.New(sha256.New, s.key)
 	_, _ = h.Write([]byte(token))
