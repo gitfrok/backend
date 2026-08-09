@@ -5,14 +5,18 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	"github.com/gitfrok/backend/internal/gitfrontdoor"
 	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	"github.com/gitfrok/backend/platform/bus"
@@ -78,6 +82,64 @@ func TestSSHGitCloneAndPushStreamThroughGitStorage(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git push: %v\n%s", err, output)
 	}
+}
+
+// T-0011 AC2/AC3: a key not known to Identity must be rejected at SSH
+// authentication. The Git storage port must not observe the request.
+func TestSSHUnknownKeyIsDeniedBeforeStorage(t *testing.T) {
+	_, hostPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostSigner, err := ssh.NewSignerFromKey(hostPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, clientPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	storage := &deniedStorage{}
+	serveCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := gitfrontdoor.SSH{
+		Router:        gitfrontdoor.Router{Authenticator: sshTransportAuthenticator{key: "known-key"}},
+		Storage:       storage,
+		HostSigner:    hostSigner,
+		VerifierKeyID: "test-key",
+	}
+	go func() { _ = server.Serve(serveCtx, listener) }()
+
+	remote := "ssh://git@" + listener.Addr().String() + "/tenant-a/private-repo.git"
+	keyPath := writeOpenSSHPrivateKey(t, clientPrivate)
+	command := exec.Command("git", "ls-remote", remote)
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "+keyPath)
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("git ls-remote succeeded for an unknown key: %s", output)
+	}
+	if calls := storage.calls.Load(); calls != 0 {
+		t.Fatalf("storage calls = %d, want 0", calls)
+	}
+}
+
+type deniedStorage struct {
+	calls atomic.Int64
+}
+
+func (s *deniedStorage) UploadPack(context.Context, *gitv1.OperationContext, io.Reader, io.Writer) error {
+	s.calls.Add(1)
+	return errors.New("storage must not be called")
+}
+
+func (s *deniedStorage) ReceivePack(context.Context, *gitv1.OperationContext, io.Reader, io.Writer) error {
+	s.calls.Add(1)
+	return errors.New("storage must not be called")
 }
 
 type sshTransportAuthenticator struct {
