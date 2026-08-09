@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -148,6 +149,28 @@ func TestUploadPackWrongTenantIsUnavailableAndNeverStartsGit(t *testing.T) {
 	}
 }
 
+// SPEC-0016 AC3 / ADR-0041: front doors authenticate, but git-storaged makes
+// the authorization decision. The verified role set must therefore survive
+// the internal operation context and become the PDP subject, never an allow
+// assertion supplied by a client.
+func TestPreparePassesVerifiedActorRolesToPDP(t *testing.T) {
+	root, tenantID, repositoryID, _ := seededRepository(t)
+	pdp := &recordingPDP{decision: policyapi.Decision{Allowed: true}}
+	server, err := NewServer(Config{RepositoryRoot: root, PDP: pdp, Events: bus.NewInProcess()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = server.prepare(context.Background(), &gitv1.OperationContext{
+		TenantId: tenantID, RepositoryId: repositoryID, ActorId: "actor-a", RequestId: "request-1", ActorRoles: []string{"test-a", "test-b"}, Transport: gitv1.GitTransport_GIT_TRANSPORT_SSH,
+	}, "repo.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pdp.request.Subject.Roles, []string{"test-a", "test-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("PDP subject roles = %v, want %v", got, want)
+	}
+}
+
 func TestReceivePackPublishesRefUpdated(t *testing.T) {
 	root := t.TempDir()
 	tenantID, repositoryID := "tenant-a", "repo-a"
@@ -228,6 +251,16 @@ func (allowPDP) Decide(context.Context, policyapi.Request) (policyapi.Decision, 
 	return policyapi.Decision{Allowed: true}, nil
 }
 
+type recordingPDP struct {
+	decision policyapi.Decision
+	request  policyapi.Request
+}
+
+func (p *recordingPDP) Decide(_ context.Context, request policyapi.Request) (policyapi.Decision, error) {
+	p.request = request
+	return p.decision, nil
+}
+
 type fuseMount struct{}
 
 func (fuseMount) Check(string) error { return ErrFUSERepositoryRoot }
@@ -278,6 +311,7 @@ func seededRepository(t *testing.T) (root, tenantID, repositoryID, head string) 
 	mustRunGit(t, work, "commit", "-m", "initial")
 	mustRunGit(t, work, "remote", "add", "origin", bare)
 	mustRunGit(t, work, "push", "origin", "HEAD:refs/heads/main")
+	mustRunGit(t, bare, "symbolic-ref", "HEAD", "refs/heads/main")
 	head = mustGitOutput(t, work, "rev-parse", "HEAD")
 	return root, tenantID, repositoryID, head
 }
@@ -323,7 +357,34 @@ func receiveContext(tenantID, repositoryID string) *gitv1.ReceivePackRequest {
 }
 
 func operationContext(tenantID, repositoryID string) *gitv1.OperationContext {
-	return &gitv1.OperationContext{TenantId: tenantID, RepositoryId: repositoryID, ActorId: "actor-a", RequestId: fmt.Sprintf("request-%d", time.Now().UnixNano())}
+	return &gitv1.OperationContext{TenantId: tenantID, RepositoryId: repositoryID, ActorId: "actor-a", RequestId: fmt.Sprintf("request-%d", time.Now().UnixNano()), Transport: gitv1.GitTransport_GIT_TRANSPORT_SSH}
+}
+
+func TestGitCommandArgsSelectsTransportFraming(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		binary    string
+		transport gitv1.GitTransport
+		want      []string
+		valid     bool
+	}{
+		{name: "ssh upload", binary: "git-upload-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SSH, want: []string{"--strict", "/repos/tenant/repo.git"}, valid: true},
+		{name: "http discovery", binary: "git-upload-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY, want: []string{"--stateless-rpc", "--advertise-refs", "/repos/tenant/repo.git"}, valid: true},
+		{name: "http upload rpc", binary: "git-upload-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC, want: []string{"--stateless-rpc", "/repos/tenant/repo.git"}, valid: true},
+		{name: "http receive rpc", binary: "git-receive-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC, want: []string{"--stateless-rpc", "/repos/tenant/repo.git"}, valid: true},
+		{name: "receive discovery denied", binary: "git-receive-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY},
+		{name: "unspecified denied", binary: "git-upload-pack", transport: gitv1.GitTransport_GIT_TRANSPORT_UNSPECIFIED},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := gitCommandArgs(test.binary, test.transport, "/repos/tenant/repo.git")
+			if test.valid != (err == nil) {
+				t.Fatalf("gitCommandArgs() err = %v, valid = %t", err, test.valid)
+			}
+			if test.valid && !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("gitCommandArgs() = %q, want %q", got, test.want)
+			}
+		})
+	}
 }
 
 func pktLine(body string) []byte { return []byte(fmt.Sprintf("%04x%s", len(body)+4, body)) }
