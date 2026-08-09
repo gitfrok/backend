@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1
+# T-0021 / ADR-0035: the data-plane binary ships from scratch, never a shell-bearing base.
+FROM docker.io/library/golang:1.26.0-alpine3.22 AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
+    -o /out/dataplane-app ./cmd/dataplane-app
+
+FROM scratch
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/dataplane-app /dataplane-app
+USER 65532:65532
+CMD ["/dataplane-app"]
