@@ -101,6 +101,12 @@ func TestForbiddenEdgesAreRejected(t *testing.T) {
 			relDir:  "modules/repository/api",
 			want:    RuleAPIExposesInfra,
 		},
+		{
+			name:    "ADR-0043 direct credential query",
+			fixture: "bad_direct_credential_query.go.txt",
+			relDir:  "modules/repository/internal/app",
+			want:    RuleDirectCredentialQuery,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
