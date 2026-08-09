@@ -7,9 +7,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/gitfrok/backend/cmd/internal/health"
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
 	"github.com/gitfrok/backend/modules/codesearch"
 	csapi "github.com/gitfrok/backend/modules/codesearch/api"
@@ -27,6 +31,8 @@ import (
 // not embed the bundle, because a copy of the rules inside this binary would be a second source of
 // truth for something governance owns (invariant 21).
 const policyBundleDirEnv = "GITFROK_POLICY_BUNDLE_DIR"
+
+const listenAddrEnv = "GITFROK_LISTEN_ADDR"
 
 // dataplane is the composed plane: every context, held by its api/ port.
 type dataplane struct {
@@ -90,4 +96,10 @@ func main() {
 	// T-0011 owns; constructing it here proves the contract composes with the module.
 	_ = policy.NewGRPCServer(dp.policy)
 	fmt.Printf("gitfrok dataplane-app: repository + codesearch on the in-process bus, PDP on %s\n", bundleDir)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := health.Run(ctx, health.ListenAddr(os.Getenv(listenAddrEnv))); err != nil {
+		fmt.Fprintf(os.Stderr, "dataplane health server: %v\n", err)
+		os.Exit(1)
+	}
 }

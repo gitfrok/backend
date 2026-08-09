@@ -39,9 +39,45 @@ for plane in dataplane controlplane; do
   fi
 done
 
-# A read-only root filesystem is a runtime setting, not an OCI-image field. The control plane has
-# no required writable mount, so it is the smallest built-image proof that the binaries tolerate it.
-"$runtime" run --rm --read-only localhost/gitfrok-controlplane:test >/dev/null
+# A read-only root filesystem is a runtime setting, not an OCI-image field. The data plane proves
+# its deliberate no-policy fail-fast here. The real policy-bundle mount needs governance, which is
+# intentionally not a backend CI dependency; the super-repo dev-cluster integration owns that
+# assertion. The control plane has no such mount and therefore proves a built image stays healthy.
+if "$runtime" run --rm --read-only localhost/gitfrok-dataplane:test >/dev/null 2>&1; then
+  report "dataplane started without GITFROK_POLICY_BUNDLE_DIR"
+fi
+
+run_health() { # run_health <plane>
+  plane=$1
+  image="localhost/gitfrok-$plane:test"
+  name="gitfrok-${plane}-health-$$"
+  args=(run --detach --rm --read-only --name "$name" -p 127.0.0.1::8080)
+  if ! container=$("$runtime" "${args[@]}" "$image"); then
+    report "$plane did not start with a read-only root filesystem"
+    return
+  fi
+  port=$("$runtime" port "$container" 8080/tcp 2>/dev/null | head -1 || true)
+  case "$port" in
+    127.0.0.1:*) ;; *)
+      report "$plane did not publish a loopback health port"
+      "$runtime" stop "$container" >/dev/null 2>&1 || true
+      return
+      ;;
+  esac
+
+  body=
+  for _ in {1..50}; do
+    body=$(curl --silent --show-error --fail "http://$port/healthz" 2>/dev/null || true)
+    [ "$body" = ok ] && break
+    sleep 0.1
+  done
+  if [ "$body" != ok ]; then
+    report "$plane health endpoint did not answer ok"
+  fi
+  "$runtime" stop "$container" >/dev/null 2>&1 || report "$plane did not stop cleanly"
+}
+
+run_health controlplane
 
 [ "$fail" -eq 0 ] || exit 1
 echo "container-images: OK"
