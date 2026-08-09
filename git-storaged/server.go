@@ -5,7 +5,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,11 +19,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
+	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	repoapi "github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/platform/bus"
@@ -43,11 +51,13 @@ type Config struct {
 // Server implements gitsaas.git.v1.GitStorage.
 type Server struct {
 	gitv1.UnimplementedGitStorageServer
+	repositoryv1.UnimplementedRepositoryReaderServer
 
 	root    string
 	pdp     policyapi.DecisionPoint
 	events  bus.Bus
 	command func(context.Context, string, ...string) *exec.Cmd
+	pageKey []byte
 }
 
 // NewServer validates process wiring and the live-repository filesystem before the service accepts
@@ -78,7 +88,93 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 	if command == nil {
 		command = exec.CommandContext
 	}
-	return &Server{root: config.RepositoryRoot, pdp: config.PDP, events: config.Events, command: command}, nil
+	pageKey := make([]byte, 32)
+	if _, err := rand.Read(pageKey); err != nil {
+		return nil, fmt.Errorf("git-storaged: generate tree page key: %w", err)
+	}
+	return &Server{root: config.RepositoryRoot, pdp: config.PDP, events: config.Events, command: command, pageKey: pageKey}, nil
+}
+
+const (
+	defaultTreePageSize = 100
+	maxTreePageSize     = 500
+	readChunkSize       = 64 * 1024
+)
+
+type treeCursor struct {
+	TenantID, RepositoryID, Revision string
+	Offset                           int
+}
+
+// GetTree serves one bounded tree page. The signed token binds the cursor to
+// the tenant, repository and revision so a token from one read cannot continue
+// another read (SPEC-0017 AC1).
+func (s *Server) GetTree(ctx context.Context, req *repositoryv1.GetTreeRequest) (*repositoryv1.GetTreeResponse, error) {
+	op, err := s.prepareRead(ctx, req.GetContext())
+	if err != nil || !validRevision(req.GetRevision()) {
+		return nil, unavailable()
+	}
+	pageSize := int(req.GetPageSize())
+	if pageSize == 0 {
+		pageSize = defaultTreePageSize
+	}
+	if pageSize < 0 || pageSize > maxTreePageSize {
+		return nil, unavailable()
+	}
+	offset := 0
+	if req.GetPageToken() != "" {
+		cursor, ok := s.parseTreeCursor(req.GetPageToken())
+		if !ok || cursor.TenantID != op.tenantID || cursor.RepositoryID != op.repositoryID || cursor.Revision != req.GetRevision() {
+			return nil, unavailable()
+		}
+		offset = cursor.Offset
+	}
+	entries, more, err := s.treePage(ctx, op.path, req.GetRevision(), offset, pageSize)
+	if err != nil {
+		return nil, unavailable()
+	}
+	response := &repositoryv1.GetTreeResponse{Entries: entries}
+	if more {
+		response.NextPageToken = s.treeCursor(treeCursor{TenantID: op.tenantID, RepositoryID: op.repositoryID, Revision: req.GetRevision(), Offset: offset + len(entries)})
+	}
+	return response, nil
+}
+
+// GetFile emits a metadata-bearing first chunk and then streams at most 64 KiB
+// per message. It never materializes a repository blob in application memory.
+func (s *Server) GetFile(req *repositoryv1.GetFileRequest, stream repositoryv1.RepositoryReader_GetFileServer) error {
+	op, err := s.prepareRead(stream.Context(), req.GetContext())
+	if err != nil || !validRevision(req.GetRevision()) || !validRepositoryPath(req.GetPath()) {
+		return unavailable()
+	}
+	entry, err := s.fileEntry(stream.Context(), op.path, req.GetRevision(), req.GetPath())
+	if err != nil {
+		return unavailable()
+	}
+	return s.streamGit(stream.Context(), op.path, []string{"show", req.GetRevision() + ":" + req.GetPath()}, func(data []byte, eof bool) error {
+		chunk := &repositoryv1.FileChunk{Data: data, Eof: eof}
+		if entry != nil {
+			chunk.Metadata = entry
+			entry = nil
+		}
+		return stream.Send(chunk)
+	})
+}
+
+// GetDiff streams a Git patch under the same preflight and PDP decision as
+// trees and blobs. A failed preflight sends no chunks.
+func (s *Server) GetDiff(req *repositoryv1.GetDiffRequest, stream repositoryv1.RepositoryReader_GetDiffServer) error {
+	op, err := s.prepareRead(stream.Context(), req.GetContext())
+	if err != nil || !validRevision(req.GetBaseRevision()) || !validRevision(req.GetHeadRevision()) || (req.GetPath() != "" && !validRepositoryPath(req.GetPath())) {
+		return unavailable()
+	}
+	args := []string{"diff", "--no-ext-diff", req.GetBaseRevision(), req.GetHeadRevision()}
+	if req.GetPath() != "" {
+		args = append(args, "--", req.GetPath())
+	}
+	return s.streamGit(stream.Context(), op.path, args, func(data []byte, eof bool) error {
+		return stream.Send(&repositoryv1.DiffChunk{Data: data, Eof: eof})
+	})
 }
 
 // UploadPack executes git-upload-pack after the tenant-scoped handle and PDP decision pass.
@@ -329,5 +425,204 @@ func zeroSHA(value string) string {
 var handle = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 func validHandle(value string) bool { return handle.MatchString(value) }
+
+func (s *Server) prepareRead(ctx context.Context, read *repositoryv1.ReadContext) (repositoryOperation, error) {
+	if read == nil {
+		return repositoryOperation{}, unavailable()
+	}
+	return s.prepare(ctx, &gitv1.OperationContext{
+		TenantId: read.GetTenantId(), RepositoryId: read.GetRepositoryId(), ActorId: read.GetActorId(), RequestId: read.GetRequestId(),
+	}, "repo.read")
+}
+
+func validRevision(value string) bool {
+	if value == "" || len(value) > 256 || strings.HasPrefix(value, "-") || strings.Contains(value, "..") || strings.ContainsAny(value, "\\\x00 \t\n\r~^:?*[") {
+		return false
+	}
+	return true
+}
+
+func validRepositoryPath(value string) bool {
+	if value == "" || len(value) > 4096 || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) treePage(ctx context.Context, repositoryPath, revision string, offset, pageSize int) ([]*repositoryv1.TreeEntry, bool, error) {
+	command := s.command(ctx, "git", "-C", repositoryPath, "ls-tree", "-z", "-l", revision)
+	output, err := command.StdoutPipe()
+	if err != nil {
+		return nil, false, err
+	}
+	if err := command.Start(); err != nil {
+		return nil, false, err
+	}
+	reader := bufio.NewReader(output)
+	entries := make([]*repositoryv1.TreeEntry, 0, pageSize)
+	index := 0
+	more := false
+	for {
+		record, readErr := reader.ReadString('\x00')
+		if len(record) != 0 {
+			entry, parseErr := parseTreeEntry(strings.TrimSuffix(record, "\x00"))
+			if parseErr != nil {
+				_ = command.Wait()
+				return nil, false, parseErr
+			}
+			if index >= offset {
+				if len(entries) < pageSize {
+					entries = append(entries, entry)
+				} else {
+					more = true
+				}
+			}
+			index++
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			_ = command.Wait()
+			return nil, false, readErr
+		}
+	}
+	if err := command.Wait(); err != nil {
+		return nil, false, err
+	}
+	return entries, more, nil
+}
+
+func parseTreeEntry(record string) (*repositoryv1.TreeEntry, error) {
+	parts := strings.SplitN(record, "\t", 2)
+	if len(parts) != 2 || !validRepositoryPath(parts[1]) {
+		return nil, errors.New("invalid tree entry")
+	}
+	fields := strings.Fields(parts[0])
+	if len(fields) != 4 {
+		return nil, errors.New("invalid tree metadata")
+	}
+	mode, err := strconv.ParseUint(fields[0], 8, 32)
+	if err != nil {
+		return nil, err
+	}
+	size, err := strconv.ParseInt(fields[3], 10, 64)
+	if err != nil && fields[3] != "-" {
+		return nil, err
+	}
+	kind := repositoryv1.EntryKind_ENTRY_KIND_UNSPECIFIED
+	switch fields[1] {
+	case "blob":
+		if fields[0] == "120000" {
+			kind = repositoryv1.EntryKind_ENTRY_KIND_SYMLINK
+		} else {
+			kind = repositoryv1.EntryKind_ENTRY_KIND_FILE
+		}
+	case "tree":
+		kind = repositoryv1.EntryKind_ENTRY_KIND_DIRECTORY
+	case "commit":
+		kind = repositoryv1.EntryKind_ENTRY_KIND_SYMLINK
+	}
+	if kind == repositoryv1.EntryKind_ENTRY_KIND_UNSPECIFIED {
+		return nil, errors.New("unsupported tree entry")
+	}
+	return &repositoryv1.TreeEntry{Path: parts[1], Kind: kind, ObjectId: fields[2], Mode: uint32(mode), SizeBytes: size}, nil
+}
+
+func (s *Server) fileEntry(ctx context.Context, repositoryPath, revision, path string) (*repositoryv1.FileMetadata, error) {
+	command := s.command(ctx, "git", "-C", repositoryPath, "ls-tree", "-z", "-l", revision, "--", path)
+	output, err := command.Output()
+	if err != nil {
+		return nil, err
+	}
+	entry, err := parseTreeEntry(strings.TrimSuffix(string(output), "\x00"))
+	if err != nil || entry.Kind != repositoryv1.EntryKind_ENTRY_KIND_FILE || entry.Path != path {
+		return nil, errors.New("file unavailable")
+	}
+	return &repositoryv1.FileMetadata{Path: entry.Path, ObjectId: entry.ObjectId, Mode: entry.Mode, SizeBytes: entry.SizeBytes}, nil
+}
+
+func (s *Server) streamGit(ctx context.Context, repositoryPath string, args []string, send func([]byte, bool) error) error {
+	command := s.command(ctx, "git", append([]string{"-C", repositoryPath}, args...)...)
+	output, err := command.StdoutPipe()
+	if err != nil {
+		return unavailable()
+	}
+	if err := command.Start(); err != nil {
+		return unavailable()
+	}
+	read := func() ([]byte, error) {
+		buffer := make([]byte, readChunkSize)
+		count, err := output.Read(buffer)
+		return buffer[:count], err
+	}
+	pending, readErr := read()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		_ = command.Wait()
+		return unavailable()
+	}
+	if len(pending) == 0 && errors.Is(readErr, io.EOF) {
+		if err := command.Wait(); err != nil {
+			return unavailable()
+		}
+		return send(nil, true)
+	}
+	for {
+		next, nextErr := read()
+		if err := send(pending, errors.Is(nextErr, io.EOF)); err != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			return err
+		}
+		if errors.Is(nextErr, io.EOF) {
+			if err := command.Wait(); err != nil {
+				return unavailable()
+			}
+			return nil
+		}
+		if nextErr != nil {
+			_ = command.Wait()
+			return unavailable()
+		}
+		pending = next
+	}
+}
+
+func (s *Server) treeCursor(cursor treeCursor) string {
+	payload, _ := json.Marshal(cursor)
+	mac := hmac.New(sha256.New, s.pageKey)
+	_, _ = mac.Write(payload)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) parseTreeCursor(value string) (treeCursor, bool) {
+	parts := strings.Split(value, ".")
+	if len(parts) != 2 {
+		return treeCursor{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return treeCursor{}, false
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return treeCursor{}, false
+	}
+	mac := hmac.New(sha256.New, s.pageKey)
+	_, _ = mac.Write(payload)
+	if !hmac.Equal(signature, mac.Sum(nil)) {
+		return treeCursor{}, false
+	}
+	var cursor treeCursor
+	if err := json.Unmarshal(payload, &cursor); err != nil || cursor.Offset < 0 {
+		return treeCursor{}, false
+	}
+	return cursor, true
+}
 
 func unavailable() error { return status.Error(codes.NotFound, "repository unavailable") }
