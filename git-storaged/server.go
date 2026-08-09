@@ -344,7 +344,9 @@ func (s *Server) prepare(ctx context.Context, op *gitv1.OperationContext, action
 
 	decision, err := s.pdp.Decide(ctx, policyapi.Request{
 		TenantID: op.GetTenantId(),
-		Subject:  policyapi.Subject{ID: op.GetActorId(), TenantID: op.GetTenantId()},
+		// Roles arrive only from a verified Identity&Access principal through the
+		// front door. They are PDP input, never a client-provided allow result.
+		Subject:  policyapi.Subject{ID: op.GetActorId(), TenantID: op.GetTenantId(), Roles: append([]string(nil), op.GetActorRoles()...)},
 		Action:   action,
 		Resource: policyapi.Resource{Type: "repository", ID: op.GetRepositoryId()},
 		Context:  map[string]string{"request_id": op.GetRequestId()},
@@ -431,7 +433,7 @@ func (s *Server) prepareRead(ctx context.Context, read *repositoryv1.ReadContext
 		return repositoryOperation{}, unavailable()
 	}
 	return s.prepare(ctx, &gitv1.OperationContext{
-		TenantId: read.GetTenantId(), RepositoryId: read.GetRepositoryId(), ActorId: read.GetActorId(), RequestId: read.GetRequestId(),
+		TenantId: read.GetTenantId(), RepositoryId: read.GetRepositoryId(), ActorId: read.GetActorId(), RequestId: read.GetRequestId(), ActorRoles: append([]string(nil), read.GetActorRoles()...),
 	}, "repo.read")
 }
 
