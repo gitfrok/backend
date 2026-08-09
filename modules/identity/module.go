@@ -6,8 +6,10 @@ import (
 
 	"github.com/gitfrok/backend/modules/identity/api"
 	identitygrpc "github.com/gitfrok/backend/modules/identity/internal/adapters/grpc"
+	identitypg "github.com/gitfrok/backend/modules/identity/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/identity/internal/domain"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/tenancy"
 )
 
@@ -25,6 +27,14 @@ func NewInMemory(key []byte, pdp policyapi.DecisionPoint) api.Authenticator {
 	}
 	return service{domain: domain.NewService(key), pdp: pdp}
 }
+
+// NewPostgres assembles the durable Identity&Access credential store. The
+// adapter owns the only pre-authentication resolver path; callers receive the
+// same bounded Authenticator interface as the in-memory composition.
+func NewPostgres(pool *db.Pool, activeKeyID string, keys map[string][]byte, pdp policyapi.DecisionPoint) api.Authenticator {
+	return identitypg.New(pool, activeKeyID, keys, pdp)
+}
+
 func NewGRPCServer(auth api.Authenticator) *identitygrpc.Server { return identitygrpc.NewServer(auth) }
 func (s service) AuthenticatePAT(_ context.Context, token string) (api.Principal, bool) {
 	p, ok := s.domain.AuthenticatePAT(token)

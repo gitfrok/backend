@@ -6,6 +6,7 @@ package arch
 import (
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -27,6 +28,9 @@ const (
 	// only appear in an exported signature if its package is imported, so import purity is what
 	// keeps the api/ surface infra-free (invariant 20) and the module extractable (ADR-0026).
 	RuleAPIExposesInfra = "api-exposes-infra"
+	// RuleDirectCredentialQuery protects ADR-0043's narrow pre-authentication resolver: only the
+	// Identity Postgres adapter may name the credential table in application code.
+	RuleDirectCredentialQuery = "direct-credential-table-query"
 )
 
 // infraMarkers are import substrings a domain package must never pull in (invariant 16).
@@ -117,5 +121,17 @@ func Scan(fset *token.FileSet, file string) ([]Violation, error) {
 	if err != nil {
 		return nil, err
 	}
-	return checkFile(file, owningModuleOf(file), imports), nil
+	violations := checkFile(file, owningModuleOf(file), imports)
+	source, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(string(source), "identity.credentials") && !isIdentityPostgresAdapter(file) {
+		violations = append(violations, Violation{File: file, Import: "identity.credentials", Rule: RuleDirectCredentialQuery})
+	}
+	return violations, nil
+}
+
+func isIdentityPostgresAdapter(file string) bool {
+	return strings.Contains(filepath.ToSlash(file), "/modules/identity/internal/adapters/postgres/")
 }

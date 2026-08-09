@@ -9,6 +9,7 @@ import (
 	"github.com/gitfrok/backend/modules/identity"
 	"github.com/gitfrok/backend/modules/identity/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/tenancy"
 )
 
@@ -56,5 +57,30 @@ func TestPATLifecycleDeniesWithoutPDPGrant(t *testing.T) {
 	expiresAt := time.Now().Add(time.Hour)
 	if _, _, err := auth.IssuePAT(ctx, "tenant-a", "actor-a", "ci", nil, &expiresAt); !errors.Is(err, api.ErrAuthorizationDenied) {
 		t.Fatalf("denied issue error = %v, want %v", err, api.ErrAuthorizationDenied)
+	}
+}
+
+func TestNewPostgresRefusesMissingSecurityDependencies(t *testing.T) {
+	pdp := &recorderPDP{decision: policyapi.Decision{Allowed: true}}
+	for _, test := range []struct {
+		name string
+		pool bool
+		pdp  policyapi.DecisionPoint
+	}{
+		{name: "pool", pool: false, pdp: pdp},
+		{name: "PDP", pool: true, pdp: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("NewPostgres did not reject missing security dependency")
+				}
+			}()
+			var poolArg *db.Pool
+			if test.pool {
+				poolArg = new(db.Pool)
+			}
+			_ = identity.NewPostgres(poolArg, "default", map[string][]byte{"default": []byte("test-key")}, test.pdp)
+		})
 	}
 }
