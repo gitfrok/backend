@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -36,14 +37,14 @@ func TestPATDoesNotCrossTenant(t *testing.T) {
 
 func TestSSHKeyAuthenticatesToSamePrincipalShape(t *testing.T) {
 	s := NewService([]byte("test-key"))
-	if err := s.RegisterSSHKey("ssh-ed25519 AAA", "key-1", "tenant-a", "actor-a", []string{"developer"}); err != nil {
+	if err := s.RegisterSSHKey("ssh-ed25519 AAA", "default", "tenant-a", "actor-a", []string{"developer"}); err != nil {
 		t.Fatal(err)
 	}
-	p, ok := s.AuthenticateSSHKey("ssh-ed25519 AAA", "key-1")
+	p, ok := s.AuthenticateSSHKey("ssh-ed25519 AAA", "default")
 	if !ok || p.TenantID != "tenant-a" || p.ActorID != "actor-a" {
 		t.Fatalf("principal=%+v ok=%v", p, ok)
 	}
-	if _, ok := s.AuthenticateSSHKey("ssh-ed25519 unknown", "key-1"); ok {
+	if _, ok := s.AuthenticateSSHKey("ssh-ed25519 unknown", "default"); ok {
 		t.Fatal("unknown key authenticated")
 	}
 }
@@ -85,13 +86,13 @@ func TestRevokedSSHKeyDeniesNextAuthentication(t *testing.T) {
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	s := NewServiceWithClock([]byte("test-key"), func() time.Time { return now })
 	const key = "ssh-ed25519 AAA"
-	if err := s.RegisterSSHKey(key, "key-1", "tenant-a", "actor-a", []string{"developer"}); err != nil {
+	if err := s.RegisterSSHKey(key, "default", "tenant-a", "actor-a", []string{"developer"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeSSHKey("tenant-a", "actor-a", key, "key-1"); err != nil {
+	if err := s.RevokeSSHKey("tenant-a", "actor-a", key, "default"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.AuthenticateSSHKey(key, "key-1"); ok {
+	if _, ok := s.AuthenticateSSHKey(key, "default"); ok {
 		t.Fatal("revoked SSH key authenticated")
 	}
 }
@@ -101,11 +102,50 @@ func TestRevokedSSHKeyDeniesNextAuthentication(t *testing.T) {
 func TestSSHKeyRequiresMatchingVerifierKeyID(t *testing.T) {
 	s := NewService([]byte("test-key"))
 	const key = "ssh-ed25519 AAA"
-	if err := s.RegisterSSHKey(key, "key-1", "tenant-a", "actor-a", []string{"developer"}); err != nil {
+	if err := s.RegisterSSHKey(key, "default", "tenant-a", "actor-a", []string{"developer"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := s.AuthenticateSSHKey(key, "key-2"); ok {
 		t.Fatal("key authenticated through a different verifier key ID")
+	}
+}
+
+// ADR-0043 / SPEC-0022 AC3: key IDs select one verifier key in O(1). A
+// rotation keeps existing credentials usable only while their key remains in
+// the configured ring; retiring it denies the very next use without probing.
+func TestVerifierKeyRotationKeepsThenRetiresOldCredentials(t *testing.T) {
+	s := NewServiceWithKeyRing("old", map[string][]byte{
+		"old": []byte("old-key"),
+		"new": []byte("new-key"),
+	}, time.Now)
+	_, oldToken, err := s.IssuePAT("tenant-a", "actor-a", "old", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(oldToken, "gfp_old_") {
+		t.Fatalf("old token = %q, want public old key ID prefix", oldToken)
+	}
+	if err := s.ActivateVerifierKey("new"); err != nil {
+		t.Fatal(err)
+	}
+	_, newToken, err := s.IssuePAT("tenant-a", "actor-a", "new", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(newToken, "gfp_new_") {
+		t.Fatalf("new token = %q, want public new key ID prefix", newToken)
+	}
+	if _, ok := s.AuthenticatePAT(oldToken); !ok {
+		t.Fatal("old active-key credential denied during rotation overlap")
+	}
+	if err := s.RetireVerifierKey("old"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.AuthenticatePAT(oldToken); ok {
+		t.Fatal("retired-key credential authenticated")
+	}
+	if _, ok := s.AuthenticatePAT(newToken); !ok {
+		t.Fatal("new-key credential denied after old-key retirement")
 	}
 }
 
