@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
+	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
 	"github.com/gitfrok/backend/modules/policy"
 	"github.com/gitfrok/backend/platform/bus"
 	"google.golang.org/grpc"
@@ -47,6 +48,7 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	gitv1.RegisterGitStorageServer(grpcServer, server)
+	repositoryv1.RegisterRepositoryReaderServer(grpcServer, server)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
