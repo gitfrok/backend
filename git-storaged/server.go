@@ -384,6 +384,8 @@ func gitCommandArgs(binary string, transport gitv1.GitTransport, repositoryPath 
 		switch transport {
 		case gitv1.GitTransport_GIT_TRANSPORT_SSH:
 			return []string{repositoryPath}, nil
+		case gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY:
+			return []string{"--stateless-rpc", "--advertise-refs", repositoryPath}, nil
 		case gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC:
 			return []string{"--stateless-rpc", repositoryPath}, nil
 		}

@@ -58,6 +58,22 @@ func TestSmartHTTPAuthenticatesBeforeOpeningStorageAndStreamsAdvertisement(t *te
 	}
 }
 
+func TestSmartHTTPAnonymousRequestIsDeniedWithoutStorage(t *testing.T) {
+	storage := &recordingStorage{}
+	handler := SmartHTTP{Router: Router{Authenticator: &fakeAuthenticator{principal: identityapi.Principal{TenantID: "tenant-a", ActorID: "actor-a"}, ok: true}}, Storage: storage, RequestID: func() string { return "request-1" }}
+	request := httptest.NewRequest(http.MethodGet, "https://git.test/git/tenant-a/repo-a.git/info/refs?service=git-upload-pack", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || storage.called != "" {
+		t.Fatalf("status=%d storage=%q", response.Code, storage.called)
+	}
+	if response.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("missing WWW-Authenticate challenge for the Git client")
+	}
+}
+
 func TestSmartHTTPDeniedCredentialNeverOpensStorage(t *testing.T) {
 	storage := &recordingStorage{}
 	handler := SmartHTTP{Router: Router{Authenticator: &fakeAuthenticator{}}, Storage: storage, RequestID: func() string { return "request-1" }}
@@ -69,6 +85,29 @@ func TestSmartHTTPDeniedCredentialNeverOpensStorage(t *testing.T) {
 
 	if response.Code != http.StatusUnauthorized || storage.called != "" {
 		t.Fatalf("status=%d storage=%q", response.Code, storage.called)
+	}
+}
+
+func TestSmartHTTPReceivePackDiscoveryRoutesToReceivePack(t *testing.T) {
+	storage := &recordingStorage{}
+	handler := SmartHTTP{Router: Router{Authenticator: &fakeAuthenticator{principal: identityapi.Principal{TenantID: "tenant-a", ActorID: "actor-a"}, ok: true}}, Storage: storage, RequestID: func() string { return "request-1" }}
+	request := httptest.NewRequest(http.MethodGet, "https://git.test/git/tenant-a/repo-a.git/info/refs?service=git-receive-pack", nil)
+	request.SetBasicAuth("ignored", "pat-secret")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || storage.called != "receive" {
+		t.Fatalf("status=%d storage=%q", response.Code, storage.called)
+	}
+	if got := response.Header().Get("Content-Type"); got != "application/x-git-receive-pack-advertisement" {
+		t.Fatalf("content type = %q", got)
+	}
+	if want := "001f# service=git-receive-pack\n0000receive-status"; response.Body.String() != want {
+		t.Fatalf("body = %q, want %q", response.Body.String(), want)
+	}
+	if storage.context.GetTransport() != gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_DISCOVERY {
+		t.Fatalf("transport = %s", storage.context.GetTransport())
 	}
 }
 

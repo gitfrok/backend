@@ -17,6 +17,8 @@ import (
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
 	"github.com/gitfrok/backend/modules/codesearch"
 	csapi "github.com/gitfrok/backend/modules/codesearch/api"
+	"github.com/gitfrok/backend/modules/identity"
+	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	"github.com/gitfrok/backend/modules/policy"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/repository"
@@ -92,12 +94,29 @@ func main() {
 	// Compile-time proof that the generated contracts compose into this plane alongside the
 	// modules; the agent gateway itself is wired in Phase 3.
 	_ = agentv1.HealthState_HEALTH_STATE_HEALTHY
-	// The PDP's gRPC door for out-of-process PEPs (the BFF). Serving it is the transport work
-	// T-0011 owns; constructing it here proves the contract composes with the module.
-	_ = policy.NewGRPCServer(dp.policy)
-	fmt.Printf("gitfrok dataplane-app: repository + codesearch on the in-process bus, PDP on %s\n", bundleDir)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The Git protocol front doors and the PDP's gRPC door run in this binary (ADR-0041).
+	// Configuration decides which doors exist; identity is resolved before any storage call,
+	// and git-storaged remains the PDP enforcement point (ADR-0041 decisions 2 and 4).
+	frontCfg, err := loadFrontDoorConfig(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dataplane front doors: %v\n", err)
+		os.Exit(1)
+	}
+	var authenticator identityapi.Authenticator
+	if frontCfg.httpAddr != "" || frontCfg.sshAddr != "" {
+		authenticator = identity.NewInMemory(frontCfg.patKey, dp.policy)
+	}
+	doors, err := startGitFrontDoors(ctx, frontCfg, authenticator, dp.policy)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dataplane front doors: %v\n", err)
+		os.Exit(1)
+	}
+	defer doors.Close()
+
+	fmt.Printf("gitfrok dataplane-app: repository + codesearch on the in-process bus, PDP on %s\n", bundleDir)
 	if err := health.Run(ctx, health.ListenAddr(os.Getenv(listenAddrEnv))); err != nil {
 		fmt.Fprintf(os.Stderr, "dataplane health server: %v\n", err)
 		os.Exit(1)

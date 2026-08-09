@@ -1,0 +1,227 @@
+package main
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+
+	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
+	policyv1 "github.com/gitfrok/backend/gen/proto/policy/v1"
+	"github.com/gitfrok/backend/internal/gitfrontdoor"
+	identityapi "github.com/gitfrok/backend/modules/identity/api"
+	"github.com/gitfrok/backend/modules/policy"
+	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/platform/ids"
+	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+)
+
+// Git front-door and policy-door configuration (ADR-0041). Every value is
+// per-environment configuration (invariant 13); an unconfigured plane serves
+// only health.
+const (
+	gitStorageAddrEnv   = "GITFROK_GIT_STORAGE_ADDR"
+	gitHTTPAddrEnv      = "GITFROK_GIT_HTTP_ADDR"
+	gitSSHAddrEnv       = "GITFROK_GIT_SSH_ADDR"
+	gitSSHHostKeyEnv    = "GITFROK_GIT_SSH_HOST_KEY_PATH"
+	sshVerifierKeyIDEnv = "GITFROK_SSH_VERIFIER_KEY_ID"
+	patVerifierKeyEnv   = "GITFROK_PAT_VERIFIER_KEY"
+	policyGRPCAddrEnv   = "GITFROK_POLICY_GRPC_ADDR"
+)
+
+type frontDoorConfig struct {
+	storageAddr   string
+	httpAddr      string
+	sshAddr       string
+	sshHostKey    string
+	verifierKeyID string
+	patKey        []byte
+	policyAddr    string
+}
+
+func (c frontDoorConfig) enabled() bool {
+	return c.httpAddr != "" || c.sshAddr != "" || c.policyAddr != ""
+}
+
+// loadFrontDoorConfig validates the front-door environment as one unit: a
+// partially configured door fails the rollout rather than serving half a
+// boundary (ADR-0006 fail-fast posture).
+func loadFrontDoorConfig(getenv func(string) string) (frontDoorConfig, error) {
+	cfg := frontDoorConfig{
+		storageAddr:   getenv(gitStorageAddrEnv),
+		httpAddr:      getenv(gitHTTPAddrEnv),
+		sshAddr:       getenv(gitSSHAddrEnv),
+		sshHostKey:    getenv(gitSSHHostKeyEnv),
+		verifierKeyID: getenv(sshVerifierKeyIDEnv),
+		policyAddr:    getenv(policyGRPCAddrEnv),
+	}
+	if !cfg.enabled() {
+		if cfg.storageAddr != "" {
+			return cfg, fmt.Errorf("%s is set but no listener is configured (%s, %s, or %s)", gitStorageAddrEnv, gitHTTPAddrEnv, gitSSHAddrEnv, policyGRPCAddrEnv)
+		}
+		return cfg, nil
+	}
+	if cfg.httpAddr != "" || cfg.sshAddr != "" {
+		if cfg.storageAddr == "" {
+			return cfg, fmt.Errorf("a Git transport listener requires %s", gitStorageAddrEnv)
+		}
+		key, err := base64.StdEncoding.DecodeString(getenv(patVerifierKeyEnv))
+		if err != nil || len(key) < 32 {
+			return cfg, fmt.Errorf("%s must hold base64 of at least 32 bytes when a Git transport is configured", patVerifierKeyEnv)
+		}
+		cfg.patKey = key
+	}
+	if cfg.sshAddr != "" && cfg.verifierKeyID == "" {
+		return cfg, fmt.Errorf("the SSH listener requires %s", sshVerifierKeyIDEnv)
+	}
+	return cfg, nil
+}
+
+// gitFrontDoors owns the listeners the data plane serves for ADR-0041's
+// boundary: Smart-HTTP, SSH, and the PDP's gRPC door for out-of-process PEPs.
+type gitFrontDoors struct {
+	httpListener   net.Listener
+	httpServer     *http.Server
+	sshListener    net.Listener
+	policyListener net.Listener
+	policyServer   *grpc.Server
+	conn           *grpc.ClientConn
+}
+
+func (d *gitFrontDoors) HTTPAddr() string {
+	if d.httpListener == nil {
+		return ""
+	}
+	return d.httpListener.Addr().String()
+}
+
+func (d *gitFrontDoors) SSHAddr() string {
+	if d.sshListener == nil {
+		return ""
+	}
+	return d.sshListener.Addr().String()
+}
+
+func (d *gitFrontDoors) PolicyAddr() string {
+	if d.policyListener == nil {
+		return ""
+	}
+	return d.policyListener.Addr().String()
+}
+
+func (d *gitFrontDoors) Close() {
+	if d.httpServer != nil {
+		_ = d.httpServer.Close()
+	}
+	if d.sshListener != nil {
+		_ = d.sshListener.Close()
+	}
+	if d.policyServer != nil {
+		d.policyServer.Stop()
+	}
+	if d.conn != nil {
+		_ = d.conn.Close()
+	}
+}
+
+// startGitFrontDoors binds the configured doors. The authenticator is built
+// by the caller so credential lifecycle and transport share one Identity
+// composition; pdp serves the policy door and must be the plane's decision
+// point.
+func startGitFrontDoors(ctx context.Context, cfg frontDoorConfig, authenticator identityapi.Authenticator, pdp policyapi.DecisionPoint) (*gitFrontDoors, error) {
+	doors := &gitFrontDoors{}
+	if !cfg.enabled() {
+		return doors, nil
+	}
+
+	var storage gitfrontdoor.Storage
+	if cfg.storageAddr != "" {
+		conn, err := grpc.NewClient(cfg.storageAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			doors.Close()
+			return nil, fmt.Errorf("git storage connection: %w", err)
+		}
+		doors.conn = conn
+		storage = gitfrontdoor.GRPCStorage{Client: gitv1.NewGitStorageClient(conn)}
+	}
+	router := gitfrontdoor.Router{Authenticator: authenticator}
+
+	if cfg.httpAddr != "" {
+		listener, err := net.Listen("tcp", cfg.httpAddr)
+		if err != nil {
+			doors.Close()
+			return nil, fmt.Errorf("smart-http listen %s: %w", cfg.httpAddr, err)
+		}
+		doors.httpListener = listener
+		doors.httpServer = &http.Server{Handler: gitfrontdoor.SmartHTTP{Router: router, Storage: storage, RequestID: ids.NewULID}}
+		go func() {
+			if err := doors.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "dataplane smart-http: %v\n", err)
+			}
+		}()
+	}
+
+	if cfg.sshAddr != "" {
+		signer, err := loadHostSigner(cfg.sshHostKey)
+		if err != nil {
+			doors.Close()
+			return nil, fmt.Errorf("ssh host key: %w", err)
+		}
+		listener, err := net.Listen("tcp", cfg.sshAddr)
+		if err != nil {
+			doors.Close()
+			return nil, fmt.Errorf("ssh listen %s: %w", cfg.sshAddr, err)
+		}
+		doors.sshListener = listener
+		server := gitfrontdoor.SSH{Router: router, Storage: storage, HostSigner: signer, VerifierKeyID: cfg.verifierKeyID}
+		go func() { _ = server.Serve(ctx, listener) }()
+	}
+
+	if cfg.policyAddr != "" {
+		listener, err := net.Listen("tcp", cfg.policyAddr)
+		if err != nil {
+			doors.Close()
+			return nil, fmt.Errorf("policy grpc listen %s: %w", cfg.policyAddr, err)
+		}
+		doors.policyListener = listener
+		doors.policyServer = grpc.NewServer()
+		policyv1.RegisterPolicyDecisionPointServer(doors.policyServer, policy.NewGRPCServer(pdp))
+		go func() {
+			if err := doors.policyServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+				fmt.Fprintf(os.Stderr, "dataplane policy grpc: %v\n", err)
+			}
+		}()
+	}
+
+	go func() {
+		<-ctx.Done()
+		doors.Close()
+	}()
+	return doors, nil
+}
+
+// loadHostSigner loads a PEM private key from path, or generates an ephemeral
+// ed25519 host key when path is empty. An ephemeral key changes the host
+// identity on every restart; production deployments must mount one.
+func loadHostSigner(path string) (ssh.Signer, error) {
+	if path != "" {
+		pemBytes, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return ssh.ParsePrivateKey(pemBytes)
+	}
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintln(os.Stderr, "dataplane ssh: no GITFROK_GIT_SSH_HOST_KEY_PATH set; using an ephemeral host key")
+	return ssh.NewSignerFromKey(private)
+}
