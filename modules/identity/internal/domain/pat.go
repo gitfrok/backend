@@ -47,19 +47,19 @@ func NewServiceWithClock(key []byte, now func() time.Time) *Service {
 	return &Service{key: append([]byte(nil), key...), now: now, pats: map[string]*PAT{}, byVerifier: map[string]string{}, keys: map[string]*sshKey{}}
 }
 
-func (s *Service) RegisterSSHKey(publicKey, tenant, actor string, roles []string) error {
-	if publicKey == "" || tenant == "" || actor == "" {
-		return errors.New("key, tenant and actor required")
+func (s *Service) RegisterSSHKey(publicKey, verifierKeyID, tenant, actor string, roles []string) error {
+	if publicKey == "" || verifierKeyID == "" || tenant == "" || actor == "" {
+		return errors.New("key, verifier key id, tenant and actor required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.keys[s.hash(publicKey)] = &sshKey{principal: Principal{TenantID: tenant, ActorID: actor, Roles: append([]string(nil), roles...)}}
+	s.keys[s.sshKeyIndex(publicKey, verifierKeyID)] = &sshKey{principal: Principal{TenantID: tenant, ActorID: actor, Roles: append([]string(nil), roles...)}}
 	return nil
 }
-func (s *Service) AuthenticateSSHKey(publicKey string) (Principal, bool) {
+func (s *Service) AuthenticateSSHKey(publicKey, verifierKeyID string) (Principal, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	k, ok := s.keys[s.hash(publicKey)]
+	k, ok := s.keys[s.sshKeyIndex(publicKey, verifierKeyID)]
 	if !ok || k.revokedAt != nil {
 		return Principal{}, false
 	}
@@ -67,10 +67,10 @@ func (s *Service) AuthenticateSSHKey(publicKey string) (Principal, bool) {
 	p.Roles = append([]string(nil), p.Roles...)
 	return p, true
 }
-func (s *Service) RevokeSSHKey(tenant, actor, publicKey string) error {
+func (s *Service) RevokeSSHKey(tenant, actor, publicKey, verifierKeyID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := s.keys[s.hash(publicKey)]
+	k := s.keys[s.sshKeyIndex(publicKey, verifierKeyID)]
 	if k == nil || k.principal.TenantID != tenant || k.principal.ActorID != actor {
 		return errors.New("not found")
 	}
@@ -145,6 +145,13 @@ func (s *Service) hash(token string) string {
 	h := hmac.New(sha256.New, s.key)
 	_, _ = h.Write([]byte(token))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// sshKeyIndex binds the configured, public verifier-key-ring selector into one
+// keyed lookup. The in-memory adapter mirrors the production tuple shape from
+// ADR-0043; it never probes another selector when this key is absent.
+func (s *Service) sshKeyIndex(publicKey, verifierKeyID string) string {
+	return s.hash("ssh\x00" + verifierKeyID + "\x00" + publicKey)
 }
 func (s *Service) public(p PAT) PAT {
 	p.verifier = ""

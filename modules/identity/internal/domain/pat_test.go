@@ -36,14 +36,14 @@ func TestPATDoesNotCrossTenant(t *testing.T) {
 
 func TestSSHKeyAuthenticatesToSamePrincipalShape(t *testing.T) {
 	s := NewService([]byte("test-key"))
-	if err := s.RegisterSSHKey("ssh-ed25519 AAA", "tenant-a", "actor-a", []string{"developer"}); err != nil {
+	if err := s.RegisterSSHKey("ssh-ed25519 AAA", "key-1", "tenant-a", "actor-a", []string{"developer"}); err != nil {
 		t.Fatal(err)
 	}
-	p, ok := s.AuthenticateSSHKey("ssh-ed25519 AAA")
+	p, ok := s.AuthenticateSSHKey("ssh-ed25519 AAA", "key-1")
 	if !ok || p.TenantID != "tenant-a" || p.ActorID != "actor-a" {
 		t.Fatalf("principal=%+v ok=%v", p, ok)
 	}
-	if _, ok := s.AuthenticateSSHKey("ssh-ed25519 unknown"); ok {
+	if _, ok := s.AuthenticateSSHKey("ssh-ed25519 unknown", "key-1"); ok {
 		t.Fatal("unknown key authenticated")
 	}
 }
@@ -85,14 +85,27 @@ func TestRevokedSSHKeyDeniesNextAuthentication(t *testing.T) {
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	s := NewServiceWithClock([]byte("test-key"), func() time.Time { return now })
 	const key = "ssh-ed25519 AAA"
-	if err := s.RegisterSSHKey(key, "tenant-a", "actor-a", []string{"developer"}); err != nil {
+	if err := s.RegisterSSHKey(key, "key-1", "tenant-a", "actor-a", []string{"developer"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeSSHKey("tenant-a", "actor-a", key); err != nil {
+	if err := s.RevokeSSHKey("tenant-a", "actor-a", key, "key-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.AuthenticateSSHKey(key); ok {
+	if _, ok := s.AuthenticateSSHKey(key, "key-1"); ok {
 		t.Fatal("revoked SSH key authenticated")
+	}
+}
+
+// SPEC-0022 AC2/AC3: the configured key ID selects one verifier namespace;
+// a key registered under another active ID cannot authenticate by probing it.
+func TestSSHKeyRequiresMatchingVerifierKeyID(t *testing.T) {
+	s := NewService([]byte("test-key"))
+	const key = "ssh-ed25519 AAA"
+	if err := s.RegisterSSHKey(key, "key-1", "tenant-a", "actor-a", []string{"developer"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.AuthenticateSSHKey(key, "key-2"); ok {
+		t.Fatal("key authenticated through a different verifier key ID")
 	}
 }
 

@@ -51,7 +51,7 @@ type PAT struct {
 }
 type Authenticator interface {
 	AuthenticatePAT(ctx context.Context, token string) (Principal, bool)
-	AuthenticateSSHKey(ctx context.Context, key string) (Principal, bool)
+	AuthenticateSSHKey(ctx context.Context, key, verifierKeyID string) (Principal, bool)
 	IssuePAT(ctx context.Context, tenantID, actorID, label string, scopes []string, expiresAt *time.Time) (PAT, string, error)
 	RevokePAT(ctx context.Context, tenantID, actorID, patID string) (PAT, error)
 	ListPATs(ctx context.Context, tenantID, actorID string) ([]PAT, error)

@@ -41,7 +41,7 @@ func (s *Server) AuthenticatePAT(ctx context.Context, req *identityv1.Authentica
 	return &identityv1.AuthenticateCredentialResponse{Principal: principal(p)}, nil
 }
 func (s *Server) AuthenticateSSHKey(ctx context.Context, req *identityv1.AuthenticateSSHKeyRequest) (*identityv1.AuthenticateCredentialResponse, error) {
-	p, ok := s.auth.AuthenticateSSHKey(ctx, string(req.GetVerifiedPublicKey()))
+	p, ok := s.auth.AuthenticateSSHKey(ctx, string(req.GetVerifiedPublicKey()), req.GetVerifierKeyId())
 	if !ok {
 		return &identityv1.AuthenticateCredentialResponse{}, nil
 	}

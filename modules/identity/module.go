@@ -30,8 +30,8 @@ func (s service) AuthenticatePAT(_ context.Context, token string) (api.Principal
 	p, ok := s.domain.AuthenticatePAT(token)
 	return api.Principal{TenantID: p.TenantID, ActorID: p.ActorID, Roles: p.Roles}, ok
 }
-func (s service) AuthenticateSSHKey(_ context.Context, key string) (api.Principal, bool) {
-	p, ok := s.domain.AuthenticateSSHKey(key)
+func (s service) AuthenticateSSHKey(_ context.Context, key, verifierKeyID string) (api.Principal, bool) {
+	p, ok := s.domain.AuthenticateSSHKey(key, verifierKeyID)
 	return api.Principal{TenantID: p.TenantID, ActorID: p.ActorID, Roles: p.Roles}, ok
 }
 func (s service) IssuePAT(ctx context.Context, t, a, l string, scopes []string, expiresAt *time.Time) (api.PAT, string, error) {
