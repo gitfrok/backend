@@ -155,11 +155,14 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	}
 	threads := make([]api.ImportedThread, 0, len(notes))
 	for _, note := range notes {
+		// A diff note keeps its position; a note the source can no longer place
+		// on a line degrades to the file, and one with no path at all attaches to
+		// the merge request. The note itself is never dropped (AC5).
 		threads = append(threads, api.ImportedThread{
 			ThreadID:       "note-" + strconv.FormatInt(note.ID, 10),
 			MergeRequestID: strconv.FormatInt(mr.IID, 10),
 			Path:           note.Position.NewPath,
-			Anchor:         "FILE",
+			Anchor:         api.AnchorFor(note.Position.NewPath, note.Position.NewLine),
 			Comments: []api.ImportedComment{{
 				CommentID:     "note-" + strconv.FormatInt(note.ID, 10),
 				DeclaredActor: note.Author.Username,
@@ -294,8 +297,12 @@ type note struct {
 	Position  position  `json:"position"`
 }
 
+// position is the diff position GitLab declares for a diff note. A note that
+// is not on a diff has no position, and an outdated one has no new_line — both
+// degrade the anchor rather than dropping the note (AC5).
 type position struct {
 	NewPath string `json:"new_path"`
+	NewLine int64  `json:"new_line"`
 }
 
 type glUser struct {

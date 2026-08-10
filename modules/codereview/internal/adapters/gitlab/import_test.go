@@ -63,7 +63,14 @@ func newStubServer(t *testing.T) *httptest.Server {
 			_ = json.NewEncoder(w).Encode([]note{{
 				ID: 21, Body: "Looks good", Author: glUser{Username: "dave"},
 				CreatedAt: time.Date(2024, 2, 2, 0, 0, 0, 0, time.UTC),
+				Position:  position{NewPath: "widget.go", NewLine: 12},
+			}, {
+				ID: 22, Body: "File-level remark", Author: glUser{Username: "dave"},
+				CreatedAt: time.Date(2024, 2, 2, 1, 0, 0, 0, time.UTC),
 				Position:  position{NewPath: "widget.go"},
+			}, {
+				ID: 23, Body: "General remark", Author: glUser{Username: "erin"},
+				CreatedAt: time.Date(2024, 2, 2, 2, 0, 0, 0, time.UTC),
 			}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -86,7 +93,7 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportHistory: %v", err)
 	}
-	if counts["merge_requests"] != 1 || counts["approvals"] != 1 || counts["comments"] != 1 {
+	if counts["merge_requests"] != 1 || counts["approvals"] != 1 || counts["comments"] != 3 {
 		t.Fatalf("counts = %v", counts)
 	}
 
@@ -107,8 +114,45 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 	if len(mr.Approvals) != 1 || mr.Approvals[0].Provenance.Class != api.AttestImported {
 		t.Fatalf("approvals = %+v", mr.Approvals)
 	}
-	if len(mr.Threads) != 1 || mr.Threads[0].Comments[0].DeclaredActor != "dave" {
+	if len(mr.Threads) != 3 || mr.Threads[0].Comments[0].DeclaredActor != "dave" {
 		t.Fatalf("threads = %+v", mr.Threads)
+	}
+}
+
+// A note's anchor degrades with the position the source declared, and no note
+// is dropped for want of one (AC5).
+func TestImportHistoryDegradesAnchors(t *testing.T) {
+	server := newStubServer(t)
+	defer server.Close()
+	records := newMemoryRecords()
+	client := New(records, server.Client())
+	client.base = server.URL
+
+	if _, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
+		SourceURL: "https://gitlab.com/group/widgets.git", SourceSystem: "gitlab", SourceInstance: "gitlab.com",
+	}); err != nil {
+		t.Fatalf("ImportHistory: %v", err)
+	}
+	stored, _ := records.ListImport(context.Background(), "import-1")
+	threads := stored[0].Threads
+	want := []struct {
+		anchor      string
+		path        string
+		approximate bool
+	}{
+		{api.AnchorDiff, "widget.go", false},
+		{api.AnchorFile, "widget.go", true},
+		{api.AnchorMerge, "", true},
+	}
+	if len(threads) != len(want) {
+		t.Fatalf("threads = %d, want %d", len(threads), len(want))
+	}
+	for i, w := range want {
+		if threads[i].Anchor != w.anchor || threads[i].Path != w.path || threads[i].Approximate() != w.approximate {
+			t.Errorf("thread %d = anchor %q path %q approximate %v; want %q %q %v",
+				i, threads[i].Anchor, threads[i].Path, threads[i].Approximate(), w.anchor, w.path, w.approximate)
+		}
 	}
 }
 

@@ -195,6 +195,35 @@ type ImportedThread struct {
 	Provenance     Provenance
 }
 
+// Anchor precisions for an imported thread. DIFF is the only exact anchor: the
+// source still declared a resolvable diff position. FILE and MERGE are
+// approximate, and the read surface marks them so the UI can render them as
+// such (SPEC-0011 AC5/AC19).
+const (
+	AnchorDiff  = "DIFF"
+	AnchorFile  = "FILE"
+	AnchorMerge = "MERGE"
+)
+
+// AnchorFor degrades an imported comment's anchor from the position the source
+// declared: a resolvable diff position anchors to DIFF, a path alone to FILE,
+// and neither to MERGE. No comment is ever dropped for want of an anchor (AC5).
+func AnchorFor(path string, line int64) string {
+	switch {
+	case path != "" && line > 0:
+		return AnchorDiff
+	case path != "":
+		return AnchorFile
+	default:
+		return AnchorMerge
+	}
+}
+
+// Approximate reports whether a thread's anchor is weaker than the diff
+// position it was written against, which is what the UI labels as approximate
+// (AC5, AC23).
+func (t ImportedThread) Approximate() bool { return t.Anchor != AnchorDiff }
+
 // ImportedComment is one imported review comment.
 type ImportedComment struct {
 	CommentID     string

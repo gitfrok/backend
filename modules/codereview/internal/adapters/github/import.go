@@ -148,11 +148,14 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 			})
 		}
 		if review.Body != "" {
+			// A review summary carries no diff position, so it attaches to the
+			// merge request itself rather than claiming a file it never named
+			// (AC5).
 			threads = append(threads, api.ImportedThread{
 				ThreadID:       fmt.Sprintf("review-%d", review.ID),
 				MergeRequestID: fmt.Sprintf("%d", pr.Number),
 				Path:           review.Path,
-				Anchor:         "FILE",
+				Anchor:         api.AnchorFor(review.Path, 0),
 				Comments: []api.ImportedComment{{
 					CommentID:     fmt.Sprintf("review-%d", review.ID),
 					DeclaredActor: review.User.Login,
@@ -163,6 +166,30 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 				Provenance: provenance,
 			})
 		}
+	}
+
+	// Line comments are a separate GitHub surface from reviews. Each keeps the
+	// position the source declared; one whose line no longer resolves degrades
+	// to the file, and is never dropped (AC5).
+	comments, err := c.listReviewComments(ctx, src, pr.Number, command.SourceToken)
+	if err != nil {
+		return api.ImportedMergeRequest{}, err
+	}
+	for _, comment := range comments {
+		threads = append(threads, api.ImportedThread{
+			ThreadID:       fmt.Sprintf("comment-%d", comment.ID),
+			MergeRequestID: fmt.Sprintf("%d", pr.Number),
+			Path:           comment.Path,
+			Anchor:         api.AnchorFor(comment.Path, comment.Line),
+			Comments: []api.ImportedComment{{
+				CommentID:     fmt.Sprintf("comment-%d", comment.ID),
+				DeclaredActor: comment.User.Login,
+				Body:          comment.Body,
+				DeclaredAt:    comment.CreatedAt,
+				Provenance:    provenance,
+			}},
+			Provenance: provenance,
+		})
 	}
 
 	return api.ImportedMergeRequest{
@@ -201,6 +228,16 @@ func (c *Client) listReviews(ctx context.Context, src source, number int64, toke
 		return nil, err
 	}
 	return reviews, nil
+}
+
+// listReviewComments fetches the line comments for one pull request.
+func (c *Client) listReviewComments(ctx context.Context, src source, number int64, token string) ([]reviewComment, error) {
+	path := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments?per_page=100", c.base, src.owner, src.repo, number)
+	var comments []reviewComment
+	if err := c.getJSON(ctx, path, token, &comments); err != nil {
+		return nil, err
+	}
+	return comments, nil
 }
 
 // getJSON performs one authenticated GET and decodes the JSON body.
@@ -274,6 +311,18 @@ type pullReview struct {
 	Path        string    `json:"path"`
 	User        ghUser    `json:"user"`
 	SubmittedAt time.Time `json:"submitted_at"`
+}
+
+// reviewComment is the subset of the GitHub review-comment API shape this
+// importer needs. line is absent (0) once the source considers the comment
+// outdated, which is what degrades its anchor to the file (AC5).
+type reviewComment struct {
+	ID        int64     `json:"id"`
+	Body      string    `json:"body"`
+	Path      string    `json:"path"`
+	Line      int64     `json:"line"`
+	User      ghUser    `json:"user"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type ghUser struct {
