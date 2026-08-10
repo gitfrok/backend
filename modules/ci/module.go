@@ -12,6 +12,7 @@ import (
 
 	"github.com/gitfrok/backend/modules/ci/api"
 	"github.com/gitfrok/backend/modules/ci/internal/adapters/grpc"
+	"github.com/gitfrok/backend/modules/ci/internal/adapters/k8s"
 	"github.com/gitfrok/backend/modules/ci/internal/app"
 	"github.com/gitfrok/backend/modules/ci/internal/dev"
 	"github.com/gitfrok/backend/modules/ci/internal/dispatcher"
@@ -98,6 +99,17 @@ func (r *Runtime) MetricsHandler() http.Handler { return kedametrics.Handler(r.g
 // NewDevLauncher returns the dev sandbox launcher: it records dispatch attempts
 // without contacting a cluster. It is not a production isolation boundary.
 func NewDevLauncher() Launcher { return &dev.Launcher{} }
+
+// NewClusterLauncher returns the production sandbox launcher: it creates one
+// ephemeral, gVisor-isolated Kubernetes Job per attempt and destroys it after.
+// An empty kubeconfigPath means the pod's own service account in-cluster.
+func NewClusterLauncher(kubeconfigPath, namespace string) (Launcher, error) {
+	client, err := k8s.NewClusterClient(kubeconfigPath, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return k8s.NewLauncher(client, namespace), nil
+}
 
 // NewGRPCServer wraps the in-process job service in the CI/CD gRPC server adapter,
 // ready to register on the plane binary's gRPC server.

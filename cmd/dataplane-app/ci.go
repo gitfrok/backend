@@ -27,7 +27,27 @@ const (
 	// ciMetricsAddrEnv is where the queued-depth metric is served for KEDA's
 	// Prometheus scaler. Empty means the plane publishes no scaler metric.
 	ciMetricsAddrEnv = "GITFROK_CI_METRICS_ADDR"
+	// ciKubeconfigEnv points the launcher at a cluster from outside it. Empty means
+	// the pod's own service account, which is the in-cluster case.
+	ciKubeconfigEnv = "GITFROK_CI_KUBECONFIG"
+	// ciLauncherEnv selects the launcher. It exists so a developer can opt out of
+	// contacting a cluster; anything other than "dev" runs real sandboxes.
+	ciLauncherEnv = "GITFROK_CI_LAUNCHER"
 )
+
+// devLauncherValue is the one value that turns off real sandboxes. It is opt-in
+// rather than a fallback: an environment that configured dispatch and then cannot
+// reach a cluster must fail its rollout, not silently record launches that never
+// happened.
+const devLauncherValue = "dev"
+
+// newCILauncher chooses the sandbox launcher for this environment.
+func newCILauncher(getenv func(string) string, config ci.RunnerConfig) (ci.Launcher, error) {
+	if getenv(ciLauncherEnv) == devLauncherValue {
+		return ci.NewDevLauncher(), nil
+	}
+	return ci.NewClusterLauncher(getenv(ciKubeconfigEnv), config.Namespace)
+}
 
 // loadCIRunnerConfig reads the runner configuration. An empty image means CI
 // dispatch is not configured for this environment, which is not an error: the

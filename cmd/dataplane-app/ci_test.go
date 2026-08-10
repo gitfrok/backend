@@ -83,6 +83,29 @@ func TestLoadCIRunnerConfigRequiresEveryValueOnceTheImageIsSet(t *testing.T) {
 	}
 }
 
+// The dev launcher never contacts a cluster, so it must be chosen explicitly.
+func TestDevLauncherIsOptIn(t *testing.T) {
+	env := completeRunnerEnv()
+	env[ciLauncherEnv] = devLauncherValue
+	launcher, err := newCILauncher(getenvFrom(env), ci.RunnerConfig{Namespace: "gitfrok-ci"})
+	if err != nil {
+		t.Fatalf("newCILauncher: %v", err)
+	}
+	if launcher == nil {
+		t.Fatal("no launcher was built")
+	}
+}
+
+// An environment that configured dispatch and then cannot reach a cluster must
+// fail its rollout rather than silently record launches that never happened.
+func TestAnUnreachableClusterFailsTheRollout(t *testing.T) {
+	env := completeRunnerEnv()
+	env[ciKubeconfigEnv] = t.TempDir() + "/no-such-kubeconfig"
+	if _, err := newCILauncher(getenvFrom(env), ci.RunnerConfig{Namespace: "gitfrok-ci"}); err == nil {
+		t.Fatal("an unreachable cluster produced a launcher")
+	}
+}
+
 // KEDA scales the runner on this metric, so the plane must actually serve it.
 func TestServeCIMetricsExposesTheQueuedDepthGauge(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
