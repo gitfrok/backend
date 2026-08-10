@@ -583,7 +583,7 @@ func refs(ctx context.Context, repositoryPath string) (map[string]string, error)
 		return nil, err
 	}
 	result := make(map[string]string)
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(output)), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 {
 			result[fields[0]] = fields[1]
@@ -623,7 +623,7 @@ func validRepositoryPath(value string) bool {
 	if value == "" || len(value) > 4096 || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.ContainsRune(value, '\x00') {
 		return false
 	}
-	for _, segment := range strings.Split(value, "/") {
+	for segment := range strings.SplitSeq(value, "/") {
 		if segment == "" || segment == "." || segment == ".." {
 			return false
 		}

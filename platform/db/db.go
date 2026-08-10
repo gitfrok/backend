@@ -144,8 +144,8 @@ func (p *Pool) auditIfIsolationViolation(ctx context.Context, tenant tenancy.ID,
 	if p.audit == nil {
 		return
 	}
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != sqlStateInsufficientPrivilege {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok || pgErr.Code != sqlStateInsufficientPrivilege {
 		return
 	}
 	_ = p.audit.Publish(ctx, audit.TenantIsolationViolation{

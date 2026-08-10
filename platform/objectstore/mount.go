@@ -229,7 +229,7 @@ func (m *Mount) pathFor(key string) (string, error) {
 	if key == "" || strings.HasPrefix(key, "/") {
 		return "", fmt.Errorf("objectstore: %q is not an object key", key)
 	}
-	for _, segment := range strings.Split(key, "/") {
+	for segment := range strings.SplitSeq(key, "/") {
 		if segment == "" || segment == "." || segment == ".." {
 			return "", fmt.Errorf("objectstore: %q is not an object key", key)
 		}

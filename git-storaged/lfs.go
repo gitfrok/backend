@@ -143,7 +143,7 @@ func lfsPointersInRefs(ctx context.Context, repositoryPath string, refs []string
 
 	seen := map[string]bool{}
 	var pointers []lfsPointer
-	for _, line := range strings.Split(strings.TrimSpace(string(listed)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(string(listed)), "\n") {
 		object := strings.TrimSpace(line)
 		if object == "" {
 			continue

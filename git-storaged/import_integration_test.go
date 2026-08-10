@@ -147,7 +147,7 @@ func refList(t *testing.T, dir string) []string {
 	out := mustGitOutput(t, dir, "for-each-ref", "--format=%(refname) %(objectname)",
 		"refs/heads", "refs/tags")
 	var refs []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		if line != "" {
 			refs = append(refs, line)
 		}

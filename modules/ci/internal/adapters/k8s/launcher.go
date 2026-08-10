@@ -113,12 +113,10 @@ func BuildJob(sandbox runner.Sandbox, namespace string) (*batchv1.Job, error) {
 		return nil, errors.New("ci k8s: sandbox requested host access or privilege")
 	}
 
-	no, yes := false, true
-	var (
-		backoffLimit          int32 = 0
-		ttlSecondsAfterFinish int32 = 0
-		runAsUser             int64 = 65532
-	)
+	no, yes := new(false), new(true)
+	backoffLimit := new(int32(0))
+	ttlSecondsAfterFinish := new(int32(0))
+	runAsUser := new(int64(65532))
 
 	volumes := make([]corev1.Volume, 0, len(sandbox.Volumes))
 	mounts := make([]corev1.VolumeMount, 0, len(sandbox.Volumes))
@@ -150,20 +148,20 @@ func BuildJob(sandbox runner.Sandbox, namespace string) (*batchv1.Job, error) {
 			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit:            &backoffLimit,
-			TTLSecondsAfterFinished: &ttlSecondsAfterFinish,
+			BackoffLimit:            backoffLimit,
+			TTLSecondsAfterFinished: ttlSecondsAfterFinish,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
 					RuntimeClassName:             &sandbox.RuntimeClass,
 					RestartPolicy:                corev1.RestartPolicyNever,
-					AutomountServiceAccountToken: &no,
+					AutomountServiceAccountToken: no,
 					HostNetwork:                  sandbox.HostNetwork,
 					HostPID:                      sandbox.HostPID,
 					HostIPC:                      sandbox.HostIPC,
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &yes,
-						RunAsUser:    &runAsUser,
+						RunAsNonRoot: yes,
+						RunAsUser:    runAsUser,
 					},
 					Volumes: volumes,
 					Containers: []corev1.Container{{

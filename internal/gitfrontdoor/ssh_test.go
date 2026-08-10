@@ -2,7 +2,6 @@ package gitfrontdoor
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"net"
@@ -60,8 +59,7 @@ func TestSSHServesOnlyVerifiedForcedGitCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	storage := &recordingStorage{}
 	server := SSH{Router: Router{Authenticator: &fakeAuthenticator{sshPrincipal: identityapi.Principal{TenantID: "tenant-a", ActorID: "actor-a"}, sshOK: true}}, Storage: storage, HostSigner: hostSigner, VerifierKeyID: "default"}
 	go func() { _ = server.Serve(ctx, listener) }()

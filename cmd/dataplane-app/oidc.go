@@ -66,7 +66,7 @@ func parseTenantMapping(value string) (map[string]string, error) {
 
 func splitList(value string) []string {
 	var out []string
-	for _, entry := range strings.Split(value, ",") {
+	for entry := range strings.SplitSeq(value, ",") {
 		if entry = strings.TrimSpace(entry); entry != "" {
 			out = append(out, entry)
 		}

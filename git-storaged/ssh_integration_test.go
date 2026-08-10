@@ -50,8 +50,7 @@ func TestSSHGitCloneAndPushStreamThroughGitStorage(t *testing.T) {
 	}
 	defer listener.Close()
 
-	serveCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	serveCtx := t.Context()
 	server := gitfrontdoor.SSH{
 		Router:  gitfrontdoor.Router{Authenticator: sshTransportAuthenticator{key: canonicalAuthorizedKey(t, clientPublic)}},
 		Storage: gitfrontdoor.GRPCStorage{Client: client}, HostSigner: hostSigner, VerifierKeyID: "test-key",
@@ -106,8 +105,7 @@ func TestSSHUnknownKeyIsDeniedBeforeStorage(t *testing.T) {
 	defer listener.Close()
 
 	storage := &deniedStorage{}
-	serveCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	serveCtx := t.Context()
 	server := gitfrontdoor.SSH{
 		Router:        gitfrontdoor.Router{Authenticator: sshTransportAuthenticator{key: "known-key"}},
 		Storage:       storage,
