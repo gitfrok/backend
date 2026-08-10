@@ -139,7 +139,7 @@ func validBranchRef(ref string) bool {
 		strings.HasSuffix(name, ".lock") {
 		return false
 	}
-	for _, segment := range strings.Split(name, "/") {
+	for segment := range strings.SplitSeq(name, "/") {
 		if segment == "" || segment == "." || segment == ".." || strings.HasPrefix(segment, "-") {
 			return false
 		}

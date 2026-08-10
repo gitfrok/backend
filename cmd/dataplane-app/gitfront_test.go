@@ -172,8 +172,7 @@ func TestDataPlaneServesSmartHTTPFrontDoor(t *testing.T) {
 	token := issueTestPAT(t, authenticator)
 
 	cfg := frontDoorConfig{storageAddr: storageAddr, httpAddr: "127.0.0.1:0", patKey: key}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	doors, err := startGitFrontDoors(ctx, cfg, authenticator, allowDecisionPoint{})
 	if err != nil {
 		t.Fatalf("startGitFrontDoors(): %v", err)
@@ -249,8 +248,7 @@ func TestDataPlaneSSHDeniesUnknownKey(t *testing.T) {
 	authenticator := identity.NewInMemory(key, allowDecisionPoint{})
 
 	cfg := frontDoorConfig{storageAddr: storageAddr, sshAddr: "127.0.0.1:0", patKey: key, verifierKeyID: "active-1"}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	doors, err := startGitFrontDoors(ctx, cfg, authenticator, allowDecisionPoint{})
 	if err != nil {
 		t.Fatalf("startGitFrontDoors(): %v", err)
@@ -282,8 +280,7 @@ func TestDataPlaneSSHDeniesUnknownKey(t *testing.T) {
 // when configured, answering over the contract rather than in-process calls.
 func TestDataPlaneServesPolicyGRPCDoor(t *testing.T) {
 	cfg := frontDoorConfig{policyAddr: "127.0.0.1:0"}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	doors, err := startGitFrontDoors(ctx, cfg, nil, allowDecisionPoint{})
 	if err != nil {
 		t.Fatalf("startGitFrontDoors(): %v", err)

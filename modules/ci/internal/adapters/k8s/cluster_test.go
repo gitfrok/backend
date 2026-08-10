@@ -67,7 +67,7 @@ func TestAwaitTerminalReportsCompletion(t *testing.T) {
 		t.Fatalf("seeding the job: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	go func() {
 		// The fake clientset only emits watch events for changes made after the
@@ -92,7 +92,7 @@ func TestAwaitTerminalReportsFailureWithItsReason(t *testing.T) {
 		t.Fatalf("seeding the job: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -120,7 +120,7 @@ func TestAwaitTerminalTreatsDeletionAsFailure(t *testing.T) {
 		t.Fatalf("seeding the job: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -194,7 +194,7 @@ func TestLauncherRunsAnAttemptThroughTheClusterClient(t *testing.T) {
 		t.Fatalf("Launch created %d jobs, want 1", len(created.Items))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	name := created.Items[0].Name
 	go func() {

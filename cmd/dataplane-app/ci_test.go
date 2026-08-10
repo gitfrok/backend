@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"io"
 	"net"
 	"net/http"
@@ -118,8 +117,7 @@ func TestServeCIMetricsExposesTheQueuedDepthGauge(t *testing.T) {
 	}
 
 	runtime := ci.NewRuntime(denyAll{}, nil, ci.RunnerConfig{}, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	closeMetrics, err := serveCIMetrics(ctx, addr, runtime.MetricsHandler())
 	if err != nil {
 		t.Fatalf("serveCIMetrics: %v", err)

@@ -423,7 +423,7 @@ func validBranchRef(ref string) bool {
 	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.Contains(name, "//") {
 		return false
 	}
-	for _, segment := range strings.Split(name, "/") {
+	for segment := range strings.SplitSeq(name, "/") {
 		if segment == "" || segment == "." || segment == ".." {
 			return false
 		}

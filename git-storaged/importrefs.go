@@ -229,7 +229,7 @@ func repositoryBytes(ctx context.Context, repositoryPath string) int64 {
 		return 0
 	}
 	var kibibytes int64
-	for _, line := range strings.Split(string(output), "\n") {
+	for line := range strings.SplitSeq(string(output), "\n") {
 		key, value, found := strings.Cut(line, ":")
 		if !found {
 			continue
