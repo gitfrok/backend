@@ -110,7 +110,7 @@ func (stubPDP) Decide(context.Context, policyapi.Request) (policyapi.Decision, e
 
 func newTestImportService(store ImportStore, git GitImporter, history HistoryImporter) (*ImportService, *bus.InProcess, *[]audit.HistoryImported, *[]audit.HistoryImportRevoked) {
 	b := bus.NewInProcess()
-	svc := NewImportService(store, git, history, stubPDP{}, b)
+	svc := NewImportService(store, NewMemoryRecordStore(), git, history, stubPDP{}, b)
 	svc.newID = func() string { return "import-1" }
 	svc.now = func() time.Time { return time.Unix(1780000000, 0).UTC() }
 

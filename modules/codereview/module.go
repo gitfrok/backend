@@ -6,8 +6,11 @@
 package codereview
 
 import (
+	"net/http"
+
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	"github.com/gitfrok/backend/modules/codereview/api"
+	"github.com/gitfrok/backend/modules/codereview/internal/adapters/github"
 	"github.com/gitfrok/backend/modules/codereview/internal/adapters/gitwire"
 	codereviewgrpc "github.com/gitfrok/backend/modules/codereview/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/codereview/internal/app"
@@ -56,11 +59,18 @@ func NewGitImporter(client gitv1.GitStorageClient) GitImporter {
 	return gitwire.NewGitImporter(client)
 }
 
-// NewImportService builds the import service on the dev/in-memory import store.
+// NewGithubHistoryImporter builds the history-phase port on the GitHub API,
+// storing imported records in the in-memory record store. httpClient may be
+// nil for the default client.
+func NewGithubHistoryImporter(httpClient *http.Client) HistoryImporter {
+	return github.New(app.NewMemoryRecordStore(), httpClient)
+}
+
+// NewImportService builds the import service on the dev in-memory stores.
 // history may be nil when the history phase is not wired; the git phase is
 // required.
 func NewImportService(git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus) api.ImportService {
-	return app.NewImportService(app.NewMemoryImportStore(), git, history, pdp, events)
+	return app.NewImportService(app.NewMemoryImportStore(), app.NewMemoryRecordStore(), git, history, pdp, events)
 }
 
 // NewImportGRPCServer wraps the in-process import surface in its gRPC adapter.

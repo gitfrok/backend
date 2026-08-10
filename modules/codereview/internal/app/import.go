@@ -82,6 +82,7 @@ type ImportStore interface {
 // ImportService is the Code Review context's import surface.
 type ImportService struct {
 	store   ImportStore
+	records api.ImportedRecordStore
 	git     GitImporter
 	history HistoryImporter
 	pdp     policyapi.DecisionPoint
@@ -91,10 +92,11 @@ type ImportService struct {
 }
 
 // NewImportService wires the import service. history may be nil in a build that
-// has not landed the history phase; git is required.
-func NewImportService(store ImportStore, git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus) *ImportService {
+// has not landed the history phase; git and records are required.
+func NewImportService(store ImportStore, records api.ImportedRecordStore, git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus) *ImportService {
 	return &ImportService{
 		store:   store,
+		records: records,
 		git:     git,
 		history: history,
 		pdp:     pdp,
@@ -106,6 +108,10 @@ func NewImportService(store ImportStore, git GitImporter, history HistoryImporte
 
 // ErrImportDenied is the coarse refusal an unauthorized import command returns.
 var ErrImportDenied = errors.New("codereview: import unavailable")
+
+// ErrImportStalled is returned when the source rate-limits the import. The
+// state machine records STALLED, not FAILED (SPEC-0011 AC8).
+var ErrImportStalled = errors.New("codereview: import stalled by the source")
 
 // Create starts (or resumes) an import of one source repository. It is
 // idempotent per (tenant, repository, source URL): a retried Create returns the
@@ -150,6 +156,12 @@ func (s *ImportService) Create(ctx context.Context, req api.CreateImportRequest)
 			SourceSystem: req.SourceSystem, SourceInstance: req.SourceInstance,
 		})
 		if err != nil {
+			if errors.Is(err, ErrImportStalled) {
+				// Source-side rate limiting is a stall, not a failure (AC8):
+				// the import can be resumed.
+				s.stall(ctx, imp)
+				return api.Import{}, ErrImportStalled
+			}
 			s.fail(ctx, imp, "history phase failed")
 			return api.Import{}, ErrImportDenied
 		}
@@ -208,6 +220,14 @@ func (s *ImportService) fail(ctx context.Context, imp api.Import, reason string)
 	}
 }
 
+// stall marks an import stalled by source-side rate limiting (SPEC-0011 AC8).
+// A stalled import is resumable, unlike a failed one.
+func (s *ImportService) stall(ctx context.Context, imp api.Import) {
+	if _, err := s.store.MarkImportPhase(ctx, imp.ID, imp.GitPhaseComplete, imp.HistoryPhaseComplete, api.ImportStalled, "", "source rate limit", imp.RecordCounts); err != nil {
+		return
+	}
+}
+
 // Get returns one import within the caller's tenant. A request in another
 // tenant is indistinguishable from one that does not exist.
 func (s *ImportService) Get(ctx context.Context, principal api.Context, importID string) (api.Import, error) {
@@ -244,6 +264,12 @@ func (s *ImportService) Revoke(ctx context.Context, req api.RevokeImportRequest)
 	}
 	revoked, err := s.store.TombstoneImport(ctx, req.ImportID)
 	if err != nil {
+		return api.Import{}, ErrImportDenied
+	}
+	// Tombstone the imported records too: they are excluded from all reads and
+	// exports (AC17). The record store's tombstone is separate from the import
+	// state tombstone, but both are forward-only.
+	if err := s.records.Tombstone(ctx, req.ImportID); err != nil {
 		return api.Import{}, ErrImportDenied
 	}
 	if err := s.bus.Publish(ctx, audit.HistoryImportRevoked{
@@ -367,4 +393,48 @@ func (m *memoryImportStore) TombstoneImport(_ context.Context, id string) (api.I
 	m.imports[id] = imp
 	m.revoked[id] = true
 	return imp, nil
+}
+
+// memoryRecordStore is the dev/in-memory imported-record store. It persists
+// ATTESTED_IMPORT history within the Code Review context (ADR-0029 §2), with
+// tombstone-on-revoke and no individual update or delete path (AC13).
+type memoryRecordStore struct {
+	mu      sync.Mutex
+	records map[string][]api.ImportedMergeRequest
+	dead    map[string]bool
+}
+
+// NewMemoryRecordStore returns the dev/in-memory imported-record store.
+func NewMemoryRecordStore() api.ImportedRecordStore {
+	return &memoryRecordStore{
+		records: map[string][]api.ImportedMergeRequest{},
+		dead:    map[string]bool{},
+	}
+}
+
+func (m *memoryRecordStore) PutImport(_ context.Context, importID string, records []api.ImportedMergeRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dead[importID] {
+		return fmt.Errorf("codereview: cannot write to a revoked import %s", importID)
+	}
+	m.records[importID] = records
+	return nil
+}
+
+func (m *memoryRecordStore) ListImport(_ context.Context, importID string) ([]api.ImportedMergeRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dead[importID] {
+		return nil, nil
+	}
+	return append([]api.ImportedMergeRequest(nil), m.records[importID]...), nil
+}
+
+func (m *memoryRecordStore) Tombstone(_ context.Context, importID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dead[importID] = true
+	delete(m.records, importID)
+	return nil
 }

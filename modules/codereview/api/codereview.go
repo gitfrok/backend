@@ -164,6 +164,84 @@ type ImportService interface {
 	Revoke(context.Context, RevokeImportRequest) (Import, error)
 }
 
+// Provenance is the immutable ADR-0029 block attached to every imported
+// history record. It asserts what was fetched from a foreign system; it never
+// claims the content is true. declared_at is display-only.
+type Provenance struct {
+	Class          string // FIRST_PARTY | ATTESTED_IMPORT
+	ImportID       string
+	SourceSystem   string
+	SourceInstance string
+	SourceRef      string
+	DeclaredActor  string
+	DeclaredAt     time.Time
+	PayloadDigest  string
+}
+
+// Attest classes. Only FIRST_PARTY may enter the audit log (ADR-0029 §1).
+const (
+	AttestFirstParty = "FIRST_PARTY"
+	AttestImported   = "ATTESTED_IMPORT"
+)
+
+// ImportedThread is one imported review thread (SPEC-0011 AC4). The anchor
+// degrades from DIFF to FILE to MERGE rather than dropping a comment (AC5).
+type ImportedThread struct {
+	ThreadID       string
+	MergeRequestID string
+	Path           string
+	Anchor         string // DIFF | FILE | MERGE
+	Comments       []ImportedComment
+	Provenance     Provenance
+}
+
+// ImportedComment is one imported review comment.
+type ImportedComment struct {
+	CommentID     string
+	DeclaredActor string
+	Body          string
+	DeclaredAt    time.Time
+	Provenance    Provenance
+}
+
+// ImportedApproval is one imported approval. It never satisfies a merge policy
+// and is never rendered as a platform approval (ADR-0029 §4).
+type ImportedApproval struct {
+	ApprovalID     string
+	MergeRequestID string
+	DeclaredActor  string
+	DeclaredAt     time.Time
+	Provenance     Provenance
+}
+
+// ImportedMergeRequest is one imported MR: title, description, state, refs,
+// threads, approvals, declared_actor and declared_at as declared (AC4).
+type ImportedMergeRequest struct {
+	MergeRequestID string
+	SourceRef      string
+	TargetRef      string
+	Title          string
+	Description    string
+	State          string
+	CreatorID      string
+	Threads        []ImportedThread
+	Approvals      []ImportedApproval
+	Provenance     Provenance
+}
+
+// ImportedRecordStore persists imported history as ATTESTED_IMPORT domain data
+// (ADR-0029 §2). Append-only within the context; tombstoned on revoke. No
+// individual update or delete path exists (AC13).
+type ImportedRecordStore interface {
+	// PutImport stores the imported MRs for one import, idempotently per
+	// (import_id, merge_request_id).
+	PutImport(ctx context.Context, importID string, records []ImportedMergeRequest) error
+	// ListImport returns the imported MRs for one import, or nil if revoked.
+	ListImport(ctx context.Context, importID string) ([]ImportedMergeRequest, error)
+	// Tombstone marks every record of an import excluded from reads.
+	Tombstone(ctx context.Context, importID string) error
+}
+
 // MergeRequests is the context's full in-process surface.
 type MergeRequests interface {
 	Open(context.Context, OpenRequest) (MergeRequest, error)
