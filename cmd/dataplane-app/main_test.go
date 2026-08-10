@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/gitfrok/backend/modules/ci"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 )
 
@@ -24,7 +25,7 @@ func (denyAll) Decide(context.Context, policyapi.Request) (policyapi.Decision, e
 // TestWiringConnectsTheModules: creating a repository in the Repository context makes it appear in
 // the Code Search projection, with no module knowing the other was wired in.
 func TestWiringConnectsTheModules(t *testing.T) {
-	dp := newDataplane(denyAll{})
+	dp := newDataplane(denyAll{}, ci.RunnerConfig{}, nil)
 	ctx := context.Background()
 
 	if _, err := dp.repositories.Create(ctx, "t-1", "repo-1", "infra", "user-9"); err != nil {
@@ -42,7 +43,7 @@ func TestWiringConnectsTheModules(t *testing.T) {
 
 // TestWiringKeepsTenantsApart: the composed plane must not leak across tenants at either end.
 func TestWiringKeepsTenantsApart(t *testing.T) {
-	dp := newDataplane(denyAll{})
+	dp := newDataplane(denyAll{}, ci.RunnerConfig{}, nil)
 	ctx := context.Background()
 
 	if _, err := dp.repositories.Create(ctx, "t-1", "repo-1", "infra", "user-9"); err != nil {
@@ -60,7 +61,7 @@ func TestWiringKeepsTenantsApart(t *testing.T) {
 // TestModulesAreReachableOnlyAsPorts: the plane holds each module by its api/ interface, so a
 // module could be swapped for a gRPC client without this file changing (ADR-0026).
 func TestModulesAreReachableOnlyAsPorts(t *testing.T) {
-	dp := newDataplane(denyAll{})
+	dp := newDataplane(denyAll{}, ci.RunnerConfig{}, nil)
 	// Compile-time: these fields are declared as the api/ interfaces, not concrete services.
 	if dp.repositories == nil || dp.searchIndex == nil {
 		t.Fatal("dataplane must expose both contexts")
@@ -73,16 +74,16 @@ func TestModulesAreReachableOnlyAsPorts(t *testing.T) {
 func TestPlaneRefusesToBuildWithoutAPDP(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Error("newDataplane(nil) built a plane with no PDP")
+			t.Error("newDataplane(nil, ci.RunnerConfig{}, nil) built a plane with no PDP")
 		}
 	}()
-	newDataplane(nil)
+	newDataplane(nil, ci.RunnerConfig{}, nil)
 }
 
 // TestPlaneHoldsThePDPAsAPort: held as api.DecisionPoint, so extracting Policy into its own
 // service (ADR-0026) swaps the constructor here and changes no caller.
 func TestPlaneHoldsThePDPAsAPort(t *testing.T) {
-	dp := newDataplane(denyAll{})
+	dp := newDataplane(denyAll{}, ci.RunnerConfig{}, nil)
 
 	got, err := dp.policy.Decide(context.Background(), policyapi.Request{TenantID: "t-1", Action: "repo.read"})
 	if err != nil {
