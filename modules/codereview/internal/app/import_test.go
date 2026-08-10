@@ -86,9 +86,13 @@ func (s *stubImportStore) TombstoneImport(_ context.Context, id string) (api.Imp
 type stubGitImporter struct {
 	moved []RefUpdate
 	err   error
+	// calls counts fetches, so a test can tell a resumed import from a repeated
+	// one.
+	calls int
 }
 
 func (s *stubGitImporter) ImportRefs(_ context.Context, command ImportRefsCommand) ([]RefUpdate, error) {
+	s.calls++
 	return s.moved, s.err
 }
 
@@ -99,7 +103,7 @@ type stubHistoryImporter struct {
 }
 
 func (s *stubHistoryImporter) ImportHistory(_ context.Context, command ImportHistoryCommand) (HistoryResult, error) {
-	return HistoryResult{Counts: s.counts, SourceBytes: s.sourceBytes}, s.err
+	return HistoryResult{Counts: s.counts, SourceBytesRead: s.sourceBytes}, s.err
 }
 
 // stubPDP allows everything.
