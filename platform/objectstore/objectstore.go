@@ -1,17 +1,25 @@
-// Package objectstore is the S3 tier for large objects — Git LFS today, CI
-// artifacts and registry blobs later (ADR-0004, ADR-0020, ADR-0033 decision 4,
-// SPEC-0023).
+// Package objectstore is the **SeaweedFS-S3** tier for large objects — Git LFS
+// today, CI artifacts and registry blobs later (ADR-0004, ADR-0020, ADR-0033
+// decision 4, SPEC-0023).
 //
-// It speaks the subset of S3 the platform actually needs — put one object, read
-// one object, presign one operation on one object — over net/http with SigV4
-// signing written here. That is a deliberate choice against pulling in an S3 SDK:
-// the whole surface is three verbs, both planes ship as `scratch` images, and a
-// dependency that brings a credential chain, a retry policy, and a plugin system
-// with it is a larger thing to audit than the ~150 lines of signing below.
+// SeaweedFS is the object store, not one option among several. ADR-0020 picked it
+// for the stack and ADR-0033 decision 4 kept it in that role; this package is
+// written against it and against nothing else. It speaks S3 because that is
+// SeaweedFS's own API — the protocol is the dialect, SeaweedFS is the store — and
+// it uses the SeaweedFS posture deliberately: path-style bucket addressing (there
+// is no per-bucket DNS in the cluster) and streamed uploads with the content
+// verified here rather than by a service-side checksum extension.
+//
+// Deliberately no AWS S3 SDK. The surface is three verbs, both planes ship as
+// `scratch` images, and an SDK that brings a credential chain, a region resolver,
+// a retry policy and a plugin system would carry a lot of behaviour aimed at a
+// service this platform does not use. The ~150 lines of SigV4 below are the whole
+// dependency.
 //
 // What this package does NOT do: discover credentials from an environment chain,
-// assume a role, or reach any endpoint it was not configured with. Configuration
-// is explicit and per-environment (invariant 13).
+// assume an IAM role, reach a bucket it was not configured with, or fall back to
+// AWS when SeaweedFS is unreachable. Configuration is explicit and
+// per-environment (invariant 13).
 package objectstore
 
 import (
@@ -40,13 +48,19 @@ var ErrNotFound = errors.New("objectstore: object not found")
 // were announced under (SPEC-0023 AC5).
 var ErrDigestMismatch = errors.New("objectstore: content does not match its declared digest")
 
-// Config is the per-environment object-tier configuration. Every field is
+// Config is the per-environment SeaweedFS-S3 configuration. Every field is
 // required; there is no default endpoint and no credential discovery, so a
 // misconfigured deployment fails at construction rather than silently reaching
-// somewhere unintended.
+// somewhere unintended — and in particular can never drift onto a public AWS
+// endpoint because a variable was unset.
 type Config struct {
-	// Endpoint is the S3 base URL, e.g. https://seaweedfs-s3.gitfrok.svc:8333.
-	Endpoint  string
+	// Endpoint is the SeaweedFS S3 gateway, e.g.
+	// https://seaweedfs-s3.gitfrok.svc:8333. It is a cluster-internal address in
+	// every environment this platform runs in.
+	Endpoint string
+	// Region is what SeaweedFS is configured to accept in a SigV4 credential
+	// scope. It is not an AWS region and selects no infrastructure; it is part of
+	// the signature and nothing else.
 	Region    string
 	Bucket    string
 	AccessKey string
@@ -58,7 +72,7 @@ type Config struct {
 	Now func() time.Time
 }
 
-// Store is the object tier.
+// Store is the SeaweedFS-S3 object tier.
 type Store struct {
 	config Config
 	client *http.Client
@@ -249,8 +263,9 @@ const maxPresignTTL = 15 * time.Minute
 const emptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 func (s *Store) objectURL(key string) string {
-	// Path-style addressing: SeaweedFS-S3 serves buckets on the path, and
-	// virtual-host style would require per-bucket DNS the cluster does not have.
+	// Path-style addressing, which is what SeaweedFS serves: buckets live on the
+	// path, and virtual-host style would require per-bucket DNS the cluster does
+	// not have.
 	return strings.TrimSuffix(s.config.Endpoint, "/") + "/" + s.config.Bucket + "/" + escapePath(key)
 }
 

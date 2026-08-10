@@ -18,9 +18,13 @@ import (
 // The transport surface (the batch API) lives on the Git front door, which is
 // where every other Git protocol endpoint is terminated and authorized.
 
-// ObjectStore is the large-object tier as storage needs it (ADR-0004,
-// SPEC-0023). It is a port so a deployment without an S3 tier configured is a
-// deployment that refuses LFS rather than one that pretends to store objects.
+// ObjectStore is the SeaweedFS-S3 large-object tier as storage needs it
+// (ADR-0004, ADR-0020, ADR-0033 decision 4, SPEC-0023).
+//
+// It stays a port for testability, not for portability: SeaweedFS is the object
+// store this platform runs on, and the only production implementation is
+// platform/objectstore. A deployment with no tier configured refuses LFS rather
+// than pretending to store objects.
 type ObjectStore interface {
 	Put(ctx context.Context, key string, size int64, sha256Hex string, body io.Reader) (int64, error)
 	Stat(ctx context.Context, key string) (int64, error)

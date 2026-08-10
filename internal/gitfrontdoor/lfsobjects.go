@@ -11,8 +11,8 @@ import (
 	"github.com/gitfrok/backend/platform/objectstore"
 )
 
-// ObjectTier implements the batch surface's object port against the S3 tier
-// (SPEC-0023 AC3/AC4).
+// ObjectTier implements the batch surface's object port against the SeaweedFS-S3
+// tier (SPEC-0023 AC3/AC4, ADR-0020).
 //
 // It is the enforcement point for LFS: reading and writing a large object are
 // their own PDP actions, not implied by `repo.read`/`repo.write`. A large-file
@@ -26,8 +26,8 @@ type ObjectTier struct {
 	uploadTTL   time.Duration
 }
 
-// presigner is the slice of the object store this adapter needs, so a test can
-// supply one without an S3 endpoint.
+// presigner is the slice of the SeaweedFS-S3 store this adapter needs, so a test
+// can supply one without a running SeaweedFS gateway.
 type presigner interface {
 	Stat(ctx context.Context, key string) (int64, error)
 	Presign(method, key string, ttl time.Duration) (string, error)

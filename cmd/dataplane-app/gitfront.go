@@ -38,13 +38,14 @@ const (
 	patVerifierKeyEnv   = "GITFROK_PAT_VERIFIER_KEY"
 	policyGRPCAddrEnv   = "GITFROK_POLICY_GRPC_ADDR"
 
-	// The large-object tier the LFS batch endpoint hands credentials for
-	// (SPEC-0023). All five together, or none.
-	objectEndpointEnv  = "GITFROK_OBJECT_STORE_ENDPOINT"
-	objectRegionEnv    = "GITFROK_OBJECT_STORE_REGION"
-	objectBucketEnv    = "GITFROK_OBJECT_STORE_BUCKET"
-	objectAccessKeyEnv = "GITFROK_OBJECT_STORE_ACCESS_KEY"
-	objectSecretKeyEnv = "GITFROK_OBJECT_STORE_SECRET_KEY"
+	// The SeaweedFS-S3 tier the LFS batch endpoint hands credentials for
+	// (SPEC-0023, ADR-0020). SeaweedFS is the object store, and the variable names
+	// say so. All five together, or none.
+	objectEndpointEnv  = "GITFROK_SEAWEEDFS_S3_ENDPOINT"
+	objectRegionEnv    = "GITFROK_SEAWEEDFS_S3_REGION"
+	objectBucketEnv    = "GITFROK_SEAWEEDFS_S3_BUCKET"
+	objectAccessKeyEnv = "GITFROK_SEAWEEDFS_S3_ACCESS_KEY"
+	objectSecretKeyEnv = "GITFROK_SEAWEEDFS_S3_SECRET_KEY"
 )
 
 type frontDoorConfig struct {
@@ -55,7 +56,7 @@ type frontDoorConfig struct {
 	verifierKeyID string
 	patKey        []byte
 	policyAddr    string
-	// objects is the large-object tier (SPEC-0023). Nil means this plane serves no
+	// objects is the SeaweedFS-S3 tier (SPEC-0023). Nil means this plane serves no
 	// LFS batch endpoint at all, rather than one that answers with actions nothing
 	// can honour.
 	objects *objectstore.Store
@@ -97,7 +98,7 @@ func loadFrontDoorConfig(getenv func(string) string) (frontDoorConfig, error) {
 		return cfg, fmt.Errorf("the SSH listener requires %s", sshVerifierKeyIDEnv)
 	}
 
-	// The object tier, all-or-nothing for the same reason the doors are: a plane
+	// The SeaweedFS-S3 tier, all-or-nothing for the same reason the doors are: a plane
 	// configured with three of five values has an operator who intended LFS and a
 	// deployment that would refuse it (SPEC-0023).
 	objectValues := map[string]string{
@@ -131,7 +132,7 @@ func loadFrontDoorConfig(getenv func(string) string) (frontDoorConfig, error) {
 		cfg.objects = store
 	default:
 		sort.Strings(missing)
-		return cfg, fmt.Errorf("the object store is partly configured; missing %s", strings.Join(missing, ", "))
+		return cfg, fmt.Errorf("the SeaweedFS-S3 tier is partly configured; missing %s", strings.Join(missing, ", "))
 	}
 	return cfg, nil
 }

@@ -28,17 +28,20 @@ const (
 	listenAddressEnv  = "GITFROK_GIT_STORAGE_LISTEN_ADDR"
 	nodeIDEnv         = "GITFROK_NODE_ID"
 
-	// The large-object tier (SPEC-0023). All five are required together: a node
-	// configured with some of them has an operator who intended LFS and a
-	// deployment that would refuse it, which is worse than one that never had it.
-	objectEndpointEnv  = "GITFROK_OBJECT_STORE_ENDPOINT"
-	objectRegionEnv    = "GITFROK_OBJECT_STORE_REGION"
-	objectBucketEnv    = "GITFROK_OBJECT_STORE_BUCKET"
-	objectAccessKeyEnv = "GITFROK_OBJECT_STORE_ACCESS_KEY"
-	objectSecretKeyEnv = "GITFROK_OBJECT_STORE_SECRET_KEY"
+	// The SeaweedFS-S3 large-object tier (SPEC-0023, ADR-0020, ADR-0033 decision
+	// 4). SeaweedFS is the object store — the variables name it so a deployment
+	// cannot be pointed at another provider by accident and discover the fact
+	// later. All five are required together: a node configured with some of them
+	// has an operator who intended LFS and a deployment that would refuse it,
+	// which is worse than one that never had it.
+	objectEndpointEnv  = "GITFROK_SEAWEEDFS_S3_ENDPOINT"
+	objectRegionEnv    = "GITFROK_SEAWEEDFS_S3_REGION"
+	objectBucketEnv    = "GITFROK_SEAWEEDFS_S3_BUCKET"
+	objectAccessKeyEnv = "GITFROK_SEAWEEDFS_S3_ACCESS_KEY"
+	objectSecretKeyEnv = "GITFROK_SEAWEEDFS_S3_SECRET_KEY"
 )
 
-// objectTier builds the large-object store, or returns nil when this node is not
+// objectTier builds the SeaweedFS-S3 store, or returns nil when this node is not
 // configured for LFS.
 //
 // Partial configuration is an error rather than a silent fallback: an operator who
@@ -78,7 +81,7 @@ func objectTier(getenv func(string) string) (ObjectStore, error) {
 			}
 		}
 		sort.Strings(missing)
-		return nil, fmt.Errorf("git-storaged: the object store is partly configured; missing %s", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("git-storaged: the SeaweedFS-S3 tier is partly configured; missing %s", strings.Join(missing, ", "))
 	}
 }
 
