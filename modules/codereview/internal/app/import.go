@@ -48,7 +48,20 @@ type HistoryImporter interface {
 	// ImportHistory fetches and stores the source's review history under the
 	// given import ID, returning per-type counts. The source token is a
 	// request-only secret.
-	ImportHistory(ctx context.Context, command ImportHistoryCommand) (map[string]int64, error)
+	ImportHistory(ctx context.Context, command ImportHistoryCommand) (HistoryResult, error)
+}
+
+// HistoryResult is what one history phase produced: the per-type record counts
+// the manifest is computed over, and the bytes read from the source API.
+//
+// SourceBytesRead is ingress, not storage. It is what the source's responses
+// weighed on the wire, including fields this import never keeps, so it is
+// observability rather than the number AC21 charges to a tenant's fair-use
+// storage dimension — that one is measured by the storage tier that wrote it
+// and arrives with the git phase.
+type HistoryResult struct {
+	Counts          map[string]int64
+	SourceBytesRead int64
 }
 
 // ImportHistoryCommand is the verified principal plus the source identity for
@@ -87,6 +100,7 @@ type ImportService struct {
 	history HistoryImporter
 	pdp     policyapi.DecisionPoint
 	bus     bus.Bus
+	pacer   Pacer
 	newID   func() string
 	now     func() time.Time
 }
@@ -101,9 +115,21 @@ func NewImportService(store ImportStore, records api.ImportedRecordStore, git Gi
 		history: history,
 		pdp:     pdp,
 		bus:     events,
-		newID:   ids.NewULID,
-		now:     time.Now,
+		// An unconfigured plane imports unpaced rather than refusing to import;
+		// WithPacer replaces it.
+		pacer: NoPacer{},
+		newID: ids.NewULID,
+		now:   time.Now,
 	}
+}
+
+// WithPacer sets the throttle import work runs under (SPEC-0011 AC21). A nil
+// pacer leaves the current one in place.
+func (s *ImportService) WithPacer(pacer Pacer) *ImportService {
+	if pacer != nil {
+		s.pacer = pacer
+	}
+	return s
 }
 
 // ErrImportDenied is the coarse refusal an unauthorized import command returns.
@@ -131,10 +157,10 @@ func NewSourceHistoryImporter(adapters map[string]HistoryImporter) *SourceHistor
 }
 
 // ImportHistory dispatches to the adapter for the command's source system.
-func (s *SourceHistoryImporter) ImportHistory(ctx context.Context, command ImportHistoryCommand) (map[string]int64, error) {
+func (s *SourceHistoryImporter) ImportHistory(ctx context.Context, command ImportHistoryCommand) (HistoryResult, error) {
 	adapter, ok := s.adapters[command.SourceSystem]
 	if !ok {
-		return nil, ErrUnknownSourceSystem
+		return HistoryResult{}, ErrUnknownSourceSystem
 	}
 	return adapter.ImportHistory(ctx, command)
 }
@@ -164,18 +190,36 @@ func (s *ImportService) Create(ctx context.Context, req api.CreateImportRequest)
 	if err != nil {
 		return api.Import{}, ErrImportDenied
 	}
-	if !created {
+	if !created && !resumable(imp) {
+		// Complete, failed or revoked: a retry observes it, it does not restart it.
 		return imp, nil
 	}
 
-	// The git phase runs inline for the dev posture. The source token is used
-	// once, here, and never stored.
-	if err := s.runGitPhase(ctx, req, &imp); err != nil {
-		s.fail(ctx, imp, "git phase failed")
-		return api.Import{}, ErrImportDenied
+	// Import work yields to the interactive traffic it shares the plane with:
+	// each phase asks the pacer first, and a refusal stops the import instead of
+	// running it unthrottled (AC21).
+	if err := s.pacer.Wait(ctx); err != nil {
+		// Being paced out is neither the caller's fault nor the source's: the
+		// import waited and its turn did not come. That is a stall, the resumable
+		// state, not the terminal one a real failure earns (AC4, AC8).
+		s.stallPaced(ctx, imp)
+		return api.Import{}, ErrImportStalled
 	}
-	if s.history != nil {
-		counts, err := s.history.ImportHistory(ctx, ImportHistoryCommand{
+	// The git phase runs inline for the dev posture. The source token is used
+	// once, here, and never stored. A resumed import skips the phases it already
+	// finished, which is what makes resuming free of duplicated work (AC4).
+	if !imp.GitPhaseComplete {
+		if err := s.runGitPhase(ctx, req, &imp); err != nil {
+			s.fail(ctx, imp, "git phase failed")
+			return api.Import{}, ErrImportDenied
+		}
+	}
+	if s.history != nil && !imp.HistoryPhaseComplete {
+		if err := s.pacer.Wait(ctx); err != nil {
+			s.stallPaced(ctx, imp)
+			return api.Import{}, ErrImportStalled
+		}
+		result, err := s.history.ImportHistory(ctx, ImportHistoryCommand{
 			TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID,
 			RequestID: req.RequestID, ActorRoles: append([]string(nil), req.ActorRoles...),
 			ImportID: imp.ID, SourceURL: req.SourceURL, SourceToken: req.SourceToken,
@@ -191,7 +235,7 @@ func (s *ImportService) Create(ctx context.Context, req api.CreateImportRequest)
 			s.fail(ctx, imp, "history phase failed")
 			return api.Import{}, ErrImportDenied
 		}
-		imp.RecordCounts = counts
+		imp.RecordCounts = result.Counts
 		imp.HistoryPhaseComplete = true
 	}
 
@@ -250,6 +294,26 @@ func (s *ImportService) fail(ctx context.Context, imp api.Import, reason string)
 // A stalled import is resumable, unlike a failed one.
 func (s *ImportService) stall(ctx context.Context, imp api.Import) {
 	if _, err := s.store.MarkImportPhase(ctx, imp.ID, imp.GitPhaseComplete, imp.HistoryPhaseComplete, api.ImportStalled, "", "source rate limit", imp.RecordCounts); err != nil {
+		return
+	}
+}
+
+// resumable reports whether an import may be picked up where it stopped. A
+// stalled or half-run import is resumable; a completed, failed or revoked one is
+// terminal — retrying observes it rather than restarting it (AC4).
+func resumable(imp api.Import) bool {
+	switch imp.State {
+	case api.ImportPending, api.ImportRunning, api.ImportStalled:
+		return true
+	default:
+		return false
+	}
+}
+
+// stallPaced records an import that could not get a turn. It keeps whatever
+// phases already completed, so a resumed import does not redo them.
+func (s *ImportService) stallPaced(ctx context.Context, imp api.Import) {
+	if _, err := s.store.MarkImportPhase(ctx, imp.ID, imp.GitPhaseComplete, imp.HistoryPhaseComplete, api.ImportStalled, "", "import paced out", imp.RecordCounts); err != nil {
 		return
 	}
 }

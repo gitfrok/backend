@@ -33,6 +33,7 @@ type Client struct {
 	base    string
 	http    *http.Client
 	records api.ImportedRecordStore
+	pacer   app.Pacer
 }
 
 // New wires the importer. records is where imported history is stored.
@@ -40,7 +41,23 @@ func New(records api.ImportedRecordStore, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Client{base: "https://api.github.com", http: httpClient, records: records}
+	return &Client{base: "https://api.github.com", http: httpClient, records: records, pacer: app.NoPacer{}}
+}
+
+// WithPacer paces this importer's source calls. Import work asks before every
+// fetch, so it yields throughput to the interactive traffic it shares a plane
+// with (SPEC-0011 AC21).
+func (c *Client) WithPacer(pacer app.Pacer) *Client {
+	if pacer != nil {
+		c.pacer = pacer
+	}
+	return c
+}
+
+// fetchState is one import's own accounting: the response bytes read so far. A
+// Client serves many imports, so the count cannot live on it.
+type fetchState struct {
+	read int64
 }
 
 // source is the parsed owner/repo from a source URL.
@@ -85,23 +102,25 @@ func parseSource(raw string) (source, bool) {
 // ImportHistory implements the Code Review history port. It fetches the source
 // pull requests and their reviews, stores them as ATTESTED_IMPORT records, and
 // returns per-type counts for the manifest digest (AC16).
-func (c *Client) ImportHistory(ctx context.Context, command app.ImportHistoryCommand) (map[string]int64, error) {
+func (c *Client) ImportHistory(ctx context.Context, command app.ImportHistoryCommand) (app.HistoryResult, error) {
 	src, ok := parseSource(command.SourceURL)
 	if !ok {
-		return nil, fmt.Errorf("github import: cannot parse source %q", command.SourceURL)
+		return app.HistoryResult{}, fmt.Errorf("github import: cannot parse source %q", command.SourceURL)
 	}
 
-	prs, err := c.listPullRequests(ctx, src, command.SourceToken)
+	// st is this import's own accounting, threaded through every fetch.
+	st := &fetchState{}
+	prs, err := c.listPullRequests(ctx, st, src, command.SourceToken)
 	if err != nil {
-		return nil, err
+		return app.HistoryResult{}, err
 	}
 
 	counts := map[string]int64{"merge_requests": int64(len(prs))}
 	records := make([]api.ImportedMergeRequest, 0, len(prs))
 	for _, pr := range prs {
-		record, err := c.buildRecord(ctx, src, command, pr)
+		record, err := c.buildRecord(ctx, st, src, command, pr)
 		if err != nil {
-			return nil, err
+			return app.HistoryResult{}, err
 		}
 		records = append(records, record)
 		counts["comments"] += int64(len(record.Threads))
@@ -109,13 +128,13 @@ func (c *Client) ImportHistory(ctx context.Context, command app.ImportHistoryCom
 	}
 
 	if err := c.records.PutImport(ctx, command.ImportID, records); err != nil {
-		return nil, err
+		return app.HistoryResult{}, err
 	}
-	return counts, nil
+	return app.HistoryResult{Counts: counts, SourceBytesRead: st.read}, nil
 }
 
 // buildRecord shapes one pull request plus its reviews into an imported MR.
-func (c *Client) buildRecord(ctx context.Context, src source, command app.ImportHistoryCommand, pr pullRequest) (api.ImportedMergeRequest, error) {
+func (c *Client) buildRecord(ctx context.Context, st *fetchState, src source, command app.ImportHistoryCommand, pr pullRequest) (api.ImportedMergeRequest, error) {
 	digest, err := payloadDigest(pr)
 	if err != nil {
 		return api.ImportedMergeRequest{}, err
@@ -131,7 +150,7 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 		PayloadDigest:  digest,
 	}
 
-	reviews, err := c.listReviews(ctx, src, pr.Number, command.SourceToken)
+	reviews, err := c.listReviews(ctx, st, src, pr.Number, command.SourceToken)
 	if err != nil {
 		return api.ImportedMergeRequest{}, err
 	}
@@ -187,7 +206,7 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	// Line comments are a separate GitHub surface from reviews. Each keeps the
 	// position the source declared; one whose line no longer resolves degrades
 	// to the file, and is never dropped (AC5).
-	comments, err := c.listReviewComments(ctx, src, pr.Number, command.SourceToken)
+	comments, err := c.listReviewComments(ctx, st, src, pr.Number, command.SourceToken)
 	if err != nil {
 		return api.ImportedMergeRequest{}, err
 	}
@@ -234,10 +253,10 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 // page by page. A repository with more history than one page holds must not
 // import as a silently truncated set: the import would report its partial counts
 // as if they were the whole backlog.
-func (c *Client) listPullRequests(ctx context.Context, src source, token string) ([]pullRequest, error) {
+func (c *Client) listPullRequests(ctx context.Context, st *fetchState, src source, token string) ([]pullRequest, error) {
 	var all []pullRequest
 	for _, state := range []string{"open", "closed"} {
-		batch, err := fetchPages[pullRequest](ctx, c, token, func(page int) string {
+		batch, err := fetchPages[pullRequest](ctx, c, st, token, func(page int) string {
 			return fmt.Sprintf("%s/repos/%s/%s/pulls?state=%s&per_page=%d&page=%d&sort=created&direction=asc",
 				c.base, src.owner, src.repo, state, pageSize, page)
 		})
@@ -257,11 +276,11 @@ const pageSize = 100
 const maxPages = 1000
 
 // fetchPages walks a paged GitHub collection until a short page ends it.
-func fetchPages[T any](ctx context.Context, c *Client, token string, pageURL func(page int) string) ([]T, error) {
+func fetchPages[T any](ctx context.Context, c *Client, st *fetchState, token string, pageURL func(page int) string) ([]T, error) {
 	var all []T
 	for page := 1; page <= maxPages; page++ {
 		var batch []T
-		if err := c.getJSON(ctx, pageURL(page), token, &batch); err != nil {
+		if err := c.getJSON(ctx, st, pageURL(page), token, &batch); err != nil {
 			return nil, err
 		}
 		all = append(all, batch...)
@@ -273,21 +292,21 @@ func fetchPages[T any](ctx context.Context, c *Client, token string, pageURL fun
 }
 
 // listReviews fetches the reviews for one pull request.
-func (c *Client) listReviews(ctx context.Context, src source, number int64, token string) ([]pullReview, error) {
-	return fetchPages[pullReview](ctx, c, token, func(page int) string {
+func (c *Client) listReviews(ctx context.Context, st *fetchState, src source, number int64, token string) ([]pullReview, error) {
+	return fetchPages[pullReview](ctx, c, st, token, func(page int) string {
 		return fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d", c.base, src.owner, src.repo, number, pageSize, page)
 	})
 }
 
 // listReviewComments fetches the line comments for one pull request.
-func (c *Client) listReviewComments(ctx context.Context, src source, number int64, token string) ([]reviewComment, error) {
-	return fetchPages[reviewComment](ctx, c, token, func(page int) string {
+func (c *Client) listReviewComments(ctx context.Context, st *fetchState, src source, number int64, token string) ([]reviewComment, error) {
+	return fetchPages[reviewComment](ctx, c, st, token, func(page int) string {
 		return fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments?per_page=%d&page=%d", c.base, src.owner, src.repo, number, pageSize, page)
 	})
 }
 
 // getJSON performs one authenticated GET and decodes the JSON body.
-func (c *Client) getJSON(ctx context.Context, path, token string, into any) error {
+func (c *Client) getJSON(ctx context.Context, st *fetchState, path, token string, into any) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return err
@@ -298,6 +317,11 @@ func (c *Client) getJSON(ctx context.Context, path, token string, into any) erro
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
+
+	// Every fetch waits its turn before it runs (AC21).
+	if err := c.pacer.Wait(ctx); err != nil {
+		return err
+	}
 
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -320,6 +344,10 @@ func (c *Client) getJSON(ctx context.Context, path, token string, into any) erro
 	if err != nil {
 		return err
 	}
+	// What the source's responses weighed on the wire. It is ingress, reported
+	// for observability — the bytes a tenant is charged for are the ones storage
+	// says it wrote (AC21).
+	st.read += int64(len(body))
 	if err := json.Unmarshal(body, into); err != nil {
 		return err
 	}

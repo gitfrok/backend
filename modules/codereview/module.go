@@ -7,6 +7,7 @@ package codereview
 
 import (
 	"net/http"
+	"time"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	"github.com/gitfrok/backend/modules/codereview/api"
@@ -39,7 +40,18 @@ type (
 	ImportRefsCommand    = app.ImportRefsCommand
 	RefUpdate            = app.RefUpdate
 	ImportHistoryCommand = app.ImportHistoryCommand
+	HistoryResult        = app.HistoryResult
 )
+
+// Pacer throttles import work (SPEC-0011 AC21), aliased so cmd/ can supply one.
+type Pacer = app.Pacer
+
+// NewImportPacer returns the import throttle: one step of import work per
+// interval. A non-positive interval paces nothing, which is what an environment
+// that has not configured pacing gets.
+func NewImportPacer(interval time.Duration) Pacer {
+	return app.NewIntervalPacer(interval)
+}
 
 // New builds the Code Review context on the dev/in-memory store and subscribes it
 // to ref updates, so each open merge request's view of its target ref stays
@@ -79,31 +91,33 @@ func NewImportRecordStore() api.ImportedRecordStore {
 // NewGithubHistoryImporter builds the history-phase port on the GitHub API,
 // storing imported records in the given store. httpClient may be nil for the
 // default client.
-func NewGithubHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client) HistoryImporter {
-	return github.New(records, httpClient)
+func NewGithubHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client, pacer Pacer) HistoryImporter {
+	return github.New(records, httpClient).WithPacer(pacer)
 }
 
 // NewGitlabHistoryImporter builds the history-phase port on the GitLab API,
 // storing imported records in the given store.
-func NewGitlabHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client) HistoryImporter {
-	return gitlab.New(records, httpClient)
+func NewGitlabHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client, pacer Pacer) HistoryImporter {
+	return gitlab.New(records, httpClient).WithPacer(pacer)
 }
 
 // NewSourceHistoryImporter returns a HistoryImporter that selects the source
 // adapter by the import's source_system ("github" or "gitlab"). Unknown
 // systems are refused rather than silently imported by the wrong adapter.
-func NewSourceHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client) HistoryImporter {
+// pacer paces both adapters' source calls, so a plane's import throughput is one
+// budget rather than one per source system.
+func NewSourceHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client, pacer Pacer) HistoryImporter {
 	return app.NewSourceHistoryImporter(map[string]app.HistoryImporter{
-		"github": github.New(records, httpClient),
-		"gitlab": gitlab.New(records, httpClient),
+		"github": github.New(records, httpClient).WithPacer(pacer),
+		"gitlab": gitlab.New(records, httpClient).WithPacer(pacer),
 	})
 }
 
 // NewImportService builds the import service on the dev in-memory import store.
 // records must be the same store the history importer writes to. history may be
 // nil when the history phase is not wired; the git phase is required.
-func NewImportService(records api.ImportedRecordStore, git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus) api.ImportService {
-	return app.NewImportService(app.NewMemoryImportStore(), records, git, history, pdp, events)
+func NewImportService(records api.ImportedRecordStore, git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus, pacer Pacer) api.ImportService {
+	return app.NewImportService(app.NewMemoryImportStore(), records, git, history, pdp, events).WithPacer(pacer)
 }
 
 // NewImportGRPCServer wraps the in-process import surface in its gRPC adapter.
