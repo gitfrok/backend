@@ -193,6 +193,11 @@ type ImportService interface {
 	List(context.Context, Context, string) ([]Import, error)
 	Revoke(context.Context, RevokeImportRequest) (Import, error)
 	ListImportedHistory(context.Context, ListImportedHistoryRequest) (ImportedHistoryPage, error)
+	// VerifyImport recomputes the manifest digest over the imported set as it
+	// stands now and reports whether it still matches what the HistoryImported
+	// event recorded (SPEC-0011 AC16). It is a read: a mismatch is a finding, not
+	// something to repair, and the original chain entry is never touched.
+	VerifyImport(context.Context, Context, string) (bool, error)
 }
 
 // Provenance is the immutable ADR-0029 block attached to every imported
