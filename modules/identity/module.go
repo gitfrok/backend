@@ -2,15 +2,19 @@ package identity
 
 import (
 	"context"
+	"net/http"
 	"time"
 
+	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
 	"github.com/gitfrok/backend/modules/identity/api"
 	identitygrpc "github.com/gitfrok/backend/modules/identity/internal/adapters/grpc"
 	identitypg "github.com/gitfrok/backend/modules/identity/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/identity/internal/domain"
+	"github.com/gitfrok/backend/modules/identity/internal/oidc"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/tenancy"
+	"google.golang.org/grpc"
 )
 
 type service struct {
@@ -103,4 +107,62 @@ func (s service) authorizeLifecycle(ctx context.Context, requestedTenant, action
 }
 func publicPAT(p domain.PAT) api.PAT {
 	return api.PAT{ID: p.ID, TenantID: p.TenantID, ActorID: p.ActorID, Label: p.Label, Scopes: append([]string(nil), p.Scopes...), CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt, RevokedAt: p.RevokedAt}
+}
+
+// OIDCConfig is the per-environment OIDC login configuration, restated here so
+// cmd/ can supply it without naming a package under this module's internal/ tree
+// (invariant 13: no production value is compiled in).
+type OIDCConfig struct {
+	Issuer        string
+	ClientID      string
+	ClientSecret  string
+	RedirectURI   string
+	RoleClaim     string
+	AllowedRoles  []string
+	TenantMapping map[string]string
+	Leeway        time.Duration
+}
+
+// Validate reports whether this configuration could serve a login. cmd/ calls it
+// before the doors open, so a half-configured deployment fails its rollout rather
+// than denying every login for a reason nobody can see (ADR-0045).
+func (c OIDCConfig) Validate() error { return c.verifier().Configured() }
+
+// RegisterOIDCLogin builds the verifier and registers its gRPC door. It is one
+// call rather than a constructor plus a registration because the server type it
+// produces lives under this module's internal/ tree, which cmd/ cannot name.
+func RegisterOIDCLogin(server *grpc.Server, config OIDCConfig, client *http.Client) error {
+	verifierConfig := config.verifier()
+	if err := verifierConfig.Configured(); err != nil {
+		return err
+	}
+	identityv1.RegisterOIDCLoginServer(server,
+		identitygrpc.NewOIDCServer(oidcLogin{verifier: oidc.New(verifierConfig, client)}))
+	return nil
+}
+
+func (config OIDCConfig) verifier() oidc.Config {
+	verifierConfig := oidc.Config{
+		Issuer: config.Issuer, ClientID: config.ClientID, ClientSecret: config.ClientSecret,
+		RedirectURI: config.RedirectURI, RoleClaim: config.RoleClaim,
+		AllowedRoles:  append([]string(nil), config.AllowedRoles...),
+		TenantMapping: config.TenantMapping, Leeway: config.Leeway,
+	}
+	return verifierConfig
+}
+
+// oidcLogin restates the verifier's principal as the module's own. The verifier
+// deals in verified claims; api.Principal is what the rest of the process trusts,
+// and keeping the two types distinct is what stops an unverified claim set being
+// passed off as one.
+type oidcLogin struct{ verifier *oidc.Verifier }
+
+func (l oidcLogin) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, nonce string) (api.Principal, bool) {
+	verified, ok := l.verifier.ExchangeCode(ctx, code, codeVerifier, redirectURI, nonce)
+	return api.Principal{TenantID: verified.TenantID, ActorID: verified.ActorID, Roles: verified.Roles}, ok
+}
+
+func (l oidcLogin) VerifyIDToken(ctx context.Context, idToken, nonce string) (api.Principal, bool) {
+	verified, ok := l.verifier.VerifyIDToken(ctx, idToken, nonce)
+	return api.Principal{TenantID: verified.TenantID, ActorID: verified.ActorID, Roles: verified.Roles}, ok
 }
