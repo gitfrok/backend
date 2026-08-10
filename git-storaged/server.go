@@ -62,6 +62,12 @@ type Config struct {
 	// wants the protected-branch rule enforced must supply it (SPEC-0019 AC3).
 	Protection Protection
 
+	// Objects is the large-object tier (SPEC-0023). Without one this node serves no
+	// LFS: an import carrying pointers fails rather than landing a repository whose
+	// large files are absent, and the batch API refuses rather than returning
+	// actions nothing can honour.
+	Objects ObjectStore
+
 	// command is test-only command construction. Production leaves it nil and uses exec.CommandContext.
 	command func(context.Context, string, ...string) *exec.Cmd
 }
@@ -81,6 +87,8 @@ type Server struct {
 	nodeID        string
 	quorumTimeout time.Duration
 	protection    Protection
+	objects       ObjectStore
+	sourceLFS     *sourceLFSClient
 }
 
 // NewServer validates process wiring and the live-repository filesystem before the service accepts
@@ -135,6 +143,8 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 		nodeID:        config.NodeID,
 		quorumTimeout: quorumTimeout,
 		protection:    config.Protection,
+		objects:       config.Objects,
+		sourceLFS:     newSourceLFSClient(),
 	}, nil
 }
 

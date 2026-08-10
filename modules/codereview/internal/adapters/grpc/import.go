@@ -251,3 +251,58 @@ func importToProto(imp api.Import) *codereviewv1.Import {
 		FailureReason:        imp.FailureReason,
 	}
 }
+
+// MapDeclaredActor records a tenant admin's assertion that a foreign handle is a
+// platform identity (SPEC-0011 AC10/AC22).
+//
+// The asserting admin comes from the verified context, never from the request
+// body: a caller able to name its own asserter could attribute its claim to
+// somebody else. The request contributes only the handle, its source instance,
+// and the identity being asserted.
+func (s *ImportServer) MapDeclaredActor(ctx context.Context, req *codereviewv1.MapDeclaredActorRequest) (*codereviewv1.MapDeclaredActorResponse, error) {
+	ctx, principal, err := intoContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, denialImport()
+	}
+	mapping, err := s.imports.MapDeclaredActor(ctx, api.MapDeclaredActorRequest{
+		Context:        principal,
+		ImportID:       req.GetImportId(),
+		DeclaredActor:  req.GetDeclaredActor(),
+		SourceInstance: req.GetSourceInstance(),
+		MappedActorID:  req.GetActorId(),
+	})
+	if err != nil {
+		return nil, denialImport()
+	}
+	return &codereviewv1.MapDeclaredActorResponse{Mapping: mappingToProto(mapping)}, nil
+}
+
+// ListDeclaredActorMappings returns the mappings asserted for one import.
+func (s *ImportServer) ListDeclaredActorMappings(ctx context.Context, req *codereviewv1.ListDeclaredActorMappingsRequest) (*codereviewv1.ListDeclaredActorMappingsResponse, error) {
+	ctx, principal, err := intoContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, denialImport()
+	}
+	mappings, err := s.imports.ListDeclaredActorMappings(ctx, principal, req.GetImportId())
+	if err != nil {
+		return nil, denialImport()
+	}
+	response := &codereviewv1.ListDeclaredActorMappingsResponse{}
+	for _, mapping := range mappings {
+		response.Mappings = append(response.Mappings, mappingToProto(mapping))
+	}
+	return response, nil
+}
+
+func mappingToProto(mapping api.DeclaredActorMapping) *codereviewv1.DeclaredActorMapping {
+	return &codereviewv1.DeclaredActorMapping{
+		MappingId:      mapping.MappingID,
+		TenantId:       mapping.TenantID,
+		ImportId:       mapping.ImportID,
+		DeclaredActor:  mapping.DeclaredActor,
+		SourceInstance: mapping.SourceInstance,
+		ActorId:        mapping.ActorID,
+		AssertedBy:     mapping.AssertedBy,
+		AssertedAt:     declaredTimestamp(mapping.AssertedAt),
+	}
+}

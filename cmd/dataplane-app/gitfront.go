@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	policyv1 "github.com/gitfrok/backend/gen/proto/policy/v1"
@@ -18,6 +20,7 @@ import (
 	"github.com/gitfrok/backend/modules/policy"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/ids"
+	"github.com/gitfrok/backend/platform/objectstore"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -34,6 +37,15 @@ const (
 	sshVerifierKeyIDEnv = "GITFROK_SSH_VERIFIER_KEY_ID"
 	patVerifierKeyEnv   = "GITFROK_PAT_VERIFIER_KEY"
 	policyGRPCAddrEnv   = "GITFROK_POLICY_GRPC_ADDR"
+
+	// The SeaweedFS-S3 tier the LFS batch endpoint hands credentials for
+	// (SPEC-0023, ADR-0020). SeaweedFS is the object store, and the variable names
+	// say so. All five together, or none.
+	objectEndpointEnv  = "GITFROK_SEAWEEDFS_S3_ENDPOINT"
+	objectRegionEnv    = "GITFROK_SEAWEEDFS_S3_REGION"
+	objectBucketEnv    = "GITFROK_SEAWEEDFS_S3_BUCKET"
+	objectAccessKeyEnv = "GITFROK_SEAWEEDFS_S3_ACCESS_KEY"
+	objectSecretKeyEnv = "GITFROK_SEAWEEDFS_S3_SECRET_KEY"
 )
 
 type frontDoorConfig struct {
@@ -44,6 +56,10 @@ type frontDoorConfig struct {
 	verifierKeyID string
 	patKey        []byte
 	policyAddr    string
+	// objects is the SeaweedFS-S3 tier (SPEC-0023). Nil means this plane serves no
+	// LFS batch endpoint at all, rather than one that answers with actions nothing
+	// can honour.
+	objects *objectstore.Store
 }
 
 func (c frontDoorConfig) enabled() bool {
@@ -80,6 +96,43 @@ func loadFrontDoorConfig(getenv func(string) string) (frontDoorConfig, error) {
 	}
 	if cfg.sshAddr != "" && cfg.verifierKeyID == "" {
 		return cfg, fmt.Errorf("the SSH listener requires %s", sshVerifierKeyIDEnv)
+	}
+
+	// The SeaweedFS-S3 tier, all-or-nothing for the same reason the doors are: a plane
+	// configured with three of five values has an operator who intended LFS and a
+	// deployment that would refuse it (SPEC-0023).
+	objectValues := map[string]string{
+		objectEndpointEnv:  getenv(objectEndpointEnv),
+		objectRegionEnv:    getenv(objectRegionEnv),
+		objectBucketEnv:    getenv(objectBucketEnv),
+		objectAccessKeyEnv: getenv(objectAccessKeyEnv),
+		objectSecretKeyEnv: getenv(objectSecretKeyEnv),
+	}
+	set, missing := 0, []string{}
+	for name, value := range objectValues {
+		if value != "" {
+			set++
+		} else {
+			missing = append(missing, name)
+		}
+	}
+	switch set {
+	case 0:
+	case len(objectValues):
+		store, err := objectstore.New(objectstore.Config{
+			Endpoint:  objectValues[objectEndpointEnv],
+			Region:    objectValues[objectRegionEnv],
+			Bucket:    objectValues[objectBucketEnv],
+			AccessKey: objectValues[objectAccessKeyEnv],
+			SecretKey: objectValues[objectSecretKeyEnv],
+		})
+		if err != nil {
+			return cfg, err
+		}
+		cfg.objects = store
+	default:
+		sort.Strings(missing)
+		return cfg, fmt.Errorf("the SeaweedFS-S3 tier is partly configured; missing %s", strings.Join(missing, ", "))
 	}
 	return cfg, nil
 }
@@ -165,7 +218,21 @@ func startGitFrontDoors(ctx context.Context, cfg frontDoorConfig, authenticator 
 			return nil, fmt.Errorf("smart-http listen %s: %w", cfg.httpAddr, err)
 		}
 		doors.httpListener = listener
-		doors.httpServer = &http.Server{Handler: gitfrontdoor.SmartHTTP{Router: router, Storage: storage, RequestID: ids.NewULID}}
+		// One mux: the Smart-HTTP surface, plus the LFS batch endpoint when this
+		// plane has an object tier. The LFS pattern is more specific than the Git
+		// prefix, so Go's mux routes it first.
+		mux := http.NewServeMux()
+		mux.Handle("/", gitfrontdoor.SmartHTTP{Router: router, Storage: storage, RequestID: ids.NewULID})
+		if cfg.objects != nil {
+			tier, err := gitfrontdoor.NewObjectTier(pdp, cfg.objects)
+			if err != nil {
+				doors.Close()
+				return nil, fmt.Errorf("lfs object tier: %w", err)
+			}
+			mux.Handle("POST /git/{tenant}/{repository}/info/lfs/objects/batch",
+				gitfrontdoor.LFS{Router: router, Objects: tier, RequestID: ids.NewULID})
+		}
+		doors.httpServer = &http.Server{Handler: mux}
 		go func() {
 			if err := doors.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fmt.Fprintf(os.Stderr, "dataplane smart-http: %v\n", err)

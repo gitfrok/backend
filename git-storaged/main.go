@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
@@ -16,6 +18,7 @@ import (
 	"github.com/gitfrok/backend/modules/repository"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/ids"
+	"github.com/gitfrok/backend/platform/objectstore"
 	"google.golang.org/grpc"
 )
 
@@ -24,7 +27,63 @@ const (
 	policyBundleEnv   = "GITFROK_POLICY_BUNDLE_DIR"
 	listenAddressEnv  = "GITFROK_GIT_STORAGE_LISTEN_ADDR"
 	nodeIDEnv         = "GITFROK_NODE_ID"
+
+	// The SeaweedFS-S3 large-object tier (SPEC-0023, ADR-0020, ADR-0033 decision
+	// 4). SeaweedFS is the object store — the variables name it so a deployment
+	// cannot be pointed at another provider by accident and discover the fact
+	// later. All five are required together: a node configured with some of them
+	// has an operator who intended LFS and a deployment that would refuse it,
+	// which is worse than one that never had it.
+	objectEndpointEnv  = "GITFROK_SEAWEEDFS_S3_ENDPOINT"
+	objectRegionEnv    = "GITFROK_SEAWEEDFS_S3_REGION"
+	objectBucketEnv    = "GITFROK_SEAWEEDFS_S3_BUCKET"
+	objectAccessKeyEnv = "GITFROK_SEAWEEDFS_S3_ACCESS_KEY"
+	objectSecretKeyEnv = "GITFROK_SEAWEEDFS_S3_SECRET_KEY"
 )
+
+// objectTier builds the SeaweedFS-S3 store, or returns nil when this node is not
+// configured for LFS.
+//
+// Partial configuration is an error rather than a silent fallback: an operator who
+// set three of five variables meant to enable LFS, and a node that quietly served
+// none would fail imports later with nothing pointing at the cause. A node with
+// none of them set serves no LFS, which is a deployment choice.
+func objectTier(getenv func(string) string) (ObjectStore, error) {
+	values := map[string]string{
+		objectEndpointEnv:  getenv(objectEndpointEnv),
+		objectRegionEnv:    getenv(objectRegionEnv),
+		objectBucketEnv:    getenv(objectBucketEnv),
+		objectAccessKeyEnv: getenv(objectAccessKeyEnv),
+		objectSecretKeyEnv: getenv(objectSecretKeyEnv),
+	}
+	set := 0
+	for _, value := range values {
+		if value != "" {
+			set++
+		}
+	}
+	switch set {
+	case 0:
+		return nil, nil
+	case len(values):
+		return objectstore.New(objectstore.Config{
+			Endpoint:  values[objectEndpointEnv],
+			Region:    values[objectRegionEnv],
+			Bucket:    values[objectBucketEnv],
+			AccessKey: values[objectAccessKeyEnv],
+			SecretKey: values[objectSecretKeyEnv],
+		})
+	default:
+		missing := make([]string, 0, len(values))
+		for name, value := range values {
+			if value == "" {
+				missing = append(missing, name)
+			}
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("git-storaged: the SeaweedFS-S3 tier is partly configured; missing %s", strings.Join(missing, ", "))
+	}
+}
 
 func main() {
 	runtime, err := loadRuntime(os.Getenv)
@@ -55,6 +114,12 @@ func main() {
 	protectionProjection := protection.New()
 	protectionProjection.Subscribe(events)
 
+	objects, err := objectTier(os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	server, err := NewServer(Config{
 		RepositoryRoot: runtime.repositoryRoot,
 		PDP:            pdp,
@@ -62,6 +127,7 @@ func main() {
 		Coordinator:    repository.NewInMemoryCoordinator(nodeID, events),
 		NodeID:         nodeID,
 		Protection:     protectionProjection,
+		Objects:        objects,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

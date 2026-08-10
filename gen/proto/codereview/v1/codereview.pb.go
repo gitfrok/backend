@@ -2213,6 +2213,342 @@ func (x *ListImportedHistoryResponse) GetNextPageToken() string {
 	return ""
 }
 
+// DeclaredActorMapping is one tenant admin's assertion that a foreign handle is
+// a platform identity (SPEC-0011 AC10).
+//
+// It is stored beside the imported records, never inside them: an imported record
+// is immutable (AC13), and a mapping is a later, first-party claim *about* it. A
+// reader that renders a mapped name must still render the record as imported —
+// the mapping tells you who the platform believes the handle belongs to, not that
+// the platform witnessed what the handle did.
+type DeclaredActorMapping struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	MappingId string `protobuf:"bytes,1,opt,name=mapping_id,json=mappingId,proto3" json:"mapping_id,omitempty"`
+	TenantId  string `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	ImportId  string `protobuf:"bytes,3,opt,name=import_id,json=importId,proto3" json:"import_id,omitempty"`
+	// The foreign handle as the source declared it, plus the instance it came from.
+	// A handle is only meaningful within its instance: "jdoe" on two GitLab servers
+	// is two people.
+	DeclaredActor  string `protobuf:"bytes,4,opt,name=declared_actor,json=declaredActor,proto3" json:"declared_actor,omitempty"`
+	SourceInstance string `protobuf:"bytes,5,opt,name=source_instance,json=sourceInstance,proto3" json:"source_instance,omitempty"`
+	// The platform identity the admin asserts this handle belongs to.
+	ActorId string `protobuf:"bytes,6,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
+	// The tenant admin who asserted it. Recorded here as well as in the audit
+	// event, so a reader of the mapping never has to join to the trail to see who
+	// is accountable for it.
+	AssertedBy string                 `protobuf:"bytes,7,opt,name=asserted_by,json=assertedBy,proto3" json:"asserted_by,omitempty"`
+	AssertedAt *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=asserted_at,json=assertedAt,proto3" json:"asserted_at,omitempty"`
+}
+
+func (x *DeclaredActorMapping) Reset() {
+	*x = DeclaredActorMapping{}
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeclaredActorMapping) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeclaredActorMapping) ProtoMessage() {}
+
+func (x *DeclaredActorMapping) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeclaredActorMapping.ProtoReflect.Descriptor instead.
+func (*DeclaredActorMapping) Descriptor() ([]byte, []int) {
+	return file_proto_codereview_v1_codereview_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *DeclaredActorMapping) GetMappingId() string {
+	if x != nil {
+		return x.MappingId
+	}
+	return ""
+}
+
+func (x *DeclaredActorMapping) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *DeclaredActorMapping) GetImportId() string {
+	if x != nil {
+		return x.ImportId
+	}
+	return ""
+}
+
+func (x *DeclaredActorMapping) GetDeclaredActor() string {
+	if x != nil {
+		return x.DeclaredActor
+	}
+	return ""
+}
+
+func (x *DeclaredActorMapping) GetSourceInstance() string {
+	if x != nil {
+		return x.SourceInstance
+	}
+	return ""
+}
+
+func (x *DeclaredActorMapping) GetActorId() string {
+	if x != nil {
+		return x.ActorId
+	}
+	return ""
+}
+
+func (x *DeclaredActorMapping) GetAssertedBy() string {
+	if x != nil {
+		return x.AssertedBy
+	}
+	return ""
+}
+
+func (x *DeclaredActorMapping) GetAssertedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AssertedAt
+	}
+	return nil
+}
+
+type MapDeclaredActorRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Context        *ReviewCommandContext `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	ImportId       string                `protobuf:"bytes,2,opt,name=import_id,json=importId,proto3" json:"import_id,omitempty"`
+	DeclaredActor  string                `protobuf:"bytes,3,opt,name=declared_actor,json=declaredActor,proto3" json:"declared_actor,omitempty"`
+	SourceInstance string                `protobuf:"bytes,4,opt,name=source_instance,json=sourceInstance,proto3" json:"source_instance,omitempty"`
+	ActorId        string                `protobuf:"bytes,5,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
+}
+
+func (x *MapDeclaredActorRequest) Reset() {
+	*x = MapDeclaredActorRequest{}
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MapDeclaredActorRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MapDeclaredActorRequest) ProtoMessage() {}
+
+func (x *MapDeclaredActorRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MapDeclaredActorRequest.ProtoReflect.Descriptor instead.
+func (*MapDeclaredActorRequest) Descriptor() ([]byte, []int) {
+	return file_proto_codereview_v1_codereview_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *MapDeclaredActorRequest) GetContext() *ReviewCommandContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *MapDeclaredActorRequest) GetImportId() string {
+	if x != nil {
+		return x.ImportId
+	}
+	return ""
+}
+
+func (x *MapDeclaredActorRequest) GetDeclaredActor() string {
+	if x != nil {
+		return x.DeclaredActor
+	}
+	return ""
+}
+
+func (x *MapDeclaredActorRequest) GetSourceInstance() string {
+	if x != nil {
+		return x.SourceInstance
+	}
+	return ""
+}
+
+func (x *MapDeclaredActorRequest) GetActorId() string {
+	if x != nil {
+		return x.ActorId
+	}
+	return ""
+}
+
+type MapDeclaredActorResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Mapping *DeclaredActorMapping `protobuf:"bytes,1,opt,name=mapping,proto3" json:"mapping,omitempty"`
+}
+
+func (x *MapDeclaredActorResponse) Reset() {
+	*x = MapDeclaredActorResponse{}
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MapDeclaredActorResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MapDeclaredActorResponse) ProtoMessage() {}
+
+func (x *MapDeclaredActorResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MapDeclaredActorResponse.ProtoReflect.Descriptor instead.
+func (*MapDeclaredActorResponse) Descriptor() ([]byte, []int) {
+	return file_proto_codereview_v1_codereview_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *MapDeclaredActorResponse) GetMapping() *DeclaredActorMapping {
+	if x != nil {
+		return x.Mapping
+	}
+	return nil
+}
+
+type ListDeclaredActorMappingsRequest struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Context  *ReviewCommandContext `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	ImportId string                `protobuf:"bytes,2,opt,name=import_id,json=importId,proto3" json:"import_id,omitempty"`
+}
+
+func (x *ListDeclaredActorMappingsRequest) Reset() {
+	*x = ListDeclaredActorMappingsRequest{}
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListDeclaredActorMappingsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListDeclaredActorMappingsRequest) ProtoMessage() {}
+
+func (x *ListDeclaredActorMappingsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListDeclaredActorMappingsRequest.ProtoReflect.Descriptor instead.
+func (*ListDeclaredActorMappingsRequest) Descriptor() ([]byte, []int) {
+	return file_proto_codereview_v1_codereview_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ListDeclaredActorMappingsRequest) GetContext() *ReviewCommandContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *ListDeclaredActorMappingsRequest) GetImportId() string {
+	if x != nil {
+		return x.ImportId
+	}
+	return ""
+}
+
+type ListDeclaredActorMappingsResponse struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Mappings []*DeclaredActorMapping `protobuf:"bytes,1,rep,name=mappings,proto3" json:"mappings,omitempty"`
+}
+
+func (x *ListDeclaredActorMappingsResponse) Reset() {
+	*x = ListDeclaredActorMappingsResponse{}
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListDeclaredActorMappingsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListDeclaredActorMappingsResponse) ProtoMessage() {}
+
+func (x *ListDeclaredActorMappingsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_codereview_v1_codereview_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListDeclaredActorMappingsResponse.ProtoReflect.Descriptor instead.
+func (*ListDeclaredActorMappingsResponse) Descriptor() ([]byte, []int) {
+	return file_proto_codereview_v1_codereview_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *ListDeclaredActorMappingsResponse) GetMappings() []*DeclaredActorMapping {
+	if x != nil {
+		return x.Mappings
+	}
+	return nil
+}
+
 var File_proto_codereview_v1_codereview_proto protoreflect.FileDescriptor
 
 var file_proto_codereview_v1_codereview_proto_rawDesc = []byte{
@@ -2586,7 +2922,63 @@ var file_proto_codereview_v1_codereview_proto_rawDesc = []byte{
 	0x52, 0x0d, 0x6d, 0x65, 0x72, 0x67, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x73, 0x12,
 	0x26, 0x0a, 0x0f, 0x6e, 0x65, 0x78, 0x74, 0x5f, 0x70, 0x61, 0x67, 0x65, 0x5f, 0x74, 0x6f, 0x6b,
 	0x65, 0x6e, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0d, 0x6e, 0x65, 0x78, 0x74, 0x50, 0x61,
-	0x67, 0x65, 0x54, 0x6f, 0x6b, 0x65, 0x6e, 0x2a, 0x96, 0x01, 0x0a, 0x11, 0x4d, 0x65, 0x72, 0x67,
+	0x67, 0x65, 0x54, 0x6f, 0x6b, 0x65, 0x6e, 0x22, 0xb8, 0x02, 0x0a, 0x14, 0x44, 0x65, 0x63, 0x6c,
+	0x61, 0x72, 0x65, 0x64, 0x41, 0x63, 0x74, 0x6f, 0x72, 0x4d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67,
+	0x12, 0x1d, 0x0a, 0x0a, 0x6d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x5f, 0x69, 0x64, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x09, 0x52, 0x09, 0x6d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x49, 0x64, 0x12,
+	0x1b, 0x0a, 0x09, 0x74, 0x65, 0x6e, 0x61, 0x6e, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01,
+	0x28, 0x09, 0x52, 0x08, 0x74, 0x65, 0x6e, 0x61, 0x6e, 0x74, 0x49, 0x64, 0x12, 0x1b, 0x0a, 0x09,
+	0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x08, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x49, 0x64, 0x12, 0x25, 0x0a, 0x0e, 0x64, 0x65, 0x63,
+	0x6c, 0x61, 0x72, 0x65, 0x64, 0x5f, 0x61, 0x63, 0x74, 0x6f, 0x72, 0x18, 0x04, 0x20, 0x01, 0x28,
+	0x09, 0x52, 0x0d, 0x64, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64, 0x41, 0x63, 0x74, 0x6f, 0x72,
+	0x12, 0x27, 0x0a, 0x0f, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x5f, 0x69, 0x6e, 0x73, 0x74, 0x61,
+	0x6e, 0x63, 0x65, 0x18, 0x05, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0e, 0x73, 0x6f, 0x75, 0x72, 0x63,
+	0x65, 0x49, 0x6e, 0x73, 0x74, 0x61, 0x6e, 0x63, 0x65, 0x12, 0x19, 0x0a, 0x08, 0x61, 0x63, 0x74,
+	0x6f, 0x72, 0x5f, 0x69, 0x64, 0x18, 0x06, 0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x61, 0x63, 0x74,
+	0x6f, 0x72, 0x49, 0x64, 0x12, 0x1f, 0x0a, 0x0b, 0x61, 0x73, 0x73, 0x65, 0x72, 0x74, 0x65, 0x64,
+	0x5f, 0x62, 0x79, 0x18, 0x07, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0a, 0x61, 0x73, 0x73, 0x65, 0x72,
+	0x74, 0x65, 0x64, 0x42, 0x79, 0x12, 0x3b, 0x0a, 0x0b, 0x61, 0x73, 0x73, 0x65, 0x72, 0x74, 0x65,
+	0x64, 0x5f, 0x61, 0x74, 0x18, 0x08, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x1a, 0x2e, 0x67, 0x6f, 0x6f,
+	0x67, 0x6c, 0x65, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x75, 0x66, 0x2e, 0x54, 0x69, 0x6d,
+	0x65, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x52, 0x0a, 0x61, 0x73, 0x73, 0x65, 0x72, 0x74, 0x65, 0x64,
+	0x41, 0x74, 0x22, 0xe8, 0x01, 0x0a, 0x17, 0x4d, 0x61, 0x70, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72,
+	0x65, 0x64, 0x41, 0x63, 0x74, 0x6f, 0x72, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x45,
+	0x0a, 0x07, 0x63, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32,
+	0x2b, 0x2e, 0x67, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65,
+	0x76, 0x69, 0x65, 0x77, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x76, 0x69, 0x65, 0x77, 0x43, 0x6f,
+	0x6d, 0x6d, 0x61, 0x6e, 0x64, 0x43, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74, 0x52, 0x07, 0x63, 0x6f,
+	0x6e, 0x74, 0x65, 0x78, 0x74, 0x12, 0x1b, 0x0a, 0x09, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x5f,
+	0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x08, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74,
+	0x49, 0x64, 0x12, 0x25, 0x0a, 0x0e, 0x64, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64, 0x5f, 0x61,
+	0x63, 0x74, 0x6f, 0x72, 0x18, 0x03, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0d, 0x64, 0x65, 0x63, 0x6c,
+	0x61, 0x72, 0x65, 0x64, 0x41, 0x63, 0x74, 0x6f, 0x72, 0x12, 0x27, 0x0a, 0x0f, 0x73, 0x6f, 0x75,
+	0x72, 0x63, 0x65, 0x5f, 0x69, 0x6e, 0x73, 0x74, 0x61, 0x6e, 0x63, 0x65, 0x18, 0x04, 0x20, 0x01,
+	0x28, 0x09, 0x52, 0x0e, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x49, 0x6e, 0x73, 0x74, 0x61, 0x6e,
+	0x63, 0x65, 0x12, 0x19, 0x0a, 0x08, 0x61, 0x63, 0x74, 0x6f, 0x72, 0x5f, 0x69, 0x64, 0x18, 0x05,
+	0x20, 0x01, 0x28, 0x09, 0x52, 0x07, 0x61, 0x63, 0x74, 0x6f, 0x72, 0x49, 0x64, 0x22, 0x61, 0x0a,
+	0x18, 0x4d, 0x61, 0x70, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64, 0x41, 0x63, 0x74, 0x6f,
+	0x72, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x45, 0x0a, 0x07, 0x6d, 0x61, 0x70,
+	0x70, 0x69, 0x6e, 0x67, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x2b, 0x2e, 0x67, 0x69, 0x74,
+	0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2e,
+	0x76, 0x31, 0x2e, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64, 0x41, 0x63, 0x74, 0x6f, 0x72,
+	0x4d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x52, 0x07, 0x6d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67,
+	0x22, 0x86, 0x01, 0x0a, 0x20, 0x4c, 0x69, 0x73, 0x74, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65,
+	0x64, 0x41, 0x63, 0x74, 0x6f, 0x72, 0x4d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x73, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x45, 0x0a, 0x07, 0x63, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74,
+	0x18, 0x01, 0x20, 0x01, 0x28, 0x0b, 0x32, 0x2b, 0x2e, 0x67, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73,
+	0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x76, 0x31, 0x2e, 0x52,
+	0x65, 0x76, 0x69, 0x65, 0x77, 0x43, 0x6f, 0x6d, 0x6d, 0x61, 0x6e, 0x64, 0x43, 0x6f, 0x6e, 0x74,
+	0x65, 0x78, 0x74, 0x52, 0x07, 0x63, 0x6f, 0x6e, 0x74, 0x65, 0x78, 0x74, 0x12, 0x1b, 0x0a, 0x09,
+	0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x08, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x49, 0x64, 0x22, 0x6c, 0x0a, 0x21, 0x4c, 0x69, 0x73,
+	0x74, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64, 0x41, 0x63, 0x74, 0x6f, 0x72, 0x4d, 0x61,
+	0x70, 0x70, 0x69, 0x6e, 0x67, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x47,
+	0x0a, 0x08, 0x6d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b,
+	0x32, 0x2b, 0x2e, 0x67, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72,
+	0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x76, 0x31, 0x2e, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65,
+	0x64, 0x41, 0x63, 0x74, 0x6f, 0x72, 0x4d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x52, 0x08, 0x6d,
+	0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x73, 0x2a, 0x96, 0x01, 0x0a, 0x11, 0x4d, 0x65, 0x72, 0x67,
 	0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x53, 0x74, 0x61, 0x74, 0x65, 0x12, 0x23, 0x0a,
 	0x1f, 0x4d, 0x45, 0x52, 0x47, 0x45, 0x5f, 0x52, 0x45, 0x51, 0x55, 0x45, 0x53, 0x54, 0x5f, 0x53,
 	0x54, 0x41, 0x54, 0x45, 0x5f, 0x55, 0x4e, 0x53, 0x50, 0x45, 0x43, 0x49, 0x46, 0x49, 0x45, 0x44,
@@ -2657,7 +3049,7 @@ var file_proto_codereview_v1_codereview_proto_rawDesc = []byte{
 	0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65,
 	0x77, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x42, 0x72, 0x61, 0x6e, 0x63, 0x68, 0x50, 0x72,
 	0x6f, 0x74, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
-	0x32, 0xa5, 0x04, 0x0a, 0x0d, 0x49, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x53, 0x65, 0x72, 0x76, 0x69,
+	0x32, 0xab, 0x06, 0x0a, 0x0d, 0x49, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x53, 0x65, 0x72, 0x76, 0x69,
 	0x63, 0x65, 0x12, 0x67, 0x0a, 0x0c, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x49, 0x6d, 0x70, 0x6f,
 	0x72, 0x74, 0x12, 0x2a, 0x2e, 0x67, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64,
 	0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x76, 0x31, 0x2e, 0x43, 0x72, 0x65, 0x61, 0x74,
@@ -2691,22 +3083,38 @@ var file_proto_codereview_v1_codereview_proto_rawDesc = []byte{
 	0x75, 0x65, 0x73, 0x74, 0x1a, 0x32, 0x2e, 0x67, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63,
 	0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x76, 0x31, 0x2e, 0x4c, 0x69, 0x73,
 	0x74, 0x49, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x65, 0x64, 0x48, 0x69, 0x73, 0x74, 0x6f, 0x72, 0x79,
-	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x42, 0xe3, 0x01, 0x0a, 0x19, 0x63, 0x6f, 0x6d,
-	0x2e, 0x67, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76,
-	0x69, 0x65, 0x77, 0x2e, 0x76, 0x31, 0x42, 0x0f, 0x43, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69,
-	0x65, 0x77, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x50, 0x01, 0x5a, 0x3f, 0x67, 0x69, 0x74, 0x68, 0x75,
-	0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x67, 0x69, 0x74, 0x66, 0x72, 0x6f, 0x6b, 0x2f, 0x62, 0x61,
-	0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2f, 0x67, 0x65, 0x6e, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2f,
-	0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2f, 0x76, 0x31, 0x3b, 0x63, 0x6f,
-	0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x76, 0x31, 0xa2, 0x02, 0x03, 0x47, 0x43, 0x58,
-	0xaa, 0x02, 0x15, 0x47, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x43, 0x6f, 0x64, 0x65, 0x72,
-	0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x56, 0x31, 0xca, 0x02, 0x15, 0x47, 0x69, 0x74, 0x73, 0x61,
-	0x61, 0x73, 0x5c, 0x43, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x5c, 0x56, 0x31,
-	0xe2, 0x02, 0x21, 0x47, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x5c, 0x43, 0x6f, 0x64, 0x65, 0x72,
-	0x65, 0x76, 0x69, 0x65, 0x77, 0x5c, 0x56, 0x31, 0x5c, 0x47, 0x50, 0x42, 0x4d, 0x65, 0x74, 0x61,
-	0x64, 0x61, 0x74, 0x61, 0xea, 0x02, 0x17, 0x47, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x3a, 0x3a,
-	0x43, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x3a, 0x3a, 0x56, 0x31, 0x62, 0x06,
-	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x73, 0x0a, 0x10, 0x4d, 0x61, 0x70, 0x44,
+	0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64, 0x41, 0x63, 0x74, 0x6f, 0x72, 0x12, 0x2e, 0x2e, 0x67,
+	0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65,
+	0x77, 0x2e, 0x76, 0x31, 0x2e, 0x4d, 0x61, 0x70, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64,
+	0x41, 0x63, 0x74, 0x6f, 0x72, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2f, 0x2e, 0x67,
+	0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65,
+	0x77, 0x2e, 0x76, 0x31, 0x2e, 0x4d, 0x61, 0x70, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64,
+	0x41, 0x63, 0x74, 0x6f, 0x72, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x8e, 0x01,
+	0x0a, 0x19, 0x4c, 0x69, 0x73, 0x74, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64, 0x41, 0x63,
+	0x74, 0x6f, 0x72, 0x4d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x73, 0x12, 0x37, 0x2e, 0x67, 0x69,
+	0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77,
+	0x2e, 0x76, 0x31, 0x2e, 0x4c, 0x69, 0x73, 0x74, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64,
+	0x41, 0x63, 0x74, 0x6f, 0x72, 0x4d, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x67, 0x73, 0x52, 0x65, 0x71,
+	0x75, 0x65, 0x73, 0x74, 0x1a, 0x38, 0x2e, 0x67, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63,
+	0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x76, 0x31, 0x2e, 0x4c, 0x69, 0x73,
+	0x74, 0x44, 0x65, 0x63, 0x6c, 0x61, 0x72, 0x65, 0x64, 0x41, 0x63, 0x74, 0x6f, 0x72, 0x4d, 0x61,
+	0x70, 0x70, 0x69, 0x6e, 0x67, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x42, 0xe3,
+	0x01, 0x0a, 0x19, 0x63, 0x6f, 0x6d, 0x2e, 0x67, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x2e, 0x63,
+	0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x76, 0x31, 0x42, 0x0f, 0x43, 0x6f,
+	0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x50, 0x01, 0x5a,
+	0x3f, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x67, 0x69, 0x74, 0x66,
+	0x72, 0x6f, 0x6b, 0x2f, 0x62, 0x61, 0x63, 0x6b, 0x65, 0x6e, 0x64, 0x2f, 0x67, 0x65, 0x6e, 0x2f,
+	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x2f, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77,
+	0x2f, 0x76, 0x31, 0x3b, 0x63, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x76, 0x31,
+	0xa2, 0x02, 0x03, 0x47, 0x43, 0x58, 0xaa, 0x02, 0x15, 0x47, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73,
+	0x2e, 0x43, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x2e, 0x56, 0x31, 0xca, 0x02,
+	0x15, 0x47, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73, 0x5c, 0x43, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76,
+	0x69, 0x65, 0x77, 0x5c, 0x56, 0x31, 0xe2, 0x02, 0x21, 0x47, 0x69, 0x74, 0x73, 0x61, 0x61, 0x73,
+	0x5c, 0x43, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77, 0x5c, 0x56, 0x31, 0x5c, 0x47,
+	0x50, 0x42, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0xea, 0x02, 0x17, 0x47, 0x69, 0x74,
+	0x73, 0x61, 0x61, 0x73, 0x3a, 0x3a, 0x43, 0x6f, 0x64, 0x65, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77,
+	0x3a, 0x3a, 0x56, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
@@ -2722,56 +3130,61 @@ func file_proto_codereview_v1_codereview_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_codereview_v1_codereview_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_proto_codereview_v1_codereview_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_proto_codereview_v1_codereview_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_proto_codereview_v1_codereview_proto_goTypes = []any{
-	(MergeRequestState)(0),              // 0: gitsaas.codereview.v1.MergeRequestState
-	(ReviewDisposition)(0),              // 1: gitsaas.codereview.v1.ReviewDisposition
-	(ImportState)(0),                    // 2: gitsaas.codereview.v1.ImportState
-	(ImportedThread_Anchor)(0),          // 3: gitsaas.codereview.v1.ImportedThread.Anchor
-	(*ReviewCommandContext)(nil),        // 4: gitsaas.codereview.v1.ReviewCommandContext
-	(*MergeRequest)(nil),                // 5: gitsaas.codereview.v1.MergeRequest
-	(*ImportedThread)(nil),              // 6: gitsaas.codereview.v1.ImportedThread
-	(*ImportedComment)(nil),             // 7: gitsaas.codereview.v1.ImportedComment
-	(*ImportedApproval)(nil),            // 8: gitsaas.codereview.v1.ImportedApproval
-	(*CreateMergeRequestRequest)(nil),   // 9: gitsaas.codereview.v1.CreateMergeRequestRequest
-	(*CreateMergeRequestResponse)(nil),  // 10: gitsaas.codereview.v1.CreateMergeRequestResponse
-	(*GetMergeRequestRequest)(nil),      // 11: gitsaas.codereview.v1.GetMergeRequestRequest
-	(*GetMergeRequestResponse)(nil),     // 12: gitsaas.codereview.v1.GetMergeRequestResponse
-	(*SubmitReviewRequest)(nil),         // 13: gitsaas.codereview.v1.SubmitReviewRequest
-	(*SubmitReviewResponse)(nil),        // 14: gitsaas.codereview.v1.SubmitReviewResponse
-	(*MergeMergeRequestRequest)(nil),    // 15: gitsaas.codereview.v1.MergeMergeRequestRequest
-	(*MergeMergeRequestResponse)(nil),   // 16: gitsaas.codereview.v1.MergeMergeRequestResponse
-	(*BranchProtection)(nil),            // 17: gitsaas.codereview.v1.BranchProtection
-	(*SetBranchProtectionRequest)(nil),  // 18: gitsaas.codereview.v1.SetBranchProtectionRequest
-	(*SetBranchProtectionResponse)(nil), // 19: gitsaas.codereview.v1.SetBranchProtectionResponse
-	(*Import)(nil),                      // 20: gitsaas.codereview.v1.Import
-	(*CreateImportRequest)(nil),         // 21: gitsaas.codereview.v1.CreateImportRequest
-	(*CreateImportResponse)(nil),        // 22: gitsaas.codereview.v1.CreateImportResponse
-	(*GetImportRequest)(nil),            // 23: gitsaas.codereview.v1.GetImportRequest
-	(*GetImportResponse)(nil),           // 24: gitsaas.codereview.v1.GetImportResponse
-	(*ListImportsRequest)(nil),          // 25: gitsaas.codereview.v1.ListImportsRequest
-	(*ListImportsResponse)(nil),         // 26: gitsaas.codereview.v1.ListImportsResponse
-	(*RevokeImportRequest)(nil),         // 27: gitsaas.codereview.v1.RevokeImportRequest
-	(*RevokeImportResponse)(nil),        // 28: gitsaas.codereview.v1.RevokeImportResponse
-	(*ImportedMergeRequest)(nil),        // 29: gitsaas.codereview.v1.ImportedMergeRequest
-	(*ListImportedHistoryRequest)(nil),  // 30: gitsaas.codereview.v1.ListImportedHistoryRequest
-	(*ListImportedHistoryResponse)(nil), // 31: gitsaas.codereview.v1.ListImportedHistoryResponse
-	nil,                                 // 32: gitsaas.codereview.v1.Import.RecordCountsEntry
-	(*timestamppb.Timestamp)(nil),       // 33: google.protobuf.Timestamp
-	(*v1.Provenance)(nil),               // 34: gitsaas.contracts.v1.Provenance
+	(MergeRequestState)(0),                    // 0: gitsaas.codereview.v1.MergeRequestState
+	(ReviewDisposition)(0),                    // 1: gitsaas.codereview.v1.ReviewDisposition
+	(ImportState)(0),                          // 2: gitsaas.codereview.v1.ImportState
+	(ImportedThread_Anchor)(0),                // 3: gitsaas.codereview.v1.ImportedThread.Anchor
+	(*ReviewCommandContext)(nil),              // 4: gitsaas.codereview.v1.ReviewCommandContext
+	(*MergeRequest)(nil),                      // 5: gitsaas.codereview.v1.MergeRequest
+	(*ImportedThread)(nil),                    // 6: gitsaas.codereview.v1.ImportedThread
+	(*ImportedComment)(nil),                   // 7: gitsaas.codereview.v1.ImportedComment
+	(*ImportedApproval)(nil),                  // 8: gitsaas.codereview.v1.ImportedApproval
+	(*CreateMergeRequestRequest)(nil),         // 9: gitsaas.codereview.v1.CreateMergeRequestRequest
+	(*CreateMergeRequestResponse)(nil),        // 10: gitsaas.codereview.v1.CreateMergeRequestResponse
+	(*GetMergeRequestRequest)(nil),            // 11: gitsaas.codereview.v1.GetMergeRequestRequest
+	(*GetMergeRequestResponse)(nil),           // 12: gitsaas.codereview.v1.GetMergeRequestResponse
+	(*SubmitReviewRequest)(nil),               // 13: gitsaas.codereview.v1.SubmitReviewRequest
+	(*SubmitReviewResponse)(nil),              // 14: gitsaas.codereview.v1.SubmitReviewResponse
+	(*MergeMergeRequestRequest)(nil),          // 15: gitsaas.codereview.v1.MergeMergeRequestRequest
+	(*MergeMergeRequestResponse)(nil),         // 16: gitsaas.codereview.v1.MergeMergeRequestResponse
+	(*BranchProtection)(nil),                  // 17: gitsaas.codereview.v1.BranchProtection
+	(*SetBranchProtectionRequest)(nil),        // 18: gitsaas.codereview.v1.SetBranchProtectionRequest
+	(*SetBranchProtectionResponse)(nil),       // 19: gitsaas.codereview.v1.SetBranchProtectionResponse
+	(*Import)(nil),                            // 20: gitsaas.codereview.v1.Import
+	(*CreateImportRequest)(nil),               // 21: gitsaas.codereview.v1.CreateImportRequest
+	(*CreateImportResponse)(nil),              // 22: gitsaas.codereview.v1.CreateImportResponse
+	(*GetImportRequest)(nil),                  // 23: gitsaas.codereview.v1.GetImportRequest
+	(*GetImportResponse)(nil),                 // 24: gitsaas.codereview.v1.GetImportResponse
+	(*ListImportsRequest)(nil),                // 25: gitsaas.codereview.v1.ListImportsRequest
+	(*ListImportsResponse)(nil),               // 26: gitsaas.codereview.v1.ListImportsResponse
+	(*RevokeImportRequest)(nil),               // 27: gitsaas.codereview.v1.RevokeImportRequest
+	(*RevokeImportResponse)(nil),              // 28: gitsaas.codereview.v1.RevokeImportResponse
+	(*ImportedMergeRequest)(nil),              // 29: gitsaas.codereview.v1.ImportedMergeRequest
+	(*ListImportedHistoryRequest)(nil),        // 30: gitsaas.codereview.v1.ListImportedHistoryRequest
+	(*ListImportedHistoryResponse)(nil),       // 31: gitsaas.codereview.v1.ListImportedHistoryResponse
+	(*DeclaredActorMapping)(nil),              // 32: gitsaas.codereview.v1.DeclaredActorMapping
+	(*MapDeclaredActorRequest)(nil),           // 33: gitsaas.codereview.v1.MapDeclaredActorRequest
+	(*MapDeclaredActorResponse)(nil),          // 34: gitsaas.codereview.v1.MapDeclaredActorResponse
+	(*ListDeclaredActorMappingsRequest)(nil),  // 35: gitsaas.codereview.v1.ListDeclaredActorMappingsRequest
+	(*ListDeclaredActorMappingsResponse)(nil), // 36: gitsaas.codereview.v1.ListDeclaredActorMappingsResponse
+	nil,                           // 37: gitsaas.codereview.v1.Import.RecordCountsEntry
+	(*timestamppb.Timestamp)(nil), // 38: google.protobuf.Timestamp
+	(*v1.Provenance)(nil),         // 39: gitsaas.contracts.v1.Provenance
 }
 var file_proto_codereview_v1_codereview_proto_depIdxs = []int32{
 	0,  // 0: gitsaas.codereview.v1.MergeRequest.state:type_name -> gitsaas.codereview.v1.MergeRequestState
-	33, // 1: gitsaas.codereview.v1.MergeRequest.created_at:type_name -> google.protobuf.Timestamp
-	33, // 2: gitsaas.codereview.v1.MergeRequest.updated_at:type_name -> google.protobuf.Timestamp
-	34, // 3: gitsaas.codereview.v1.MergeRequest.provenance:type_name -> gitsaas.contracts.v1.Provenance
+	38, // 1: gitsaas.codereview.v1.MergeRequest.created_at:type_name -> google.protobuf.Timestamp
+	38, // 2: gitsaas.codereview.v1.MergeRequest.updated_at:type_name -> google.protobuf.Timestamp
+	39, // 3: gitsaas.codereview.v1.MergeRequest.provenance:type_name -> gitsaas.contracts.v1.Provenance
 	3,  // 4: gitsaas.codereview.v1.ImportedThread.anchor:type_name -> gitsaas.codereview.v1.ImportedThread.Anchor
 	7,  // 5: gitsaas.codereview.v1.ImportedThread.comments:type_name -> gitsaas.codereview.v1.ImportedComment
-	34, // 6: gitsaas.codereview.v1.ImportedThread.provenance:type_name -> gitsaas.contracts.v1.Provenance
-	33, // 7: gitsaas.codereview.v1.ImportedComment.declared_at:type_name -> google.protobuf.Timestamp
-	34, // 8: gitsaas.codereview.v1.ImportedComment.provenance:type_name -> gitsaas.contracts.v1.Provenance
-	33, // 9: gitsaas.codereview.v1.ImportedApproval.declared_at:type_name -> google.protobuf.Timestamp
-	34, // 10: gitsaas.codereview.v1.ImportedApproval.provenance:type_name -> gitsaas.contracts.v1.Provenance
+	39, // 6: gitsaas.codereview.v1.ImportedThread.provenance:type_name -> gitsaas.contracts.v1.Provenance
+	38, // 7: gitsaas.codereview.v1.ImportedComment.declared_at:type_name -> google.protobuf.Timestamp
+	39, // 8: gitsaas.codereview.v1.ImportedComment.provenance:type_name -> gitsaas.contracts.v1.Provenance
+	38, // 9: gitsaas.codereview.v1.ImportedApproval.declared_at:type_name -> google.protobuf.Timestamp
+	39, // 10: gitsaas.codereview.v1.ImportedApproval.provenance:type_name -> gitsaas.contracts.v1.Provenance
 	4,  // 11: gitsaas.codereview.v1.CreateMergeRequestRequest.context:type_name -> gitsaas.codereview.v1.ReviewCommandContext
 	5,  // 12: gitsaas.codereview.v1.CreateMergeRequestResponse.merge_request:type_name -> gitsaas.codereview.v1.MergeRequest
 	4,  // 13: gitsaas.codereview.v1.GetMergeRequestRequest.context:type_name -> gitsaas.codereview.v1.ReviewCommandContext
@@ -2784,7 +3197,7 @@ var file_proto_codereview_v1_codereview_proto_depIdxs = []int32{
 	4,  // 20: gitsaas.codereview.v1.SetBranchProtectionRequest.context:type_name -> gitsaas.codereview.v1.ReviewCommandContext
 	17, // 21: gitsaas.codereview.v1.SetBranchProtectionResponse.branch_protection:type_name -> gitsaas.codereview.v1.BranchProtection
 	2,  // 22: gitsaas.codereview.v1.Import.state:type_name -> gitsaas.codereview.v1.ImportState
-	32, // 23: gitsaas.codereview.v1.Import.record_counts:type_name -> gitsaas.codereview.v1.Import.RecordCountsEntry
+	37, // 23: gitsaas.codereview.v1.Import.record_counts:type_name -> gitsaas.codereview.v1.Import.RecordCountsEntry
 	4,  // 24: gitsaas.codereview.v1.CreateImportRequest.context:type_name -> gitsaas.codereview.v1.ReviewCommandContext
 	20, // 25: gitsaas.codereview.v1.CreateImportResponse.import:type_name -> gitsaas.codereview.v1.Import
 	4,  // 26: gitsaas.codereview.v1.GetImportRequest.context:type_name -> gitsaas.codereview.v1.ReviewCommandContext
@@ -2795,34 +3208,43 @@ var file_proto_codereview_v1_codereview_proto_depIdxs = []int32{
 	20, // 31: gitsaas.codereview.v1.RevokeImportResponse.import:type_name -> gitsaas.codereview.v1.Import
 	6,  // 32: gitsaas.codereview.v1.ImportedMergeRequest.threads:type_name -> gitsaas.codereview.v1.ImportedThread
 	8,  // 33: gitsaas.codereview.v1.ImportedMergeRequest.approvals:type_name -> gitsaas.codereview.v1.ImportedApproval
-	34, // 34: gitsaas.codereview.v1.ImportedMergeRequest.provenance:type_name -> gitsaas.contracts.v1.Provenance
+	39, // 34: gitsaas.codereview.v1.ImportedMergeRequest.provenance:type_name -> gitsaas.contracts.v1.Provenance
 	4,  // 35: gitsaas.codereview.v1.ListImportedHistoryRequest.context:type_name -> gitsaas.codereview.v1.ReviewCommandContext
 	29, // 36: gitsaas.codereview.v1.ListImportedHistoryResponse.merge_requests:type_name -> gitsaas.codereview.v1.ImportedMergeRequest
-	9,  // 37: gitsaas.codereview.v1.MergeRequestService.CreateMergeRequest:input_type -> gitsaas.codereview.v1.CreateMergeRequestRequest
-	11, // 38: gitsaas.codereview.v1.MergeRequestService.GetMergeRequest:input_type -> gitsaas.codereview.v1.GetMergeRequestRequest
-	13, // 39: gitsaas.codereview.v1.MergeRequestService.SubmitReview:input_type -> gitsaas.codereview.v1.SubmitReviewRequest
-	15, // 40: gitsaas.codereview.v1.MergeRequestService.MergeMergeRequest:input_type -> gitsaas.codereview.v1.MergeMergeRequestRequest
-	18, // 41: gitsaas.codereview.v1.MergeRequestService.SetBranchProtection:input_type -> gitsaas.codereview.v1.SetBranchProtectionRequest
-	21, // 42: gitsaas.codereview.v1.ImportService.CreateImport:input_type -> gitsaas.codereview.v1.CreateImportRequest
-	23, // 43: gitsaas.codereview.v1.ImportService.GetImport:input_type -> gitsaas.codereview.v1.GetImportRequest
-	25, // 44: gitsaas.codereview.v1.ImportService.ListImports:input_type -> gitsaas.codereview.v1.ListImportsRequest
-	27, // 45: gitsaas.codereview.v1.ImportService.RevokeImport:input_type -> gitsaas.codereview.v1.RevokeImportRequest
-	30, // 46: gitsaas.codereview.v1.ImportService.ListImportedHistory:input_type -> gitsaas.codereview.v1.ListImportedHistoryRequest
-	10, // 47: gitsaas.codereview.v1.MergeRequestService.CreateMergeRequest:output_type -> gitsaas.codereview.v1.CreateMergeRequestResponse
-	12, // 48: gitsaas.codereview.v1.MergeRequestService.GetMergeRequest:output_type -> gitsaas.codereview.v1.GetMergeRequestResponse
-	14, // 49: gitsaas.codereview.v1.MergeRequestService.SubmitReview:output_type -> gitsaas.codereview.v1.SubmitReviewResponse
-	16, // 50: gitsaas.codereview.v1.MergeRequestService.MergeMergeRequest:output_type -> gitsaas.codereview.v1.MergeMergeRequestResponse
-	19, // 51: gitsaas.codereview.v1.MergeRequestService.SetBranchProtection:output_type -> gitsaas.codereview.v1.SetBranchProtectionResponse
-	22, // 52: gitsaas.codereview.v1.ImportService.CreateImport:output_type -> gitsaas.codereview.v1.CreateImportResponse
-	24, // 53: gitsaas.codereview.v1.ImportService.GetImport:output_type -> gitsaas.codereview.v1.GetImportResponse
-	26, // 54: gitsaas.codereview.v1.ImportService.ListImports:output_type -> gitsaas.codereview.v1.ListImportsResponse
-	28, // 55: gitsaas.codereview.v1.ImportService.RevokeImport:output_type -> gitsaas.codereview.v1.RevokeImportResponse
-	31, // 56: gitsaas.codereview.v1.ImportService.ListImportedHistory:output_type -> gitsaas.codereview.v1.ListImportedHistoryResponse
-	47, // [47:57] is the sub-list for method output_type
-	37, // [37:47] is the sub-list for method input_type
-	37, // [37:37] is the sub-list for extension type_name
-	37, // [37:37] is the sub-list for extension extendee
-	0,  // [0:37] is the sub-list for field type_name
+	38, // 37: gitsaas.codereview.v1.DeclaredActorMapping.asserted_at:type_name -> google.protobuf.Timestamp
+	4,  // 38: gitsaas.codereview.v1.MapDeclaredActorRequest.context:type_name -> gitsaas.codereview.v1.ReviewCommandContext
+	32, // 39: gitsaas.codereview.v1.MapDeclaredActorResponse.mapping:type_name -> gitsaas.codereview.v1.DeclaredActorMapping
+	4,  // 40: gitsaas.codereview.v1.ListDeclaredActorMappingsRequest.context:type_name -> gitsaas.codereview.v1.ReviewCommandContext
+	32, // 41: gitsaas.codereview.v1.ListDeclaredActorMappingsResponse.mappings:type_name -> gitsaas.codereview.v1.DeclaredActorMapping
+	9,  // 42: gitsaas.codereview.v1.MergeRequestService.CreateMergeRequest:input_type -> gitsaas.codereview.v1.CreateMergeRequestRequest
+	11, // 43: gitsaas.codereview.v1.MergeRequestService.GetMergeRequest:input_type -> gitsaas.codereview.v1.GetMergeRequestRequest
+	13, // 44: gitsaas.codereview.v1.MergeRequestService.SubmitReview:input_type -> gitsaas.codereview.v1.SubmitReviewRequest
+	15, // 45: gitsaas.codereview.v1.MergeRequestService.MergeMergeRequest:input_type -> gitsaas.codereview.v1.MergeMergeRequestRequest
+	18, // 46: gitsaas.codereview.v1.MergeRequestService.SetBranchProtection:input_type -> gitsaas.codereview.v1.SetBranchProtectionRequest
+	21, // 47: gitsaas.codereview.v1.ImportService.CreateImport:input_type -> gitsaas.codereview.v1.CreateImportRequest
+	23, // 48: gitsaas.codereview.v1.ImportService.GetImport:input_type -> gitsaas.codereview.v1.GetImportRequest
+	25, // 49: gitsaas.codereview.v1.ImportService.ListImports:input_type -> gitsaas.codereview.v1.ListImportsRequest
+	27, // 50: gitsaas.codereview.v1.ImportService.RevokeImport:input_type -> gitsaas.codereview.v1.RevokeImportRequest
+	30, // 51: gitsaas.codereview.v1.ImportService.ListImportedHistory:input_type -> gitsaas.codereview.v1.ListImportedHistoryRequest
+	33, // 52: gitsaas.codereview.v1.ImportService.MapDeclaredActor:input_type -> gitsaas.codereview.v1.MapDeclaredActorRequest
+	35, // 53: gitsaas.codereview.v1.ImportService.ListDeclaredActorMappings:input_type -> gitsaas.codereview.v1.ListDeclaredActorMappingsRequest
+	10, // 54: gitsaas.codereview.v1.MergeRequestService.CreateMergeRequest:output_type -> gitsaas.codereview.v1.CreateMergeRequestResponse
+	12, // 55: gitsaas.codereview.v1.MergeRequestService.GetMergeRequest:output_type -> gitsaas.codereview.v1.GetMergeRequestResponse
+	14, // 56: gitsaas.codereview.v1.MergeRequestService.SubmitReview:output_type -> gitsaas.codereview.v1.SubmitReviewResponse
+	16, // 57: gitsaas.codereview.v1.MergeRequestService.MergeMergeRequest:output_type -> gitsaas.codereview.v1.MergeMergeRequestResponse
+	19, // 58: gitsaas.codereview.v1.MergeRequestService.SetBranchProtection:output_type -> gitsaas.codereview.v1.SetBranchProtectionResponse
+	22, // 59: gitsaas.codereview.v1.ImportService.CreateImport:output_type -> gitsaas.codereview.v1.CreateImportResponse
+	24, // 60: gitsaas.codereview.v1.ImportService.GetImport:output_type -> gitsaas.codereview.v1.GetImportResponse
+	26, // 61: gitsaas.codereview.v1.ImportService.ListImports:output_type -> gitsaas.codereview.v1.ListImportsResponse
+	28, // 62: gitsaas.codereview.v1.ImportService.RevokeImport:output_type -> gitsaas.codereview.v1.RevokeImportResponse
+	31, // 63: gitsaas.codereview.v1.ImportService.ListImportedHistory:output_type -> gitsaas.codereview.v1.ListImportedHistoryResponse
+	34, // 64: gitsaas.codereview.v1.ImportService.MapDeclaredActor:output_type -> gitsaas.codereview.v1.MapDeclaredActorResponse
+	36, // 65: gitsaas.codereview.v1.ImportService.ListDeclaredActorMappings:output_type -> gitsaas.codereview.v1.ListDeclaredActorMappingsResponse
+	54, // [54:66] is the sub-list for method output_type
+	42, // [42:54] is the sub-list for method input_type
+	42, // [42:42] is the sub-list for extension type_name
+	42, // [42:42] is the sub-list for extension extendee
+	0,  // [0:42] is the sub-list for field type_name
 }
 
 func init() { file_proto_codereview_v1_codereview_proto_init() }
@@ -2836,7 +3258,7 @@ func file_proto_codereview_v1_codereview_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_proto_codereview_v1_codereview_proto_rawDesc,
 			NumEnums:      4,
-			NumMessages:   29,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

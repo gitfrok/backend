@@ -23,7 +23,9 @@ func NewGitImporter(client gitv1.GitStorageClient) *GitImporter {
 
 // ImportRefs forwards the fetch. The source token travels only inside this
 // call; it is never stored, logged, or copied into an event (SPEC-0011 AC22).
-func (m *GitImporter) ImportRefs(ctx context.Context, command app.ImportRefsCommand) ([]app.RefUpdate, error) {
+// The imported byte count comes back from storage, which measured what it
+// wrote; this adapter does not compute or adjust it (SPEC-0011 AC9/AC21).
+func (m *GitImporter) ImportRefs(ctx context.Context, command app.ImportRefsCommand) (app.GitResult, error) {
 	response, err := m.client.ImportRefs(ctx, &gitv1.ImportRefsRequest{
 		Context: &gitv1.OperationContext{
 			TenantId:     command.TenantID,
@@ -36,13 +38,13 @@ func (m *GitImporter) ImportRefs(ctx context.Context, command app.ImportRefsComm
 		SourceToken: command.SourceToken,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("codereview: import refs: %w", err)
+		return app.GitResult{}, fmt.Errorf("codereview: import refs: %w", err)
 	}
 	updates := make([]app.RefUpdate, 0, len(response.GetRefs()))
 	for _, ref := range response.GetRefs() {
 		updates = append(updates, app.RefUpdate{Ref: ref.GetRef(), Revision: ref.GetRevision()})
 	}
-	return updates, nil
+	return app.GitResult{Refs: updates, ImportedBytes: response.GetImportedBytes()}, nil
 }
 
 var _ app.GitImporter = (*GitImporter)(nil)

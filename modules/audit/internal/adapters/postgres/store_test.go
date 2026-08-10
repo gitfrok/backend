@@ -379,6 +379,66 @@ func TestAppendRejectsAttestedImport(t *testing.T) {
 	}
 }
 
+// SPEC-0011 AC12: no chain position disagrees with our clock ordering after an
+// import, and a source-declared time influences nothing in the chain.
+//
+// The import's own audit event is one ordinary FIRST_PARTY entry. This case
+// writes entries around it whose declared source times run backwards — the shape
+// a migration produces, where the imported history is years older than the
+// import that carried it — and asserts the chain still follows the order the
+// writer appended in, timestamped by our clock.
+func TestAC12_ImportDoesNotReorderTheChain(t *testing.T) {
+	s, ctx := store(t)
+
+	// Source-declared times, deliberately descending and far in the past. They
+	// travel as detail on the import event, which is where a declared time is
+	// allowed to appear: as content, never as position.
+	declared := []string{"2019-04-02T09:30:00Z", "2016-01-01T00:00:00Z", "2011-07-11T23:59:59Z"}
+	var appended []api.Record
+	for i, at := range declared {
+		record, err := s.Append(ctx, api.Entry{
+			TenantID:   string(tenantFor(t)),
+			Action:     api.ActionTenantIsolationViolation,
+			ActorID:    "operator-1",
+			Resource:   fmt.Sprintf("import/01H%d", i),
+			Outcome:    api.OutcomeAllowed,
+			Detail:     map[string]string{"declared_at": at, "import_id": "import-1"},
+			OccurredAt: time.Unix(int64(1780000000+i), 0).UTC(),
+			Provenance: api.ProvenanceFirstParty,
+		})
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		appended = append(appended, record)
+	}
+
+	// Chain position follows append order, not the declared times.
+	for i := 1; i < len(appended); i++ {
+		if appended[i].Seq <= appended[i-1].Seq {
+			t.Fatalf("chain position %d = %d, not after %d — a declared time reordered the chain",
+				i, appended[i].Seq, appended[i-1].Seq)
+		}
+		if !appended[i].OccurredAt.After(appended[i-1].OccurredAt) {
+			t.Fatalf("record %d is not after its predecessor by our clock: %s vs %s",
+				i, appended[i].OccurredAt, appended[i-1].OccurredAt)
+		}
+		if appended[i].PrevHash != appended[i-1].Hash {
+			t.Fatalf("record %d does not chain onto its predecessor", i)
+		}
+	}
+
+	res, err := s.Verify(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("chain failed at seq %d: %s", res.BrokenAtSeq, res.Reason)
+	}
+	if res.Checked != int64(len(declared)) {
+		t.Fatalf("checked %d records, want %d", res.Checked, len(declared))
+	}
+}
+
 var _ api.Log = (*auditpg.Store)(nil) // the adapter satisfies the api surface, and only that
 
 var _ = pgx.ErrNoRows // keep the pgx import meaningful if the file is trimmed

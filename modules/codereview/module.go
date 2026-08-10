@@ -41,7 +41,14 @@ type (
 	RefUpdate            = app.RefUpdate
 	ImportHistoryCommand = app.ImportHistoryCommand
 	HistoryResult        = app.HistoryResult
+	GitResult            = app.GitResult
 )
+
+// StorageMeter is where imported bytes are attributed against a tenant's
+// fair-use storage dimension (SPEC-0011 AC9/AC21), aliased so a composition root
+// can supply one. No plane wires one yet: fair-use metering is its own unbuilt
+// requirement (PRD PR-23), and this module measures rather than accounts.
+type StorageMeter = app.StorageMeter
 
 // Pacer throttles import work (SPEC-0011 AC21), aliased so cmd/ can supply one.
 type Pacer = app.Pacer

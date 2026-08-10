@@ -25,7 +25,34 @@ type GitImporter interface {
 	// ImportRefs fetches the source repository's refs and tags into the storage
 	// node and returns the refs that moved. The source URL and token are
 	// request-only secrets.
-	ImportRefs(ctx context.Context, command ImportRefsCommand) ([]RefUpdate, error)
+	ImportRefs(ctx context.Context, command ImportRefsCommand) (GitResult, error)
+}
+
+// GitResult is what one git phase produced: the refs that moved, and the bytes
+// the storage tier actually wrote while writing them.
+//
+// ImportedBytes is measured by the tier that did the writing, not counted off
+// the wire. The wire number is a different quantity — it includes protocol
+// framing and excludes what repacking costs — and charging it to a tenant would
+// bill them for something other than what they now store (SPEC-0011 AC21).
+type GitResult struct {
+	Refs          []RefUpdate
+	ImportedBytes int64
+}
+
+// StorageMeter records imported bytes against the tenant's fair-use storage
+// dimension (SPEC-0011 AC9/AC21, PRD PR-23).
+//
+// It is a port, and a build with no meter wired passes nil: fair-use metering
+// itself is unbuilt (PRD §12 lists PR-23 as needing its own spec and task), and
+// this module must not invent an accounting subsystem to fill the gap. What it
+// owes AC9 is the honest number, measured where it can be measured, handed to
+// whoever will charge it.
+type StorageMeter interface {
+	// RecordImportedBytes attributes bytes an import wrote to a tenant's
+	// repository. It is called once per completed git phase, after the write is
+	// durable — never for a fetch that failed or was refused.
+	RecordImportedBytes(ctx context.Context, tenantID, repositoryID, importID string, bytes int64) error
 }
 
 // ImportRefsCommand is the verified principal plus the source identity for one
@@ -101,6 +128,7 @@ type ImportService struct {
 	pdp     policyapi.DecisionPoint
 	bus     bus.Bus
 	pacer   Pacer
+	meter   StorageMeter
 	newID   func() string
 	now     func() time.Time
 }
@@ -128,6 +156,17 @@ func NewImportService(store ImportStore, records api.ImportedRecordStore, git Gi
 func (s *ImportService) WithPacer(pacer Pacer) *ImportService {
 	if pacer != nil {
 		s.pacer = pacer
+	}
+	return s
+}
+
+// WithStorageMeter sets where imported bytes are attributed. A nil meter leaves
+// the current one in place; a service with no meter still imports, and the
+// number it would have charged is simply not recorded anywhere — which is the
+// truth about this build, and better than a plausible number nobody measured.
+func (s *ImportService) WithStorageMeter(meter StorageMeter) *ImportService {
+	if meter != nil {
+		s.meter = meter
 	}
 	return s
 }
@@ -242,7 +281,15 @@ func (s *ImportService) Create(ctx context.Context, req api.CreateImportRequest)
 	// One first-party HistoryImported audit event per import, chained normally,
 	// carrying the manifest digest over the imported set (ADR-0029 §3, AC10).
 	imp.State = api.ImportComplete
-	imp.ManifestDigest = manifestDigest(imp)
+	// The digest is computed over the records as stored, read back from the
+	// store rather than from what the importer said it wrote. A digest over the
+	// importer's own claim would verify the importer, not the imported set.
+	stored, err := s.records.ListImport(ctx, imp.ID)
+	if err != nil {
+		s.fail(ctx, imp, "imported records unreadable")
+		return api.Import{}, ErrImportDenied
+	}
+	imp.ManifestDigest = manifestDigest(imp, recordsDigest(stored))
 	imp, err = s.store.MarkImportPhase(ctx, imp.ID, true, imp.HistoryPhaseComplete, api.ImportComplete, imp.ManifestDigest, "", imp.RecordCounts)
 	if err != nil {
 		return api.Import{}, ErrImportDenied
@@ -268,7 +315,7 @@ func (s *ImportService) runGitPhase(ctx context.Context, req api.CreateImportReq
 	if s.git == nil {
 		return fmt.Errorf("import: no git importer configured")
 	}
-	moved, err := s.git.ImportRefs(ctx, ImportRefsCommand{
+	result, err := s.git.ImportRefs(ctx, ImportRefsCommand{
 		TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID,
 		RequestID: req.RequestID, ActorRoles: append([]string(nil), req.ActorRoles...),
 		SourceURL: req.SourceURL, SourceToken: req.SourceToken,
@@ -276,8 +323,19 @@ func (s *ImportService) runGitPhase(ctx context.Context, req api.CreateImportReq
 	if err != nil {
 		return err
 	}
-	_ = moved
 	imp.GitPhaseComplete = true
+
+	// Metering happens only after the fetch succeeded: a refused or failed
+	// import writes nothing durable, and charging a tenant for it would bill
+	// them for storage they do not hold (SPEC-0011 AC7/AC9).
+	//
+	// A meter failure does not fail the import. The bytes are already written
+	// and already durable; refusing the import at this point would leave the
+	// data in place and report otherwise, which is a worse lie than an
+	// unrecorded charge.
+	if s.meter != nil && result.ImportedBytes > 0 {
+		_ = s.meter.RecordImportedBytes(ctx, imp.TenantID, imp.RepositoryID, imp.ID, result.ImportedBytes)
+	}
 	return nil
 }
 
@@ -446,12 +504,14 @@ func (s *ImportService) allowed(ctx context.Context, principal api.Context, acti
 	return err == nil && decision.Allowed
 }
 
-// manifestDigest is a SHA-256 over the import's record counts and source
-// identity — the reproducible handle an auditor can re-verify (SPEC-0011
-// AC16). It covers the import's own metadata; the payload digests of the
-// individual records are hashed into it by the history importer's returned
-// counts and any digest map a future phase adds.
-func manifestDigest(imp api.Import) string {
+// manifestDigest is a SHA-256 over the import's metadata, its per-type record
+// counts, and a digest of the imported set itself — the reproducible handle an
+// auditor can re-verify (SPEC-0011 AC16).
+//
+// The set digest is what makes the manifest detect tampering. Metadata and
+// counts alone would verify that the same number of records exists, not that
+// they still say what they said: editing a comment's body leaves both unchanged.
+func manifestDigest(imp api.Import, setDigest string) string {
 	h := sha256.New()
 	for _, part := range []string{imp.ID, imp.TenantID, imp.RepositoryID, imp.SourceSystem, imp.SourceInstance, imp.SourceURL} {
 		fmt.Fprintf(h, "%d:%s", len(part), part)
@@ -465,7 +525,96 @@ func manifestDigest(imp api.Import) string {
 	for _, k := range keys {
 		fmt.Fprintf(h, "%d:%s%d", len(k), k, imp.RecordCounts[k])
 	}
+	fmt.Fprintf(h, "%d:%s", len(setDigest), setDigest)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// recordsDigest is a SHA-256 over the imported set as stored: every field of
+// every record, thread, comment and approval, in a canonical order.
+//
+// Length-prefixed, so no two different sets can hash the same by shifting a
+// boundary — a comment body ending in a field separator must not be able to
+// impersonate the next field. Order-independent by construction: records are
+// sorted by ID before hashing, because two stores may return the same set in
+// different orders and that is not tampering.
+//
+// The stored provenance payload digest is included as a field like any other. It
+// is the source's own attestation of the fetched object, so altering it is
+// itself a mutation the manifest must catch.
+func recordsDigest(records []api.ImportedMergeRequest) string {
+	sorted := append([]api.ImportedMergeRequest(nil), records...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].MergeRequestID < sorted[j].MergeRequestID })
+
+	h := sha256.New()
+	write := func(parts ...string) {
+		for _, part := range parts {
+			fmt.Fprintf(h, "%d:%s", len(part), part)
+		}
+	}
+	writeProvenance := func(p api.Provenance) {
+		write(p.Class, p.ImportID, p.SourceSystem, p.SourceInstance, p.SourceRef, p.DeclaredActor, p.PayloadDigest)
+		// A declared time is hashed as an instant, not as a formatted string, so
+		// a store that round-trips it in another layout still verifies.
+		fmt.Fprintf(h, "%d", p.DeclaredAt.UTC().UnixNano())
+	}
+
+	for _, record := range sorted {
+		write(record.MergeRequestID, record.SourceRef, record.TargetRef, record.Title,
+			record.Description, record.State, record.DeclaredCreator)
+		writeProvenance(record.Provenance)
+
+		threads := append([]api.ImportedThread(nil), record.Threads...)
+		sort.Slice(threads, func(i, j int) bool { return threads[i].ThreadID < threads[j].ThreadID })
+		for _, thread := range threads {
+			write(thread.ThreadID, thread.MergeRequestID, thread.Path, thread.Anchor)
+			writeProvenance(thread.Provenance)
+			comments := append([]api.ImportedComment(nil), thread.Comments...)
+			sort.Slice(comments, func(i, j int) bool { return comments[i].CommentID < comments[j].CommentID })
+			for _, comment := range comments {
+				write(comment.CommentID, comment.DeclaredActor, comment.Body)
+				fmt.Fprintf(h, "%d", comment.DeclaredAt.UTC().UnixNano())
+				writeProvenance(comment.Provenance)
+			}
+		}
+
+		approvals := append([]api.ImportedApproval(nil), record.Approvals...)
+		sort.Slice(approvals, func(i, j int) bool { return approvals[i].ApprovalID < approvals[j].ApprovalID })
+		for _, approval := range approvals {
+			write(approval.ApprovalID, approval.MergeRequestID, approval.DeclaredActor)
+			fmt.Fprintf(h, "%d", approval.DeclaredAt.UTC().UnixNano())
+			writeProvenance(approval.Provenance)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// VerifyImport recomputes the manifest digest over the imported set as it stands
+// now and reports whether it still matches the digest the HistoryImported event
+// recorded (SPEC-0011 AC16).
+//
+// It is a read: it never repairs a mismatch and never rewrites the digest. A
+// failed verification is a finding, and the audit chain entry that recorded the
+// original digest stays exactly as it was (invariant 5).
+//
+// A revoked import verifies as false: its records are tombstoned and dropped
+// from reads, so there is nothing left to verify the digest against. That is not
+// tampering, and the caller can tell the two apart from the import's state.
+func (s *ImportService) VerifyImport(ctx context.Context, principal api.Context, importID string) (bool, error) {
+	if !validContext(principal) || importID == "" {
+		return false, ErrImportDenied
+	}
+	imp, err := s.store.GetImport(ctx, importID)
+	if err != nil || imp.TenantID != principal.TenantID {
+		return false, ErrImportDenied
+	}
+	if imp.ManifestDigest == "" {
+		return false, ErrImportDenied
+	}
+	stored, err := s.records.ListImport(ctx, imp.ID)
+	if err != nil {
+		return false, ErrImportDenied
+	}
+	return manifestDigest(imp, recordsDigest(stored)) == imp.ManifestDigest, nil
 }
 
 // memoryImportStore is the dev/in-memory ImportStore. The create-or-get
@@ -549,14 +698,18 @@ func (m *memoryImportStore) TombstoneImport(_ context.Context, id string) (api.I
 type memoryRecordStore struct {
 	mu      sync.Mutex
 	records map[string][]api.ImportedMergeRequest
-	dead    map[string]bool
+	// mappings are keyed by import, then by (declared_actor, source_instance):
+	// the handle is only meaningful within its instance.
+	mappings map[string]map[string]api.DeclaredActorMapping
+	dead     map[string]bool
 }
 
 // NewMemoryRecordStore returns the dev/in-memory imported-record store.
 func NewMemoryRecordStore() api.ImportedRecordStore {
 	return &memoryRecordStore{
-		records: map[string][]api.ImportedMergeRequest{},
-		dead:    map[string]bool{},
+		records:  map[string][]api.ImportedMergeRequest{},
+		mappings: map[string]map[string]api.DeclaredActorMapping{},
+		dead:     map[string]bool{},
 	}
 }
 
@@ -584,5 +737,54 @@ func (m *memoryRecordStore) Tombstone(_ context.Context, importID string) error 
 	defer m.mu.Unlock()
 	m.dead[importID] = true
 	delete(m.records, importID)
+	// The mappings go with the records they describe (SPEC-0011 AC24). They are
+	// dropped from reads, not from the audit trail: the DeclaredActorMapped events
+	// that recorded who asserted them stay in the chain (invariant 5).
+	delete(m.mappings, importID)
 	return nil
+}
+
+// mappingKey identifies a handle within its source instance. The instance is part
+// of the key, not decoration: the same handle on two source instances is two
+// people, and a key that ignored it would let one mapping claim both.
+func mappingKey(declaredActor, sourceInstance string) string {
+	return fmt.Sprintf("%d:%s%d:%s", len(sourceInstance), sourceInstance, len(declaredActor), declaredActor)
+}
+
+func (m *memoryRecordStore) PutMapping(_ context.Context, mapping api.DeclaredActorMapping) (api.DeclaredActorMapping, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dead[mapping.ImportID] {
+		return api.DeclaredActorMapping{}, fmt.Errorf("codereview: cannot write to a revoked import %s", mapping.ImportID)
+	}
+	key := mappingKey(mapping.DeclaredActor, mapping.SourceInstance)
+	if existing, ok := m.mappings[mapping.ImportID][key]; ok {
+		// Re-asserting the same identity is idempotent, so a retried command does
+		// not produce a second claim. Asserting a *different* identity is refused:
+		// silently replacing one admin's claim with another's would erase who
+		// believed what, which is the whole reason this record names an asserter.
+		if existing.ActorID != mapping.ActorID {
+			return api.DeclaredActorMapping{}, api.ErrMappingConflict
+		}
+		return existing, nil
+	}
+	if m.mappings[mapping.ImportID] == nil {
+		m.mappings[mapping.ImportID] = map[string]api.DeclaredActorMapping{}
+	}
+	m.mappings[mapping.ImportID][key] = mapping
+	return mapping, nil
+}
+
+func (m *memoryRecordStore) ListMappings(_ context.Context, importID string) ([]api.DeclaredActorMapping, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dead[importID] {
+		return nil, nil
+	}
+	out := make([]api.DeclaredActorMapping, 0, len(m.mappings[importID]))
+	for _, mapping := range m.mappings[importID] {
+		out = append(out, mapping)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].MappingID < out[j].MappingID })
+	return out, nil
 }
