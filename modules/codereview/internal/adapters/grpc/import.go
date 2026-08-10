@@ -2,8 +2,12 @@ package grpc
 
 import (
 	"context"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	codereviewv1 "github.com/gitfrok/backend/gen/proto/codereview/v1"
+	contractsv1 "github.com/gitfrok/backend/gen/proto/contracts/v1"
 	"github.com/gitfrok/backend/modules/codereview/api"
 )
 
@@ -85,6 +89,131 @@ func (s *ImportServer) RevokeImport(ctx context.Context, req *codereviewv1.Revok
 		return nil, denialImport()
 	}
 	return &codereviewv1.RevokeImportResponse{Import: importToProto(imp)}, nil
+}
+
+// ListImportedHistory returns one page of an import's imported merge requests.
+// Every record carries its provenance block: without it a reader has no way to
+// tell imported history from first-party history, which is what AC23's rendering
+// depends on (ADR-0029 §4).
+func (s *ImportServer) ListImportedHistory(ctx context.Context, req *codereviewv1.ListImportedHistoryRequest) (*codereviewv1.ListImportedHistoryResponse, error) {
+	ctx, principal, err := intoContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, denialImport()
+	}
+	page, err := s.imports.ListImportedHistory(ctx, api.ListImportedHistoryRequest{
+		Context:   principal,
+		ImportID:  req.GetImportId(),
+		PageSize:  int(req.GetPageSize()),
+		PageToken: req.GetPageToken(),
+	})
+	if err != nil {
+		return nil, denialImport()
+	}
+	response := &codereviewv1.ListImportedHistoryResponse{NextPageToken: page.NextPageToken}
+	for _, record := range page.MergeRequests {
+		response.MergeRequests = append(response.MergeRequests, importedMergeRequestToProto(record))
+	}
+	return response, nil
+}
+
+func importedMergeRequestToProto(record api.ImportedMergeRequest) *codereviewv1.ImportedMergeRequest {
+	out := &codereviewv1.ImportedMergeRequest{
+		MergeRequestId: record.MergeRequestID,
+		SourceRef:      record.SourceRef,
+		TargetRef:      record.TargetRef,
+		Title:          record.Title,
+		Description:    record.Description,
+		State:          record.State,
+		// The source's declared author travels as an opaque handle. It is never
+		// mapped onto creator_id, which names a resolvable platform actor
+		// (ADR-0029 §4, SPEC-0011 AC14).
+		DeclaredCreator: record.DeclaredCreator,
+		Provenance:      provenanceToProto(record.Provenance),
+	}
+	for _, thread := range record.Threads {
+		out.Threads = append(out.Threads, importedThreadToProto(thread))
+	}
+	for _, approval := range record.Approvals {
+		out.Approvals = append(out.Approvals, &codereviewv1.ImportedApproval{
+			ApprovalId:     approval.ApprovalID,
+			MergeRequestId: approval.MergeRequestID,
+			DeclaredActor:  approval.DeclaredActor,
+			DeclaredAt:     declaredTimestamp(approval.DeclaredAt),
+			Provenance:     provenanceToProto(approval.Provenance),
+		})
+	}
+	return out
+}
+
+func importedThreadToProto(thread api.ImportedThread) *codereviewv1.ImportedThread {
+	out := &codereviewv1.ImportedThread{
+		ThreadId:       thread.ThreadID,
+		MergeRequestId: thread.MergeRequestID,
+		Path:           thread.Path,
+		Anchor:         anchorToProto(thread.Anchor),
+		Provenance:     provenanceToProto(thread.Provenance),
+	}
+	for _, comment := range thread.Comments {
+		out.Comments = append(out.Comments, &codereviewv1.ImportedComment{
+			CommentId:     comment.CommentID,
+			DeclaredActor: comment.DeclaredActor,
+			Body:          comment.Body,
+			DeclaredAt:    declaredTimestamp(comment.DeclaredAt),
+			Provenance:    provenanceToProto(comment.Provenance),
+		})
+	}
+	return out
+}
+
+// anchorToProto maps the anchor precision. An unrecognized precision travels as
+// UNSPECIFIED rather than as DIFF: DIFF asserts the diff position still
+// resolves, and a mapping that guesses it would turn an approximate anchor into
+// an exact claim (SPEC-0011 AC5).
+func anchorToProto(anchor string) codereviewv1.ImportedThread_Anchor {
+	switch anchor {
+	case api.AnchorDiff:
+		return codereviewv1.ImportedThread_ANCHOR_DIFF
+	case api.AnchorFile:
+		return codereviewv1.ImportedThread_ANCHOR_FILE
+	case api.AnchorMerge:
+		return codereviewv1.ImportedThread_ANCHOR_MERGE
+	default:
+		return codereviewv1.ImportedThread_ANCHOR_UNSPECIFIED
+	}
+}
+
+// provenanceToProto maps the immutable provenance block. An unrecognized class
+// travels as UNSPECIFIED, never as FIRST_PARTY: a record whose class this build
+// cannot name must not be presentable as one this platform witnessed
+// (ADR-0029 §1).
+func provenanceToProto(provenance api.Provenance) *contractsv1.Provenance {
+	class := contractsv1.Provenance_CLASS_UNSPECIFIED
+	switch provenance.Class {
+	case api.AttestFirstParty:
+		class = contractsv1.Provenance_CLASS_FIRST_PARTY
+	case api.AttestImported:
+		class = contractsv1.Provenance_CLASS_ATTESTED_IMPORT
+	}
+	return &contractsv1.Provenance{
+		Class:          class,
+		ImportId:       provenance.ImportID,
+		SourceSystem:   provenance.SourceSystem,
+		SourceInstance: provenance.SourceInstance,
+		SourceRef:      provenance.SourceRef,
+		DeclaredActor:  provenance.DeclaredActor,
+		DeclaredAt:     declaredTimestamp(provenance.DeclaredAt),
+		PayloadDigest:  provenance.PayloadDigest,
+	}
+}
+
+// declaredTimestamp carries a source-declared time. A zero time travels as an
+// absent timestamp rather than as the Unix epoch, so a reader never renders a
+// date the source never declared.
+func declaredTimestamp(at time.Time) *timestamppb.Timestamp {
+	if at.IsZero() {
+		return nil
+	}
+	return timestamppb.New(at)
 }
 
 func importStateProto(state api.ImportState) codereviewv1.ImportState {

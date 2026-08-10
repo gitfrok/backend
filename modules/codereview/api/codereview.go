@@ -154,6 +154,36 @@ type RevokeImportRequest struct {
 	ImportID string
 }
 
+// ListImportedHistoryRequest reads one page of an import's imported merge
+// requests, so a reader can render them beside first-party history while
+// telling the two apart (SPEC-0011 AC20, which AC23's rendering depends on).
+type ListImportedHistoryRequest struct {
+	Context
+	ImportID string
+	// PageSize is the maximum number of records to return. Zero means
+	// DefaultImportedHistoryPageSize; anything above MaxImportedHistoryPageSize
+	// is clamped to it. An import may hold tens of thousands of records, so no
+	// caller can ask for the whole set in one response.
+	PageSize int
+	// PageToken is the token a previous result returned. Empty starts at the
+	// first page.
+	PageToken string
+}
+
+// Paging bounds for an imported-history read.
+const (
+	DefaultImportedHistoryPageSize = 50
+	MaxImportedHistoryPageSize     = 200
+)
+
+// ImportedHistoryPage is one page of imported merge requests. It is empty for a
+// revoked import: its records are dropped from every read (SPEC-0011 AC17).
+type ImportedHistoryPage struct {
+	MergeRequests []ImportedMergeRequest
+	// NextPageToken is empty when this is the last page.
+	NextPageToken string
+}
+
 // ImportService is the import surface. Code Review owns imported history as
 // ATTESTED_IMPORT domain data (ADR-0029 §2); Audit owns only the
 // HistoryImported/HistoryImportRevoked events.
@@ -162,6 +192,7 @@ type ImportService interface {
 	Get(context.Context, Context, string) (Import, error)
 	List(context.Context, Context, string) ([]Import, error)
 	Revoke(context.Context, RevokeImportRequest) (Import, error)
+	ListImportedHistory(context.Context, ListImportedHistoryRequest) (ImportedHistoryPage, error)
 }
 
 // Provenance is the immutable ADR-0029 block attached to every imported
@@ -255,11 +286,18 @@ type ImportedMergeRequest struct {
 	TargetRef      string
 	Title          string
 	Description    string
-	State          string
-	CreatorID      string
-	Threads        []ImportedThread
-	Approvals      []ImportedApproval
-	Provenance     Provenance
+	// State is the source's own state string ("open", "merged", "closed", …),
+	// never this platform's MergeRequestState: an imported MR never enters our
+	// lifecycle.
+	State string
+	// DeclaredCreator is the declared author as an opaque foreign handle. It is
+	// deliberately not named CreatorID: MergeRequest.CreatorID is a resolvable
+	// platform actor, and a field of the same name here would invite a reader to
+	// resolve a foreign handle as a platform user (ADR-0029 §4, SPEC-0011 AC14).
+	DeclaredCreator string
+	Threads         []ImportedThread
+	Approvals       []ImportedApproval
+	Provenance      Provenance
 }
 
 // ImportedRecordStore persists imported history as ATTESTED_IMPORT domain data

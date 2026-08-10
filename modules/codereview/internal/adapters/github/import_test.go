@@ -100,7 +100,7 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 		t.Fatalf("stored = %v err = %v", stored, err)
 	}
 	pr := stored[0]
-	if pr.Title != "Add feature" || pr.CreatorID != "alice" || pr.State != "open" {
+	if pr.Title != "Add feature" || pr.DeclaredCreator != "alice" || pr.State != "open" {
 		t.Fatalf("pr = %+v", pr)
 	}
 	// The load-bearing ADR-0029 facts: provenance class is ATTESTED_IMPORT, the

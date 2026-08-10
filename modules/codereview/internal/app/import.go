@@ -374,6 +374,64 @@ func (s *ImportService) Revoke(ctx context.Context, req api.RevokeImportRequest)
 	return revoked, nil
 }
 
+// ListImportedHistory returns one page of an import's imported merge requests,
+// so a reader can render them beside first-party history while telling the two
+// apart (SPEC-0011 AC20, which AC23's rendering depends on).
+//
+// Reading imported history is a read of the repository the import landed in, so
+// it is scoped exactly as the other import reads are: the import must belong to
+// the caller's tenant, and a cross-tenant read is indistinguishable from one for
+// an import that does not exist (invariants 1-2, AC21). A revoked import returns
+// nothing — the tombstone drops its records from every read (AC17).
+func (s *ImportService) ListImportedHistory(ctx context.Context, req api.ListImportedHistoryRequest) (api.ImportedHistoryPage, error) {
+	if !validContext(req.Context) || req.ImportID == "" {
+		return api.ImportedHistoryPage{}, ErrImportDenied
+	}
+	imp, err := s.store.GetImport(ctx, req.ImportID)
+	if err != nil || imp.TenantID != req.TenantID {
+		return api.ImportedHistoryPage{}, ErrImportDenied
+	}
+	records, err := s.records.ListImport(ctx, req.ImportID)
+	if err != nil {
+		return api.ImportedHistoryPage{}, ErrImportDenied
+	}
+	// The page is keyed on the merge request ID rather than on an offset: an
+	// import is append-only, so a key that names the last record read cannot
+	// skip or repeat one the way an offset into a growing set can.
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].MergeRequestID < records[j].MergeRequestID
+	})
+	if req.PageToken != "" {
+		records = after(records, req.PageToken)
+	}
+
+	size := req.PageSize
+	if size <= 0 {
+		size = api.DefaultImportedHistoryPageSize
+	}
+	if size > api.MaxImportedHistoryPageSize {
+		size = api.MaxImportedHistoryPageSize
+	}
+	page := api.ImportedHistoryPage{}
+	if len(records) > size {
+		page.MergeRequests = records[:size]
+		page.NextPageToken = page.MergeRequests[size-1].MergeRequestID
+		return page, nil
+	}
+	page.MergeRequests = records
+	return page, nil
+}
+
+// after returns the records ordered strictly beyond token. A token at or past
+// the last record yields none: a reader handed a token this import has already
+// exhausted sees the page end rather than reading the set a second time.
+func after(records []api.ImportedMergeRequest, token string) []api.ImportedMergeRequest {
+	index := sort.Search(len(records), func(i int) bool {
+		return records[i].MergeRequestID > token
+	})
+	return records[index:]
+}
+
 func (s *ImportService) allowed(ctx context.Context, principal api.Context, action, resourceType, resourceID string, attributes map[string]string) bool {
 	decision, err := s.pdp.Decide(ctx, policyapi.Request{
 		TenantID: principal.TenantID,

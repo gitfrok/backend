@@ -282,10 +282,11 @@ var MergeRequestService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ImportService_CreateImport_FullMethodName = "/gitsaas.codereview.v1.ImportService/CreateImport"
-	ImportService_GetImport_FullMethodName    = "/gitsaas.codereview.v1.ImportService/GetImport"
-	ImportService_ListImports_FullMethodName  = "/gitsaas.codereview.v1.ImportService/ListImports"
-	ImportService_RevokeImport_FullMethodName = "/gitsaas.codereview.v1.ImportService/RevokeImport"
+	ImportService_CreateImport_FullMethodName        = "/gitsaas.codereview.v1.ImportService/CreateImport"
+	ImportService_GetImport_FullMethodName           = "/gitsaas.codereview.v1.ImportService/GetImport"
+	ImportService_ListImports_FullMethodName         = "/gitsaas.codereview.v1.ImportService/ListImports"
+	ImportService_RevokeImport_FullMethodName        = "/gitsaas.codereview.v1.ImportService/RevokeImport"
+	ImportService_ListImportedHistory_FullMethodName = "/gitsaas.codereview.v1.ImportService/ListImportedHistory"
 )
 
 // ImportServiceClient is the client API for ImportService service.
@@ -314,6 +315,12 @@ type ImportServiceClient interface {
 	// HistoryImportRevoked. The original HistoryImported chain entry is
 	// unaltered.
 	RevokeImport(ctx context.Context, in *RevokeImportRequest, opts ...grpc.CallOption) (*RevokeImportResponse, error)
+	// ListImportedHistory returns the imported merge requests of one import, so a
+	// reader can render them beside first-party history while telling the two
+	// apart (SPEC-0011 AC20, which AC18's rendering depends on; ADR-0029 §4).
+	// Every record carries its provenance block; a revoked import returns nothing
+	// (AC12 on the read path).
+	ListImportedHistory(ctx context.Context, in *ListImportedHistoryRequest, opts ...grpc.CallOption) (*ListImportedHistoryResponse, error)
 }
 
 type importServiceClient struct {
@@ -364,6 +371,16 @@ func (c *importServiceClient) RevokeImport(ctx context.Context, in *RevokeImport
 	return out, nil
 }
 
+func (c *importServiceClient) ListImportedHistory(ctx context.Context, in *ListImportedHistoryRequest, opts ...grpc.CallOption) (*ListImportedHistoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListImportedHistoryResponse)
+	err := c.cc.Invoke(ctx, ImportService_ListImportedHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ImportServiceServer is the server API for ImportService service.
 // All implementations must embed UnimplementedImportServiceServer
 // for forward compatibility.
@@ -390,6 +407,12 @@ type ImportServiceServer interface {
 	// HistoryImportRevoked. The original HistoryImported chain entry is
 	// unaltered.
 	RevokeImport(context.Context, *RevokeImportRequest) (*RevokeImportResponse, error)
+	// ListImportedHistory returns the imported merge requests of one import, so a
+	// reader can render them beside first-party history while telling the two
+	// apart (SPEC-0011 AC20, which AC18's rendering depends on; ADR-0029 §4).
+	// Every record carries its provenance block; a revoked import returns nothing
+	// (AC12 on the read path).
+	ListImportedHistory(context.Context, *ListImportedHistoryRequest) (*ListImportedHistoryResponse, error)
 	mustEmbedUnimplementedImportServiceServer()
 }
 
@@ -411,6 +434,9 @@ func (UnimplementedImportServiceServer) ListImports(context.Context, *ListImport
 }
 func (UnimplementedImportServiceServer) RevokeImport(context.Context, *RevokeImportRequest) (*RevokeImportResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RevokeImport not implemented")
+}
+func (UnimplementedImportServiceServer) ListImportedHistory(context.Context, *ListImportedHistoryRequest) (*ListImportedHistoryResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListImportedHistory not implemented")
 }
 func (UnimplementedImportServiceServer) mustEmbedUnimplementedImportServiceServer() {}
 func (UnimplementedImportServiceServer) testEmbeddedByValue()                       {}
@@ -505,6 +531,24 @@ func _ImportService_RevokeImport_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ImportService_ListImportedHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListImportedHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ImportServiceServer).ListImportedHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ImportService_ListImportedHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ImportServiceServer).ListImportedHistory(ctx, req.(*ListImportedHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ImportService_ServiceDesc is the grpc.ServiceDesc for ImportService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -527,6 +571,10 @@ var ImportService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RevokeImport",
 			Handler:    _ImportService_RevokeImport_Handler,
+		},
+		{
+			MethodName: "ListImportedHistory",
+			Handler:    _ImportService_ListImportedHistory_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
