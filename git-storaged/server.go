@@ -44,6 +44,18 @@ type Config struct {
 	PDP            policyapi.DecisionPoint
 	Events         bus.Bus
 
+	// Coordinator gates push acknowledgment on the sync-replica durability quorum (SPEC-0018,
+	// ADR-0047). It is required: a storage node that has no quorum cannot acknowledge a push and
+	// must deny writes it cannot durably replicate. Single-node dev runs are served by an
+	// in-process coordinator that treats this node as its own sync replica.
+	Coordinator repoapi.Coordinator
+	// NodeID is this storage node's opaque identity, used to classify which replica a durability
+	// acknowledgement comes from.
+	NodeID string
+	// QuorumTimeout is how long a write waits for the sync replica to durably acknowledge before the
+	// push acknowledgment is withheld. Zero falls back to a sane default.
+	QuorumTimeout time.Duration
+
 	// command is test-only command construction. Production leaves it nil and uses exec.CommandContext.
 	command func(context.Context, string, ...string) *exec.Cmd
 }
@@ -58,6 +70,10 @@ type Server struct {
 	events  bus.Bus
 	command func(context.Context, string, ...string) *exec.Cmd
 	pageKey []byte
+
+	coordinator   repoapi.Coordinator
+	nodeID        string
+	quorumTimeout time.Duration
 }
 
 // NewServer validates process wiring and the live-repository filesystem before the service accepts
@@ -84,6 +100,12 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 	if err := mount.Check(config.RepositoryRoot); err != nil {
 		return nil, err
 	}
+	if config.Coordinator == nil {
+		return nil, errors.New("git-storaged: replica coordinator is required")
+	}
+	if config.NodeID == "" {
+		return nil, errors.New("git-storaged: node ID is required")
+	}
 	command := config.command
 	if command == nil {
 		command = exec.CommandContext
@@ -92,7 +114,20 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 	if _, err := rand.Read(pageKey); err != nil {
 		return nil, fmt.Errorf("git-storaged: generate tree page key: %w", err)
 	}
-	return &Server{root: config.RepositoryRoot, pdp: config.PDP, events: config.Events, command: command, pageKey: pageKey}, nil
+	quorumTimeout := config.QuorumTimeout
+	if quorumTimeout <= 0 {
+		quorumTimeout = 5 * time.Second
+	}
+	return &Server{
+		root:          config.RepositoryRoot,
+		pdp:           config.PDP,
+		events:        config.Events,
+		command:       command,
+		pageKey:       pageKey,
+		coordinator:   config.Coordinator,
+		nodeID:        config.NodeID,
+		quorumTimeout: quorumTimeout,
+	}, nil
 }
 
 const (
@@ -235,7 +270,30 @@ func (s *Server) ReceivePack(stream gitv1.GitStorage_ReceivePackServer) error {
 	if err != nil {
 		return err
 	}
+	// The push is only acknowledged after the sync replica has durably stored it under the leased
+	// term (ADR-0042, SPEC-0018 AC1); withholding the ack here is what bounds the acknowledged RPO
+	// to zero. A failed quorum returns an error and suppresses the RefUpdated event.
+	if err := s.requireQuorum(stream.Context(), repository); err != nil {
+		return err
+	}
 	return s.publishRefUpdates(stream.Context(), repository)
+}
+
+// requireQuorum records this node's primary durability acknowledgement and waits for the in-sync
+// replica to durably acknowledge the same operation under the same term. A refused acknowledgement
+// or a timeout withholds the push acknowledgement — the caller observes a failure and no RefUpdated
+// event is published.
+func (s *Server) requireQuorum(ctx context.Context, repository repositoryOperation) error {
+	if s.coordinator == nil || repository.fencingTerm == 0 {
+		return nil
+	}
+	if _, err := s.coordinator.AckDurable(ctx, repository.tenantID, repository.repositoryID, repository.requestID, s.nodeID, repository.fencingTerm); err != nil {
+		return unavailable()
+	}
+	if err := s.coordinator.WaitForQuorum(ctx, repository.tenantID, repository.repositoryID, repository.requestID, repository.fencingTerm, s.quorumTimeout); err != nil {
+		return unavailable()
+	}
+	return nil
 }
 
 type repositoryOperation struct {
@@ -245,6 +303,14 @@ type repositoryOperation struct {
 	actorRoles   []string
 	path         string
 	before       map[string]string
+
+	// requestID is the opaque receive-pack operation handle used to track this push's
+	// primary/sync durability acknowledgements (SPEC-0018).
+	requestID string
+	// fencingTerm is the term this operation's write was leased under; it is attached to the
+	// durability acknowledgements so a stale primary or a quorum reached under a superseded term
+	// cannot be honored (ADR-0042 §2).
+	fencingTerm uint64
 }
 
 type receive func() (data []byte, close bool, err error)
@@ -362,7 +428,43 @@ func (s *Server) prepare(ctx context.Context, op *gitv1.OperationContext, action
 	if err != nil || !info.IsDir() {
 		return repositoryOperation{}, unavailable()
 	}
-	return repositoryOperation{tenantID: op.GetTenantId(), repositoryID: op.GetRepositoryId(), actorID: op.GetActorId(), actorRoles: append([]string(nil), op.GetActorRoles()...), path: path}, nil
+	repository := repositoryOperation{
+		tenantID:     op.GetTenantId(),
+		repositoryID: op.GetRepositoryId(),
+		actorID:      op.GetActorId(),
+		actorRoles:   append([]string(nil), op.GetActorRoles()...),
+		path:         path,
+		requestID:    op.GetRequestId(),
+	}
+	// repo.write is gated on the replica lease before any Git subprocess starts: a shard that is not
+	// healthy, not write-ready, or not led by this primary is denied so write activity never races a
+	// term change (ADR-0042 §2/§4).
+	if action == "repo.write" {
+		term, err := s.acquireWriteLease(ctx, op)
+		if err != nil {
+			return repositoryOperation{}, unavailable()
+		}
+		repository.fencingTerm = term
+	}
+	return repository, nil
+}
+
+// acquireWriteLease obtains the current shard record and leases the write-route to this node for the
+// receive-pack operation carried in op. It returns the fencing term the lease was granted under, or
+// an error (treated as a denial) when the shard is not writable by this node.
+func (s *Server) acquireWriteLease(ctx context.Context, op *gitv1.OperationContext) (uint64, error) {
+	rec, err := s.coordinator.GetShard(ctx, op.GetTenantId(), op.GetRepositoryId(), 0)
+	if err != nil {
+		return 0, unavailable()
+	}
+	if rec.State != repoapi.ShardStateHealthy || !rec.WriteReady || rec.PrimaryNode != s.nodeID {
+		return 0, unavailable()
+	}
+	lease, err := s.coordinator.BindLease(ctx, op.GetTenantId(), op.GetRepositoryId(), op.GetRequestId(), s.nodeID, rec.FencingTerm)
+	if err != nil || !lease.Granted {
+		return 0, unavailable()
+	}
+	return lease.Term, nil
 }
 
 func validGitTransport(transport gitv1.GitTransport) bool {

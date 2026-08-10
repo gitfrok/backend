@@ -13,17 +13,26 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/modules/repository"
 	repoapi "github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/platform/bus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+)
+
+const (
+	// testNodeID is the storage node identity test pushes lease writes under. The in-process
+	// coordinator auto-seeds a shard as primary==sync==testNodeID, so a push acknowledges its own quorum.
+	testNodeID        = "git-storaged-test"
+	testQuorumTimeout = 200 * time.Millisecond
 )
 
 func TestNewServerRejectsFUSERepositoryRoot(t *testing.T) {
@@ -156,7 +165,14 @@ func TestUploadPackWrongTenantIsUnavailableAndNeverStartsGit(t *testing.T) {
 func TestPreparePassesVerifiedActorRolesToPDP(t *testing.T) {
 	root, tenantID, repositoryID, _ := seededRepository(t)
 	pdp := &recordingPDP{decision: policyapi.Decision{Allowed: true}}
-	server, err := NewServer(Config{RepositoryRoot: root, PDP: pdp, Events: bus.NewInProcess()})
+	events := bus.NewInProcess()
+	server, err := NewServer(Config{
+		RepositoryRoot: root,
+		PDP:            pdp,
+		Events:         events,
+		Coordinator:    repository.NewInMemoryCoordinator(testNodeID, events),
+		NodeID:         testNodeID,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,6 +288,15 @@ func newClient(t *testing.T, root string, pdp policyapi.DecisionPoint, events bu
 
 func newClientWithConfig(t *testing.T, config Config) (gitv1.GitStorageClient, func()) {
 	t.Helper()
+	// Default the coordinator to a single-node in-process instance so pushes acknowledge their own
+	// quorum; tests that need a multi-node topology inject their own (see TestReceivePack*).
+	if config.Coordinator == nil {
+		config.Coordinator = repository.NewInMemoryCoordinator(testNodeID, config.Events)
+		config.NodeID = testNodeID
+	}
+	if config.QuorumTimeout == 0 {
+		config.QuorumTimeout = testQuorumTimeout
+	}
 	server, err := NewServer(config)
 	if err != nil {
 		t.Fatalf("NewServer(): %v", err)
@@ -396,4 +421,142 @@ func testGitCommand(ctx context.Context, name string, args ...string) *exec.Cmd 
 	command := exec.CommandContext(ctx, name, args...)
 	command.Env = append(os.Environ(), "GIT_PROTOCOL=version=0")
 	return command
+}
+
+// testCoordinator is the api.Coordinator plus the in-process-only setup hooks the InMemory adapter
+// exposes for tests. git-storaged (package main, outside modules/repository) reaches these through
+// structural typing rather than importing internal/replica (ADR-0025 internal/ rule).
+type testCoordinator interface {
+	repoapi.Coordinator
+	SeedShard(repoapi.ShardSeed) error
+	MarkDegraded(context.Context, string, string) error
+}
+
+// T-0012 AC4 at the write path: a shard that has failed to read-only (confirmed primary+sync loss)
+// must be denied before a Git subprocess starts, so no write activity races a term change.
+func TestReceivePackDeniedOnReadOnlyShardNeverStartsGit(t *testing.T) {
+	root, tenantID, repositoryID, _ := seededRepository(t)
+	events := bus.NewInProcess()
+	coord := repository.NewInMemoryCoordinator(testNodeID, events)
+	if err := coord.(testCoordinator).SeedShard(repoapi.ShardSeed{
+		TenantID: tenantID, RepositoryID: repositoryID,
+		PrimaryNode: testNodeID, SyncReplica: testNodeID,
+	}); err != nil {
+		t.Fatalf("SeedShard: %v", err)
+	}
+	if err := coord.(testCoordinator).MarkDegraded(context.Background(), tenantID, repositoryID); err != nil {
+		t.Fatalf("MarkDegraded: %v", err)
+	}
+
+	var gitCalls int32
+	client, closeClient := newClientWithConfig(t, Config{
+		RepositoryRoot: root, PDP: allowPDP{}, Events: events,
+		Coordinator:   coord,
+		NodeID:        testNodeID,
+		QuorumTimeout: testQuorumTimeout,
+		command: func(context.Context, string, ...string) *exec.Cmd {
+			atomic.AddInt32(&gitCalls, 1)
+			return exec.Command("false")
+		},
+	})
+	defer closeClient()
+
+	stream, err := client.ReceivePack(context.Background())
+	if err != nil {
+		t.Fatalf("ReceivePack(): %v", err)
+	}
+	if err := stream.Send(receiveContext(tenantID, repositoryID)); err != nil {
+		t.Fatalf("Send context: %v", err)
+	}
+	// No advertisement is produced: prepare() denies on the read-only shard before git starts.
+	_, err = stream.Recv()
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("Recv error code = %s, want %s; error = %v", status.Code(err), codes.NotFound, err)
+	}
+	if atomic.LoadInt32(&gitCalls) != 0 {
+		t.Fatalf("git subprocess started %d times on a read-only shard, want 0", gitCalls)
+	}
+}
+
+// T-0012 AC1 at the write path: with the in-sync replica unreachable, the primary ack alone must not
+// satisfy the quorum, so the push acknowledgment is withheld and no RefUpdated event reaches consumers.
+func TestReceivePackQuorumWithholdsAckWhenSyncUnreachable(t *testing.T) {
+	root := t.TempDir()
+	tenantID, repositoryID := "tenant-a", "repo-a"
+	bare := filepath.Join(root, tenantID, repositoryID+".git")
+	mustRunGit(t, root, "init", "--bare", bare)
+	work := t.TempDir()
+	mustRunGit(t, work, "init")
+	mustRunGit(t, work, "config", "user.email", "dev@gitsaas.test")
+	mustRunGit(t, work, "config", "user.name", "GitFrok test")
+	if err := os.WriteFile(filepath.Join(work, "README.md"), []byte("git-rpc\n"), 0o600); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	mustRunGit(t, work, "add", "README.md")
+	mustRunGit(t, work, "commit", "-m", "initial")
+	commit := mustGitOutput(t, work, "rev-parse", "HEAD")
+	pack := packForCommit(t, work, commit)
+
+	events := bus.NewInProcess()
+	var (
+		mu        sync.Mutex
+		gotEvents []repoapi.RefUpdated
+	)
+	bus.SubscribeTyped(events, func(_ context.Context, e repoapi.RefUpdated) error {
+		mu.Lock()
+		gotEvents = append(gotEvents, e)
+		mu.Unlock()
+		return nil
+	})
+	coord := repository.NewInMemoryCoordinator(testNodeID, events)
+	// primary == this node, sync == a different node that never acks.
+	if err := coord.(testCoordinator).SeedShard(repoapi.ShardSeed{
+		TenantID: tenantID, RepositoryID: repositoryID,
+		PrimaryNode: testNodeID, SyncReplica: "node-sync-down",
+	}); err != nil {
+		t.Fatalf("SeedShard: %v", err)
+	}
+	client, closeClient := newClientWithConfig(t, Config{
+		RepositoryRoot: root, PDP: allowPDP{}, Events: events,
+		Coordinator:   coord,
+		NodeID:        testNodeID,
+		QuorumTimeout: 150 * time.Millisecond,
+		command:       testGitCommand,
+	})
+	defer closeClient()
+
+	stream, err := client.ReceivePack(context.Background())
+	if err != nil {
+		t.Fatalf("ReceivePack(): %v", err)
+	}
+	if err := stream.Send(receiveContext(tenantID, repositoryID)); err != nil {
+		t.Fatalf("Send context: %v", err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("Recv advertisement: %v", err)
+	}
+	update := pktLine(strings.Repeat("0", 40) + " " + commit + " refs/heads/main\x00report-status\n")
+	payload := append(append(update, []byte("0000")...), pack...)
+	if err := stream.Send(&gitv1.ReceivePackRequest{Payload: &gitv1.ReceivePackRequest_Data{Data: payload}}); err != nil {
+		t.Fatalf("Send push: %v", err)
+	}
+	if err := stream.Send(&gitv1.ReceivePackRequest{Payload: &gitv1.ReceivePackRequest_Close{Close: true}}); err != nil {
+		t.Fatalf("Send close: %v", err)
+	}
+	if err := stream.CloseSend(); err != nil {
+		t.Fatalf("CloseSend: %v", err)
+	}
+	// Drain until the server ends the stream. The quorum times out and the server returns Unavailable.
+	for {
+		if _, err := stream.Recv(); err != nil {
+			break
+		}
+	}
+
+	mu.Lock()
+	n := len(gotEvents)
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("published %d RefUpdated events, want 0 (quorum withheld)", n)
+	}
 }

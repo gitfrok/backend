@@ -12,7 +12,9 @@ import (
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
 	"github.com/gitfrok/backend/modules/policy"
+	"github.com/gitfrok/backend/modules/repository"
 	"github.com/gitfrok/backend/platform/bus"
+	"github.com/gitfrok/backend/platform/ids"
 	"google.golang.org/grpc"
 )
 
@@ -20,6 +22,7 @@ const (
 	repositoryRootEnv = "GITFROK_GIT_STORAGE_ROOT"
 	policyBundleEnv   = "GITFROK_POLICY_BUNDLE_DIR"
 	listenAddressEnv  = "GITFROK_GIT_STORAGE_LISTEN_ADDR"
+	nodeIDEnv         = "GITFROK_NODE_ID"
 )
 
 func main() {
@@ -35,7 +38,23 @@ func main() {
 		fmt.Fprintf(os.Stderr, "git-storaged: policy bundle is unusable: %v\n", err)
 		os.Exit(1)
 	}
-	server, err := NewServer(Config{RepositoryRoot: runtime.repositoryRoot, PDP: pdp, Events: events})
+	// Node identity for replica coordination: explicit env, else hostname, else a fresh ULID so a
+	// stray deployment never silently shares an identity with another node.
+	nodeID := os.Getenv(nodeIDEnv)
+	if nodeID == "" {
+		if h, herr := os.Hostname(); herr == nil && h != "" {
+			nodeID = h
+		} else {
+			nodeID = ids.NewULID()
+		}
+	}
+	server, err := NewServer(Config{
+		RepositoryRoot: runtime.repositoryRoot,
+		PDP:            pdp,
+		Events:         events,
+		Coordinator:    repository.NewInMemoryCoordinator(nodeID, events),
+		NodeID:         nodeID,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

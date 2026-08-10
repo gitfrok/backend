@@ -14,6 +14,7 @@ import (
 	"github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/modules/repository/internal/adapters/memstore"
 	"github.com/gitfrok/backend/modules/repository/internal/app"
+	"github.com/gitfrok/backend/modules/repository/internal/replica"
 	"github.com/gitfrok/backend/platform/bus"
 )
 
@@ -22,4 +23,12 @@ import (
 // tenancy baseline (T-0004) as a second constructor taking the pool from cmd/.
 func NewInMemory(b bus.Bus) api.Repositories {
 	return app.New(memstore.New(), b)
+}
+
+// NewInMemoryCoordinator assembles the single-process replica coordinator used by git-storaged and
+// by tests. localNodeID is this storage node's identity; the coordinator auto-seeds an unknown shard
+// as primary==sync==localNodeID so a standalone node can acknowledge its own writes (SPEC-0018,
+// ADR-0042). b carries the replica.force_promote audit event on a successful force-promote.
+func NewInMemoryCoordinator(localNodeID string, b bus.Bus) api.Coordinator {
+	return replica.NewInMemoryCoordinator(localNodeID, b)
 }
