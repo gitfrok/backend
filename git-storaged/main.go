@@ -11,6 +11,7 @@ import (
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
+	"github.com/gitfrok/backend/git-storaged/protection"
 	"github.com/gitfrok/backend/modules/policy"
 	"github.com/gitfrok/backend/modules/repository"
 	"github.com/gitfrok/backend/platform/bus"
@@ -48,12 +49,19 @@ func main() {
 			nodeID = ids.NewULID()
 		}
 	}
+	// Branch protection reaches this node only as BranchProtectionChanged. The
+	// projection is subscribed before the server accepts traffic, so a rule that
+	// arrives is in effect for the next push rather than the one after it.
+	protectionProjection := protection.New()
+	protectionProjection.Subscribe(events)
+
 	server, err := NewServer(Config{
 		RepositoryRoot: runtime.repositoryRoot,
 		PDP:            pdp,
 		Events:         events,
 		Coordinator:    repository.NewInMemoryCoordinator(nodeID, events),
 		NodeID:         nodeID,
+		Protection:     protectionProjection,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

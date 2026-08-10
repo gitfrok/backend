@@ -56,6 +56,12 @@ type Config struct {
 	// push acknowledgment is withheld. Zero falls back to a sane default.
 	QuorumTimeout time.Duration
 
+	// Protection is this node's tenant-scoped projection of branch-protection
+	// facts. Without one no ref is treated as protected, which is the correct
+	// state for a node that has been told about none — but a deployment that
+	// wants the protected-branch rule enforced must supply it (SPEC-0019 AC3).
+	Protection Protection
+
 	// command is test-only command construction. Production leaves it nil and uses exec.CommandContext.
 	command func(context.Context, string, ...string) *exec.Cmd
 }
@@ -74,6 +80,7 @@ type Server struct {
 	coordinator   repoapi.Coordinator
 	nodeID        string
 	quorumTimeout time.Duration
+	protection    Protection
 }
 
 // NewServer validates process wiring and the live-repository filesystem before the service accepts
@@ -127,6 +134,7 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 		coordinator:   config.Coordinator,
 		nodeID:        config.NodeID,
 		quorumTimeout: quorumTimeout,
+		protection:    config.Protection,
 	}, nil
 }
 
@@ -336,6 +344,15 @@ func (s *Server) exchange(ctx context.Context, op *gitv1.OperationContext, actio
 		return repositoryOperation{}, unavailable()
 	}
 	command := s.command(ctx, binary, args...)
+	if action == "repo.write" {
+		// A protected ref is refused before git applies it, not detected after.
+		// The PDP makes the decision here; the hook only carries it out, because
+		// once git-receive-pack has run the refs have already moved.
+		if err := installPreReceiveHook(repository.path); err != nil {
+			return repositoryOperation{}, unavailable()
+		}
+		command.Env = hookEnvironment(command.Env, s.rejectedRefs(ctx, op))
+	}
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return repositoryOperation{}, unavailable()

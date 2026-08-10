@@ -14,6 +14,7 @@ package protection
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
@@ -54,6 +55,21 @@ func (p *Projection) Protected(tenantID, repositoryID, ref string) bool {
 	defer p.mu.RUnlock()
 	_, ok := p.rules[key(tenantID, repositoryID, ref)]
 	return ok
+}
+
+// ProtectedRefs lists the protected refs in one tenant and repository. The order
+// is stable, so the set of refs a push is refused is the same between calls.
+func (p *Projection) ProtectedRefs(tenantID, repositoryID string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var refs []string
+	for _, rule := range p.rules {
+		if rule.TenantID == tenantID && rule.RepositoryID == repositoryID {
+			refs = append(refs, rule.TargetRef)
+		}
+	}
+	sort.Strings(refs)
+	return refs
 }
 
 func key(tenantID, repositoryID, ref string) string {
