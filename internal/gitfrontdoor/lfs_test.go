@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"io"
+
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
@@ -62,12 +64,18 @@ func (p *actionPDP) Decide(_ context.Context, req policyapi.Request) (policyapi.
 // stubObjects is the batch surface's port, so the HTTP layer can be tested
 // without a tier at all.
 type stubObjects struct {
-	href    string
-	size    int64
-	err     error
-	upErr   error
-	asked   []string
-	upAsked []string
+	href       string
+	size       int64
+	err        error
+	upErr      error
+	asked      []string
+	upAsked    []string
+	content    string
+	written    string
+	readErr    error
+	writeErr   error
+	readAsked  []string
+	writeAsked []string
 }
 
 func (s *stubObjects) Download(_ context.Context, _ *gitv1.OperationContext, oid string) (string, int64, time.Duration, error) {
@@ -84,6 +92,27 @@ func (s *stubObjects) Upload(_ context.Context, _ *gitv1.OperationContext, oid s
 		return "", 0, s.upErr
 	}
 	return s.href, 5 * time.Minute, nil
+}
+
+func (s *stubObjects) Read(_ context.Context, _ *gitv1.OperationContext, oid string) (io.ReadCloser, int64, error) {
+	s.readAsked = append(s.readAsked, oid)
+	if s.readErr != nil {
+		return nil, 0, s.readErr
+	}
+	return io.NopCloser(strings.NewReader(s.content)), int64(len(s.content)), nil
+}
+
+func (s *stubObjects) Write(_ context.Context, _ *gitv1.OperationContext, oid string, _ int64, body io.Reader) error {
+	s.writeAsked = append(s.writeAsked, oid)
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	written, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	s.written = string(written)
+	return nil
 }
 
 func batchRequestBody(operation, oid string, size int64) string {
@@ -321,5 +350,117 @@ func TestMalformedOIDNeverReachesTheTier(t *testing.T) {
 	}
 	if len(tier.presigns) != 0 {
 		t.Fatalf("a malformed OID reached the tier: %v", tier.presigns)
+	}
+}
+
+// ADR-0050 §4: a tier with no signed URLs makes this plane the transfer endpoint.
+// The batch response then names this plane rather than returning an empty href a
+// client would fail on at transfer time.
+func TestBatchNamesThisPlaneWhenTheTierHasNoSignedURLs(t *testing.T) {
+	objects := &stubObjects{href: "", size: 9}
+	handler := LFS{Router: lfsRouter(), Objects: objects, RequestID: func() string { return "request-1" }}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost,
+		"/git/tenant-a/repo-a.git/info/lfs/objects/batch",
+		strings.NewReader(batchRequestBody("download", testOID, 9)))
+	request.Host = "git.gitsaas.test"
+	request.SetBasicAuth("token", testPAT)
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	want := "http://git.gitsaas.test/git/tenant-a/repo-a.git/info/lfs/objects/" + testOID
+	if !strings.Contains(recorder.Body.String(), want) {
+		t.Fatalf("body = %s, want it to name %s", recorder.Body.String(), want)
+	}
+}
+
+// The proxied download: bytes travel through this plane, uncacheable, with the
+// length the tier reported.
+func TestProxiedObjectDownload(t *testing.T) {
+	objects := &stubObjects{content: "the object bytes"}
+	handler := LFS{Router: lfsRouter(), Objects: objects, RequestID: func() string { return "request-1" }}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet,
+		"/git/tenant-a/repo-a.git/info/lfs/objects/"+testOID, nil)
+	request.SetBasicAuth("token", testPAT)
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Body.String() != "the object bytes" {
+		t.Fatalf("body = %q", recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if len(objects.readAsked) != 1 || objects.readAsked[0] != testOID {
+		t.Fatalf("tier was asked for %v", objects.readAsked)
+	}
+}
+
+// The proxied upload stores the bytes under the OID the path names, and a request
+// with no declared length is refused rather than streamed into the tier with an
+// unknown size.
+func TestProxiedObjectUpload(t *testing.T) {
+	objects := &stubObjects{}
+	handler := LFS{Router: lfsRouter(), Objects: objects, RequestID: func() string { return "request-1" }}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut,
+		"/git/tenant-a/repo-a.git/info/lfs/objects/"+testOID,
+		strings.NewReader("incoming object"))
+	request.SetBasicAuth("token", testPAT)
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if objects.written != "incoming object" {
+		t.Fatalf("stored %q", objects.written)
+	}
+	if len(objects.writeAsked) != 1 || objects.writeAsked[0] != testOID {
+		t.Fatalf("tier was asked to write %v", objects.writeAsked)
+	}
+}
+
+// A transfer without credentials never reaches the tier.
+func TestProxiedTransferWithoutCredentialsIsRefused(t *testing.T) {
+	objects := &stubObjects{content: "secret"}
+	handler := LFS{Router: lfsRouter(), Objects: objects, RequestID: func() string { return "request-1" }}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet,
+		"/git/tenant-a/repo-a.git/info/lfs/objects/"+testOID, nil))
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", recorder.Code)
+	}
+	if len(objects.readAsked) != 0 {
+		t.Fatal("the tier was read without credentials")
+	}
+}
+
+// A refusal from the tier is one coarse 404: a caller learns nothing about
+// whether an object exists in a tenant it may not read.
+func TestProxiedDownloadRefusalIsCoarse(t *testing.T) {
+	objects := &stubObjects{readErr: ErrObjectMissing}
+	handler := LFS{Router: lfsRouter(), Objects: objects, RequestID: func() string { return "request-1" }}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet,
+		"/git/tenant-a/repo-a.git/info/lfs/objects/"+testOID, nil)
+	request.SetBasicAuth("token", testPAT)
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "missing") {
+		t.Fatalf("body leaked the tier's reason: %s", recorder.Body.String())
 	}
 }
