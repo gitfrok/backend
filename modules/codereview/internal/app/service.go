@@ -14,17 +14,31 @@ import (
 
 	"github.com/gitfrok/backend/modules/codereview/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	repoapi "github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/ids"
 )
 
+// MergeRefCommand is one authorized ref move. It carries the verified principal
+// because Repository/Git asks its own PDP: a caller allowed by this context's
+// enforcement point is not therefore trusted by storage's.
+type MergeRefCommand struct {
+	TenantID, RepositoryID  string
+	ActorID, RequestID      string
+	ActorRoles              []string
+	TargetRef, Revision     string
+	ExpectedCurrentRevision string
+}
+
 // RefMover is Repository/Git's contract boundary for moving a ref. Code Review
 // never writes a ref itself and never touches Git storage (SPEC-0019 AC7).
 type RefMover interface {
-	// MoveRef fast-forwards targetRef to revision on behalf of an authorized
-	// merge. The decision has already been made; this is the effect.
-	MoveRef(ctx context.Context, tenantID, repositoryID, targetRef, revision string) error
+	// MoveRef moves the target ref to the revision, but only while the ref is
+	// still at ExpectedCurrentRevision. The decision has already been made; this
+	// is the effect, and the expectation is what stops it landing on a state the
+	// decision was never made against.
+	MoveRef(ctx context.Context, command MergeRefCommand) error
 }
 
 // Review is one actor's current position. Superseding an actor's review replaces
@@ -44,6 +58,14 @@ type Store interface {
 	// the one already recorded under it.
 	CreateOrGet(ctx context.Context, key string, candidate api.MergeRequest) (api.MergeRequest, bool, error)
 	Get(ctx context.Context, id string) (api.MergeRequest, error)
+	// OpenForTarget returns the open merge requests in one tenant and repository
+	// whose target ref is targetRef.
+	OpenForTarget(ctx context.Context, tenantID, repositoryID, targetRef string) ([]api.MergeRequest, error)
+	// SaveRefRevision records where Repository/Git last announced a ref to be.
+	SaveRefRevision(ctx context.Context, tenantID, repositoryID, ref, revision string) error
+	// RefRevision returns the last announced revision for a ref, empty when this
+	// context has never been told about it.
+	RefRevision(ctx context.Context, tenantID, repositoryID, ref string) (string, error)
 	// Save persists a merge request whose Version has already been incremented.
 	Save(ctx context.Context, mr api.MergeRequest) error
 	// PutReview replaces the submitting actor's current review.
@@ -78,11 +100,40 @@ func New(store Store, refs RefMover, pdp policyapi.DecisionPoint, events bus.Bus
 	return s
 }
 
+// SubscribeRefUpdates keeps each open merge request's view of its target ref
+// current. Repository/Git announces every ref change; Code Review listens rather
+// than reading Git state, so a merge always names a revision this context
+// actually observed (invariant 14).
+func (s *Service) SubscribeRefUpdates(events bus.Bus) {
+	bus.SubscribeTyped(events, s.onRefUpdated)
+}
+
+func (s *Service) onRefUpdated(ctx context.Context, event repoapi.RefUpdated) error {
+	if err := s.store.SaveRefRevision(ctx, event.TenantID, event.RepoID, event.Ref, event.NewSha); err != nil {
+		return err
+	}
+	affected, err := s.store.OpenForTarget(ctx, event.TenantID, event.RepoID, event.Ref)
+	if err != nil {
+		return err
+	}
+	for _, mr := range affected {
+		// Only the projected view of the target moves. The version guards the
+		// caller's own edits, and a ref moving under a merge request is not one of
+		// them — bumping it here would invalidate a review the author is mid-way
+		// through submitting.
+		mr.TargetRevision = event.NewSha
+		if err := s.store.Save(ctx, mr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Open records a merge request from one source ref to one target ref. Replaying
 // a request ID returns the request that ID already created.
 func (s *Service) Open(ctx context.Context, req api.OpenRequest) (api.MergeRequest, error) {
 	if !validContext(req.Context) || !validBranchRef(req.SourceRef) || !validBranchRef(req.TargetRef) ||
-		req.SourceRef == req.TargetRef || req.HeadRevision == "" {
+		req.SourceRef == req.TargetRef {
 		return api.MergeRequest{}, api.ErrDenied
 	}
 	if !s.allowed(ctx, req.Context, "merge_request.open", "repository", req.RepositoryID, map[string]string{
@@ -92,13 +143,26 @@ func (s *Service) Open(ctx context.Context, req api.OpenRequest) (api.MergeReque
 		return api.MergeRequest{}, api.ErrDenied
 	}
 
+	// Both revisions are Repository/Git's facts, taken from what it has announced.
+	// The caller says which refs to review, never which revisions: a caller-chosen
+	// head would let one open a request against a revision nobody pushed.
+	headRevision, err := s.store.RefRevision(ctx, req.TenantID, req.RepositoryID, req.SourceRef)
+	if err != nil || headRevision == "" {
+		return api.MergeRequest{}, api.ErrDenied
+	}
+	targetRevision, err := s.store.RefRevision(ctx, req.TenantID, req.RepositoryID, req.TargetRef)
+	if err != nil {
+		return api.MergeRequest{}, api.ErrDenied
+	}
+
 	now := s.now().UTC()
 	candidate := api.MergeRequest{
 		ID: s.newID(), TenantID: req.TenantID, RepositoryID: req.RepositoryID,
 		SourceRef: req.SourceRef, TargetRef: req.TargetRef,
 		Title: req.Title, Description: req.Description,
-		CreatorID: req.ActorID, State: api.StateOpen, HeadRevision: req.HeadRevision,
-		CreatedAt: now, UpdatedAt: now, Version: 1,
+		CreatorID: req.ActorID, State: api.StateOpen, HeadRevision: headRevision,
+		TargetRevision: targetRevision,
+		CreatedAt:      now, UpdatedAt: now, Version: 1,
 	}
 	mr, created, err := s.store.CreateOrGet(ctx, "request:"+req.RequestID, candidate)
 	if err != nil {
@@ -231,7 +295,16 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 		return mr, nil
 	}
 
-	if err := s.refs.MoveRef(ctx, mr.TenantID, mr.RepositoryID, mr.TargetRef, mr.HeadRevision); err != nil {
+	// The move names the target revision this context last saw. If the ref has
+	// moved since — someone else merged, or a push landed — storage refuses, and
+	// the merge fails rather than landing on state nobody decided about.
+	if err := s.refs.MoveRef(ctx, MergeRefCommand{
+		TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
+		ActorID: req.ActorID, RequestID: req.RequestID,
+		ActorRoles: append([]string(nil), req.ActorRoles...),
+		TargetRef:  mr.TargetRef, Revision: mr.HeadRevision,
+		ExpectedCurrentRevision: mr.TargetRevision,
+	}); err != nil {
 		return api.MergeRequest{}, api.ErrDenied
 	}
 
@@ -376,6 +449,11 @@ type memoryStore struct {
 	seen        map[string]bool
 	reviews     map[string][]Review
 	protections map[string]api.BranchProtection
+	// refs is this context's own view of where Repository/Git last announced each
+	// ref to be. The in-memory adapter starts empty, so a merge request opened
+	// before any ref announcement has no observed target revision; a persistent
+	// store keeps it across restarts.
+	refs map[string]string
 }
 
 // NewMemoryStore returns the dev/in-memory store. Production injects a
@@ -384,7 +462,7 @@ func NewMemoryStore() Store {
 	return &memoryStore{
 		requests: map[string]api.MergeRequest{}, idempotency: map[string]string{},
 		seen: map[string]bool{}, reviews: map[string][]Review{},
-		protections: map[string]api.BranchProtection{},
+		protections: map[string]api.BranchProtection{}, refs: map[string]string{},
 	}
 }
 
@@ -406,6 +484,31 @@ func (m *memoryStore) Get(_ context.Context, id string) (api.MergeRequest, error
 		return api.MergeRequest{}, errors.New("not found")
 	}
 	return mr, nil
+}
+
+func (m *memoryStore) SaveRefRevision(_ context.Context, tenantID, repositoryID, ref, revision string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refs[protectionKey(tenantID, repositoryID, ref)] = revision
+	return nil
+}
+
+func (m *memoryStore) RefRevision(_ context.Context, tenantID, repositoryID, ref string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.refs[protectionKey(tenantID, repositoryID, ref)], nil
+}
+
+func (m *memoryStore) OpenForTarget(_ context.Context, tenantID, repositoryID, targetRef string) ([]api.MergeRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []api.MergeRequest
+	for _, mr := range m.requests {
+		if mr.State == api.StateOpen && mr.TenantID == tenantID && mr.RepositoryID == repositoryID && mr.TargetRef == targetRef {
+			out = append(out, mr)
+		}
+	}
+	return out, nil
 }
 
 func (m *memoryStore) Save(_ context.Context, mr api.MergeRequest) error {

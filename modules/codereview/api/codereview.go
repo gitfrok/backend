@@ -58,7 +58,13 @@ type MergeRequest struct {
 	CreatorID                  string
 	State                      State
 	HeadRevision               string
-	CreatedAt, UpdatedAt       time.Time
+	// TargetRevision is where the target ref stood when this context last saw it.
+	// A merge names it so the ref move lands only on the state the merge was
+	// decided against. It comes from Repository/Git's own ref announcements — a
+	// caller cannot assert it, which is what stops one naming a state of its
+	// choosing.
+	TargetRevision       string
+	CreatedAt, UpdatedAt time.Time
 	// Version is server-assigned and positive. Every mutation is guarded by it.
 	Version int64
 }
@@ -76,8 +82,6 @@ type OpenRequest struct {
 	Context
 	SourceRef, TargetRef string
 	Title, Description   string
-	// HeadRevision is the source revision under review when the request opens.
-	HeadRevision string
 }
 
 // ReviewRequest records one actor's current disposition. A later submission by

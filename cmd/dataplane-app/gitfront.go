@@ -93,6 +93,10 @@ type gitFrontDoors struct {
 	policyListener net.Listener
 	policyServer   *grpc.Server
 	conn           *grpc.ClientConn
+	// storageClient is the Git storage contract this plane already dials for the
+	// front doors. Code Review completes a merge over the same connection, so the
+	// plane keeps exactly one route to storage.
+	storageClient gitv1.GitStorageClient
 }
 
 func (d *gitFrontDoors) HTTPAddr() string {
@@ -149,7 +153,8 @@ func startGitFrontDoors(ctx context.Context, cfg frontDoorConfig, authenticator 
 			return nil, fmt.Errorf("git storage connection: %w", err)
 		}
 		doors.conn = conn
-		storage = gitfrontdoor.GRPCStorage{Client: gitv1.NewGitStorageClient(conn)}
+		doors.storageClient = gitv1.NewGitStorageClient(conn)
+		storage = gitfrontdoor.GRPCStorage{Client: doors.storageClient}
 	}
 	router := gitfrontdoor.Router{Authenticator: authenticator}
 
