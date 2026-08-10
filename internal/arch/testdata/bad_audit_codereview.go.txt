@@ -1,0 +1,7 @@
+package postgres
+
+// A forbidden edge: the audit store's write surface must never reach the Code
+// Review contract types that carry ATTESTED_IMPORT records (SPEC-0011 AC6/AC11).
+import (
+	"github.com/gitfrok/backend/gen/proto/codereview/v1"
+)

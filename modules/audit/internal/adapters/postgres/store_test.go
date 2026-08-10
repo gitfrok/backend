@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -98,6 +99,8 @@ func appendN(t *testing.T, s *auditpg.Store, ctx context.Context, n int) []api.R
 			Outcome:    api.OutcomeDenied,
 			Detail:     map[string]string{"sqlstate": "42501"},
 			OccurredAt: time.Unix(int64(1780000000+i), 0).UTC(),
+			// Every emitter states provenance explicitly (ADR-0029 §1, AC24).
+			Provenance: api.ProvenanceFirstParty,
 		})
 		if err != nil {
 			t.Fatalf("append %d: %v", i, err)
@@ -344,6 +347,35 @@ func TestTrailIsTenantScoped(t *testing.T) {
 	}
 	if res.Checked != 0 {
 		t.Errorf("another tenant saw %d audit records; the trail is not tenant-scoped", res.Checked)
+	}
+}
+
+// ADR-0029 §1 / SPEC-0011 AC6 + AC11: the audit writer rejects any record whose
+// provenance is not FIRST_PARTY — an error, not a silent drop. An ATTESTED_IMPORT
+// record in the trail would be a forged platform assertion. This is the
+// load-bearing boundary test for the import feature.
+func TestAppendRejectsAttestedImport(t *testing.T) {
+	s, ctx := store(t)
+	_, err := s.Append(ctx, api.Entry{
+		TenantID:   string(tenantFor(t)),
+		Action:     api.Action("codereview.merge.approved"),
+		ActorID:    "alice",
+		Resource:   "repo/01H/mr/01I",
+		Outcome:    api.OutcomeAllowed,
+		OccurredAt: time.Now().UTC(),
+		// An import must never forge a platform approval (ADR-0029 §4).
+		Provenance: api.ProvenanceAttestedImport,
+	})
+	if !errors.Is(err, auditpg.ErrNotFirstParty) {
+		t.Fatalf("Append(ATTESTED_IMPORT) = %v, want ErrNotFirstParty", err)
+	}
+	// And the refusal left the chain untouched.
+	res, verifyErr := s.Verify(ctx)
+	if verifyErr != nil {
+		t.Fatalf("verify: %v", verifyErr)
+	}
+	if res.Checked != 0 {
+		t.Errorf("a refused append still wrote %d records", res.Checked)
 	}
 }
 
