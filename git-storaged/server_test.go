@@ -31,7 +31,7 @@ import (
 const (
 	// testNodeID is the storage node identity test pushes lease writes under. The in-process
 	// coordinator auto-seeds a shard as primary==sync==testNodeID, so a push acknowledges its own quorum.
-	testNodeID       = "git-storaged-test"
+	testNodeID        = "git-storaged-test"
 	testQuorumTimeout = 200 * time.Millisecond
 )
 
