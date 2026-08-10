@@ -92,8 +92,18 @@ func TestBudgetBreachIsReported(t *testing.T) {
 	if len(rep.Breaches) == 0 {
 		t.Fatal("want a fan-out breach reported under an impossible budget")
 	}
-	if !strings.Contains(rep.Breaches[0], "codesearch") {
-		t.Errorf("want the breaching module named, got %q", rep.Breaches[0])
+	// Every module with a dependency breaches under a zero budget, so assert on the set rather
+	// than on the first line: the order of Breaches follows the module order in the graph, and a
+	// newly added module must not make this test fail for the wrong reason.
+	named := false
+	for _, breach := range rep.Breaches {
+		if strings.Contains(breach, "codesearch") {
+			named = true
+			break
+		}
+	}
+	if !named {
+		t.Errorf("want the breaching module named, got %q", rep.Breaches)
 	}
 }
 
