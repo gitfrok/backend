@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -154,11 +155,31 @@ func main() {
 		dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
 	}
 
+	// OIDC login, when this environment has an identity provider. Built before the
+	// doors open so a misconfigured one fails the rollout rather than the first login.
+	oidcConfig, oidcEnabled, err := loadOIDCConfig(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dataplane OIDC login: %v\n", err)
+		os.Exit(1)
+	}
+	if oidcEnabled {
+		if err := oidcConfig.Validate(); err != nil {
+			fmt.Fprintf(os.Stderr, "dataplane OIDC login: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// The CI and Code Review surfaces share the plane's gRPC door.
 	if doors.policyServer != nil {
 		civ1.RegisterCIJobServiceServer(doors.policyServer, ci.NewGRPCServer(dp.ci.Jobs()))
 		if dp.codeReview != nil {
 			codereviewv1.RegisterMergeRequestServiceServer(doors.policyServer, codereview.NewGRPCServer(dp.codeReview))
+		}
+		if oidcEnabled {
+			if err := identity.RegisterOIDCLogin(doors.policyServer, oidcConfig, http.DefaultClient); err != nil {
+				fmt.Fprintf(os.Stderr, "dataplane OIDC login: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	}
 
