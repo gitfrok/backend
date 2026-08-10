@@ -184,6 +184,46 @@ type ImportedHistoryPage struct {
 	NextPageToken string
 }
 
+// DeclaredActorMapping is one tenant admin's assertion that a foreign handle is
+// a platform identity (SPEC-0011 AC10/AC22-AC24).
+//
+// It lives beside the imported records, never inside them: an imported record is
+// immutable (AC13), so a mapping is a later first-party claim *about* one. It
+// changes the label a reader sees and never the class of the record — a mapped
+// handle's approval is still an imported approval and still satisfies no merge
+// policy.
+type DeclaredActorMapping struct {
+	MappingID string
+	TenantID  string
+	ImportID  string
+	// DeclaredActor and SourceInstance together identify the handle. Neither
+	// alone does: the same handle on two source instances is two people.
+	DeclaredActor  string
+	SourceInstance string
+	// ActorID is the platform identity the admin asserts the handle belongs to.
+	ActorID string
+	// AssertedBy is the tenant admin who made the claim, kept here as well as in
+	// the audit event so a reader of the mapping never has to join to the trail
+	// to see who is accountable for it.
+	AssertedBy string
+	AssertedAt time.Time
+}
+
+// MapDeclaredActorRequest asserts one mapping. Every identifier the platform
+// cares about comes from the verified context; the request contributes only the
+// handle, its instance, and the identity being asserted.
+type MapDeclaredActorRequest struct {
+	Context
+	ImportID       string
+	DeclaredActor  string
+	SourceInstance string
+	// MappedActorID is the platform identity being asserted. It is deliberately
+	// not named ActorID: the embedded Context already carries an ActorID — the
+	// admin making the assertion — and two fields of that name in one request is
+	// how the asserter and the asserted-about end up swapped.
+	MappedActorID string
+}
+
 // ImportService is the import surface. Code Review owns imported history as
 // ATTESTED_IMPORT domain data (ADR-0029 §2); Audit owns only the
 // HistoryImported/HistoryImportRevoked events.
@@ -198,6 +238,13 @@ type ImportService interface {
 	// event recorded (SPEC-0011 AC16). It is a read: a mismatch is a finding, not
 	// something to repair, and the original chain entry is never touched.
 	VerifyImport(context.Context, Context, string) (bool, error)
+	// MapDeclaredActor records a named tenant admin's assertion that a foreign
+	// handle belongs to a platform identity (SPEC-0011 AC10/AC22). It is an
+	// assertion, never an inference: no comparison of emails or names produces a
+	// mapping, and the asserting admin is recorded with it.
+	MapDeclaredActor(context.Context, MapDeclaredActorRequest) (DeclaredActorMapping, error)
+	// ListDeclaredActorMappings returns the mappings asserted for one import.
+	ListDeclaredActorMappings(context.Context, Context, string) ([]DeclaredActorMapping, error)
 }
 
 // Provenance is the immutable ADR-0029 block attached to every imported
@@ -316,7 +363,22 @@ type ImportedRecordStore interface {
 	ListImport(ctx context.Context, importID string) ([]ImportedMergeRequest, error)
 	// Tombstone marks every record of an import excluded from reads.
 	Tombstone(ctx context.Context, importID string) error
+	// PutMapping records one declared-actor mapping, idempotently per
+	// (import_id, declared_actor, source_instance). Re-asserting the same
+	// identity returns the existing mapping; asserting a *different* identity for
+	// a handle already mapped is refused — a silent overwrite would let one admin
+	// replace another's claim with no trace of the first.
+	PutMapping(ctx context.Context, mapping DeclaredActorMapping) (DeclaredActorMapping, error)
+	// ListMappings returns the mappings asserted for one import, or nil if the
+	// import is revoked: a mapping describes records that are gone from reads
+	// (SPEC-0011 AC24).
+	ListMappings(ctx context.Context, importID string) ([]DeclaredActorMapping, error)
 }
+
+// ErrMappingConflict is returned when a handle is already mapped to a different
+// platform identity. It is not a retryable error: resolving it is a human act,
+// and the existing claim stays until someone accountable changes it.
+var ErrMappingConflict = errors.New("codereview: this handle is already mapped to another identity")
 
 // MergeRequests is the context's full in-process surface.
 type MergeRequests interface {

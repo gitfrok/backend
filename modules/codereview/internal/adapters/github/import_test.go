@@ -298,3 +298,14 @@ func TestImportHistoryPacesFetchesAndReportsBytes(t *testing.T) {
 		t.Fatalf("source bytes read = %d, want the bytes actually read", result.SourceBytesRead)
 	}
 }
+
+// The mapping half of the store is not what these adapter tests are about: an
+// importer never asserts an identity (SPEC-0011 AC22 — mapping is an admin's act,
+// never an importer's inference), so these refuse rather than pretend.
+func (m *memoryRecords) PutMapping(context.Context, api.DeclaredActorMapping) (api.DeclaredActorMapping, error) {
+	return api.DeclaredActorMapping{}, http.ErrBodyNotAllowed
+}
+
+func (m *memoryRecords) ListMappings(context.Context, string) ([]api.DeclaredActorMapping, error) {
+	return nil, nil
+}

@@ -698,14 +698,18 @@ func (m *memoryImportStore) TombstoneImport(_ context.Context, id string) (api.I
 type memoryRecordStore struct {
 	mu      sync.Mutex
 	records map[string][]api.ImportedMergeRequest
-	dead    map[string]bool
+	// mappings are keyed by import, then by (declared_actor, source_instance):
+	// the handle is only meaningful within its instance.
+	mappings map[string]map[string]api.DeclaredActorMapping
+	dead     map[string]bool
 }
 
 // NewMemoryRecordStore returns the dev/in-memory imported-record store.
 func NewMemoryRecordStore() api.ImportedRecordStore {
 	return &memoryRecordStore{
-		records: map[string][]api.ImportedMergeRequest{},
-		dead:    map[string]bool{},
+		records:  map[string][]api.ImportedMergeRequest{},
+		mappings: map[string]map[string]api.DeclaredActorMapping{},
+		dead:     map[string]bool{},
 	}
 }
 
@@ -733,5 +737,54 @@ func (m *memoryRecordStore) Tombstone(_ context.Context, importID string) error 
 	defer m.mu.Unlock()
 	m.dead[importID] = true
 	delete(m.records, importID)
+	// The mappings go with the records they describe (SPEC-0011 AC24). They are
+	// dropped from reads, not from the audit trail: the DeclaredActorMapped events
+	// that recorded who asserted them stay in the chain (invariant 5).
+	delete(m.mappings, importID)
 	return nil
+}
+
+// mappingKey identifies a handle within its source instance. The instance is part
+// of the key, not decoration: the same handle on two source instances is two
+// people, and a key that ignored it would let one mapping claim both.
+func mappingKey(declaredActor, sourceInstance string) string {
+	return fmt.Sprintf("%d:%s%d:%s", len(sourceInstance), sourceInstance, len(declaredActor), declaredActor)
+}
+
+func (m *memoryRecordStore) PutMapping(_ context.Context, mapping api.DeclaredActorMapping) (api.DeclaredActorMapping, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dead[mapping.ImportID] {
+		return api.DeclaredActorMapping{}, fmt.Errorf("codereview: cannot write to a revoked import %s", mapping.ImportID)
+	}
+	key := mappingKey(mapping.DeclaredActor, mapping.SourceInstance)
+	if existing, ok := m.mappings[mapping.ImportID][key]; ok {
+		// Re-asserting the same identity is idempotent, so a retried command does
+		// not produce a second claim. Asserting a *different* identity is refused:
+		// silently replacing one admin's claim with another's would erase who
+		// believed what, which is the whole reason this record names an asserter.
+		if existing.ActorID != mapping.ActorID {
+			return api.DeclaredActorMapping{}, api.ErrMappingConflict
+		}
+		return existing, nil
+	}
+	if m.mappings[mapping.ImportID] == nil {
+		m.mappings[mapping.ImportID] = map[string]api.DeclaredActorMapping{}
+	}
+	m.mappings[mapping.ImportID][key] = mapping
+	return mapping, nil
+}
+
+func (m *memoryRecordStore) ListMappings(_ context.Context, importID string) ([]api.DeclaredActorMapping, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dead[importID] {
+		return nil, nil
+	}
+	out := make([]api.DeclaredActorMapping, 0, len(m.mappings[importID]))
+	for _, mapping := range m.mappings[importID] {
+		out = append(out, mapping)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].MappingID < out[j].MappingID })
+	return out, nil
 }

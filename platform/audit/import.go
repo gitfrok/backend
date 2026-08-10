@@ -39,6 +39,40 @@ func (HistoryImported) Action() string { return ActionHistoryImported }
 // Tenant reports the scope the import happened under.
 func (e HistoryImported) Tenant() string { return e.TenantID }
 
+// ActionDeclaredActorMapped is the `action` value for one tenant admin's
+// assertion that a foreign handle from an import belongs to a platform identity
+// (SPEC-0011 AC10/AC22). The assertion is first-party — an authenticated admin,
+// authorized by our PDP, timestamped by our clock — even though the record it
+// refers to is not.
+const ActionDeclaredActorMapped = "repository.import.actor_mapped"
+
+// DeclaredActorMapped records who asserted that a foreign handle is a platform
+// identity.
+//
+// The asserting admin is the whole point of the event. A mapping is how imported
+// history could be made to read as history this platform witnessed, so the claim
+// must stay attributable long after the person who made it has moved on.
+type DeclaredActorMapped struct {
+	TenantID string
+	// ActorID is the tenant admin who asserted the mapping, not the actor the
+	// handle was mapped to.
+	ActorID        string
+	ImportID       string
+	DeclaredActor  string
+	SourceInstance string
+	MappedActorID  string
+	OccurredAt     time.Time
+}
+
+// EventName is the routing key — the audit event message's full name.
+func (DeclaredActorMapped) EventName() string { return EventAudit }
+
+// Action is the dotted action this event records.
+func (DeclaredActorMapped) Action() string { return ActionDeclaredActorMapped }
+
+// Tenant reports the scope the assertion was made in.
+func (e DeclaredActorMapped) Tenant() string { return e.TenantID }
+
 // HistoryImportRevoked records the revocation of a prior import. It carries the
 // import_id, never the imported content.
 type HistoryImportRevoked struct {
