@@ -110,7 +110,7 @@ func (stubPDP) Decide(context.Context, policyapi.Request) (policyapi.Decision, e
 
 func newTestImportService(store ImportStore, git GitImporter, history HistoryImporter) (*ImportService, *bus.InProcess, *[]audit.HistoryImported, *[]audit.HistoryImportRevoked) {
 	b := bus.NewInProcess()
-	svc := NewImportService(store, git, history, stubPDP{}, b)
+	svc := NewImportService(store, NewMemoryRecordStore(), git, history, stubPDP{}, b)
 	svc.newID = func() string { return "import-1" }
 	svc.now = func() time.Time { return time.Unix(1780000000, 0).UTC() }
 
@@ -211,6 +211,26 @@ func TestFailedGitPhaseIsNotVisible(t *testing.T) {
 	}
 	if len(*imported) != 0 {
 		t.Fatalf("a failed import emitted %d HistoryImported events", len(*imported))
+	}
+}
+
+// A history phase stalled by source-side rate limiting marks the import
+// STALLED — resumable, not failed — and returns the stall error (AC8).
+func TestHistoryRateLimitStallsNotFails(t *testing.T) {
+	store := newStubImportStore()
+	git := &stubGitImporter{moved: []RefUpdate{{Ref: "refs/heads/main", Revision: "abc"}}}
+	history := &stubHistoryImporter{err: ErrImportStalled}
+	svc, _, imported, _ := newTestImportService(store, git, history)
+
+	if _, err := svc.Create(context.Background(), importRequest()); err != ErrImportStalled {
+		t.Fatalf("Create = %v, want ErrImportStalled", err)
+	}
+	stored, _ := store.GetImport(context.Background(), "import-1")
+	if stored.State != api.ImportStalled {
+		t.Fatalf("state = %s, want STALLED", stored.State)
+	}
+	if len(*imported) != 0 {
+		t.Fatalf("a stalled import emitted %d HistoryImported events", len(*imported))
 	}
 }
 

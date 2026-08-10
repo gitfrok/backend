@@ -157,9 +157,9 @@ func main() {
 	if doors.storageClient != nil {
 		dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
 		// The import surface (SPEC-0011) rides the same route to Git storage.
-		// The history phase is not wired in this build; the git phase is.
+		// The history phase imports from GitHub; the git phase fetches refs.
 		dp.imports = codereview.NewImportService(
-			codereview.NewGitImporter(doors.storageClient), nil, dp.policy, dp.bus,
+			codereview.NewGitImporter(doors.storageClient), codereview.NewGithubHistoryImporter(nil), dp.policy, dp.bus,
 		)
 	}
 
