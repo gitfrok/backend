@@ -33,6 +33,14 @@ type GitImporter = app.GitImporter
 // so cmd/ can supply one.
 type HistoryImporter = app.HistoryImporter
 
+// ImportRefsCommand, RefUpdate and ImportHistoryCommand are the import ports'
+// argument types, aliased for the same reason.
+type (
+	ImportRefsCommand    = app.ImportRefsCommand
+	RefUpdate            = app.RefUpdate
+	ImportHistoryCommand = app.ImportHistoryCommand
+)
+
 // New builds the Code Review context on the dev/in-memory store and subscribes it
 // to ref updates, so each open merge request's view of its target ref stays
 // current without this context reading Git state.
@@ -60,34 +68,42 @@ func NewGitImporter(client gitv1.GitStorageClient) GitImporter {
 	return gitwire.NewGitImporter(client)
 }
 
+// NewImportRecordStore returns the imported-record store. One store is shared
+// by the history importers that write records and the import service that
+// revokes them: a revoke that tombstoned a different store would leave the
+// imported history readable (SPEC-0011 AC17).
+func NewImportRecordStore() api.ImportedRecordStore {
+	return app.NewMemoryRecordStore()
+}
+
 // NewGithubHistoryImporter builds the history-phase port on the GitHub API,
-// storing imported records in the in-memory record store. httpClient may be
-// nil for the default client.
-func NewGithubHistoryImporter(httpClient *http.Client) HistoryImporter {
-	return github.New(app.NewMemoryRecordStore(), httpClient)
+// storing imported records in the given store. httpClient may be nil for the
+// default client.
+func NewGithubHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client) HistoryImporter {
+	return github.New(records, httpClient)
 }
 
 // NewGitlabHistoryImporter builds the history-phase port on the GitLab API,
-// storing imported records in the in-memory record store.
-func NewGitlabHistoryImporter(httpClient *http.Client) HistoryImporter {
-	return gitlab.New(app.NewMemoryRecordStore(), httpClient)
+// storing imported records in the given store.
+func NewGitlabHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client) HistoryImporter {
+	return gitlab.New(records, httpClient)
 }
 
 // NewSourceHistoryImporter returns a HistoryImporter that selects the source
 // adapter by the import's source_system ("github" or "gitlab"). Unknown
 // systems are refused rather than silently imported by the wrong adapter.
-func NewSourceHistoryImporter(httpClient *http.Client) HistoryImporter {
+func NewSourceHistoryImporter(records api.ImportedRecordStore, httpClient *http.Client) HistoryImporter {
 	return app.NewSourceHistoryImporter(map[string]app.HistoryImporter{
-		"github": github.New(app.NewMemoryRecordStore(), httpClient),
-		"gitlab": gitlab.New(app.NewMemoryRecordStore(), httpClient),
+		"github": github.New(records, httpClient),
+		"gitlab": gitlab.New(records, httpClient),
 	})
 }
 
-// NewImportService builds the import service on the dev in-memory stores.
-// history may be nil when the history phase is not wired; the git phase is
-// required.
-func NewImportService(git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus) api.ImportService {
-	return app.NewImportService(app.NewMemoryImportStore(), app.NewMemoryRecordStore(), git, history, pdp, events)
+// NewImportService builds the import service on the dev in-memory import store.
+// records must be the same store the history importer writes to. history may be
+// nil when the history phase is not wired; the git phase is required.
+func NewImportService(records api.ImportedRecordStore, git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus) api.ImportService {
+	return app.NewImportService(app.NewMemoryImportStore(), records, git, history, pdp, events)
 }
 
 // NewImportGRPCServer wraps the in-process import surface in its gRPC adapter.
