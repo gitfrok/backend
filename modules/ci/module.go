@@ -21,19 +21,6 @@ import (
 	"github.com/gitfrok/backend/platform/bus"
 )
 
-// New builds the CI context from its ports. The app wires the service; the
-// dispatcher is wired separately so it can run its own loop.
-func New(
-	store app.Store,
-	queue app.Queue,
-	source app.Source,
-	pdp policyapi.DecisionPoint,
-	events bus.Bus,
-	opts ...app.Option,
-) *app.Service {
-	return app.New(store, queue, source, pdp, events, opts...)
-}
-
 // RunnerConfig is the environment-resolved runner configuration, restated here so
 // cmd/ can supply it without naming a package under this module's internal/ tree.
 // It is resolved once per environment and never derived from a job or from a
@@ -47,58 +34,75 @@ type RunnerConfig struct {
 	Namespace        string
 }
 
-// NewDispatcher builds the dispatch loop: it publishes queue depth to the gauge
-// KEDA scales on, claims one queued job per tick, and launches exactly one
-// sandbox for it.
-func NewDispatcher(
-	queue dispatcher.Queue,
-	store dispatcher.Store,
-	launcher dispatcher.Launcher,
-	pdp policyapi.DecisionPoint,
-	events bus.Bus,
-	config RunnerConfig,
-	gauge *kedametrics.Gauge,
-) *dispatcher.Dispatcher {
-	return dispatcher.New(queue, store, launcher, pdp, events,
-		dispatcher.WithConfig(dispatcher.Config{
-			RuntimeClass:     config.RuntimeClass,
-			Image:            config.Image,
-			SourceEndpoint:   config.SourceEndpoint,
-			SourceCapability: config.SourceCapability,
-			Command:          append([]string(nil), config.Command...),
-		}),
-		dispatcher.WithGauge(gauge),
-	)
+// Launcher is the cluster port that turns one job attempt into one ephemeral
+// sandbox. It is aliased here so cmd/ can hold and pass one without naming a
+// package under this module's internal/ tree.
+type Launcher = dispatcher.Launcher
+
+// Runtime is the composed CI context: the job service the gRPC door serves, and
+// the dispatch loop that drains the queue into sandboxes. Both share one queue
+// and one store, which is why they are built together rather than separately.
+type Runtime struct {
+	jobs       api.Jobs
+	dispatcher *dispatcher.Dispatcher
+	gauge      *kedametrics.Gauge
 }
 
-// NewGauge returns the queued-depth gauge the dispatcher publishes to.
-func NewGauge() *kedametrics.Gauge { return kedametrics.NewGauge() }
+// NewRuntime builds the CI context on its dev adapters. A nil launcher means this
+// environment dispatches nothing: the job API still accepts and records jobs, and
+// no sandbox is ever created.
+func NewRuntime(pdp policyapi.DecisionPoint, events bus.Bus, config RunnerConfig, launcher Launcher) *Runtime {
+	queue := memory.NewQueue()
+	store := app.NewMemoryStore()
+	gauge := kedametrics.NewGauge()
+	runtime := &Runtime{
+		jobs:  app.New(store, queue, stubSource{}, pdp, events),
+		gauge: gauge,
+	}
+	if launcher != nil {
+		runtime.dispatcher = dispatcher.New(queue, store, launcher, pdp, events,
+			dispatcher.WithConfig(dispatcher.Config{
+				RuntimeClass:     config.RuntimeClass,
+				Image:            config.Image,
+				SourceEndpoint:   config.SourceEndpoint,
+				SourceCapability: config.SourceCapability,
+				Command:          append([]string(nil), config.Command...),
+			}),
+			dispatcher.WithGauge(gauge),
+		)
+	}
+	return runtime
+}
+
+// Jobs is the in-process job surface, for the gRPC door and for other contexts.
+func (r *Runtime) Jobs() api.Jobs { return r.jobs }
+
+// Dispatches reports whether this environment has a launcher and therefore drains
+// its queue into sandboxes.
+func (r *Runtime) Dispatches() bool { return r.dispatcher != nil }
+
+// RunDispatcher blocks, draining the queue until ctx is cancelled. It returns
+// immediately when no launcher is configured.
+func (r *Runtime) RunDispatcher(ctx context.Context) error {
+	if r.dispatcher == nil {
+		return nil
+	}
+	return r.dispatcher.Run(ctx)
+}
 
 // MetricsHandler serves the queued-depth gauge in Prometheus exposition format.
 // KEDA's Prometheus scaler reads `ci_queued_jobs` from it to scale the runner
 // deployment on queue depth (T-0017 AC2).
-func MetricsHandler(gauge *kedametrics.Gauge) http.Handler { return kedametrics.Handler(gauge) }
+func (r *Runtime) MetricsHandler() http.Handler { return kedametrics.Handler(r.gauge) }
 
 // NewDevLauncher returns the dev sandbox launcher: it records dispatch attempts
 // without contacting a cluster. It is not a production isolation boundary.
-func NewDevLauncher() *dev.Launcher { return &dev.Launcher{} }
+func NewDevLauncher() Launcher { return &dev.Launcher{} }
 
 // NewGRPCServer wraps the in-process job service in the CI/CD gRPC server adapter,
 // ready to register on the plane binary's gRPC server.
 func NewGRPCServer(jobs api.Jobs) *grpc.Server {
 	return grpc.NewServer(jobs)
-}
-
-// NewQueue returns a dev/in-memory job queue. Production injects a KEDA-backed
-// queue that exposes queued-depth as a Prometheus metric.
-func NewQueue() *memory.Queue {
-	return memory.NewQueue()
-}
-
-// NewStore returns a dev/in-memory job store. Production injects a tenant-scoped
-// database store preserving the create-or-get atomicity invariant.
-func NewStore() app.Store {
-	return app.NewMemoryStore()
 }
 
 // stubSource is a dev adapter that returns a fixed digest without contacting a
@@ -107,9 +111,4 @@ type stubSource struct{}
 
 func (stubSource) Validate(_ context.Context, _, _, _, _ string) (string, error) {
 	return "dev:ci-yaml-digest", nil
-}
-
-// NewSourceStub returns a no-op Source for local development.
-func NewSourceStub() app.Source {
-	return stubSource{}
 }

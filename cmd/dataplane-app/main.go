@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/gitfrok/backend/cmd/internal/health"
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
+	civ1 "github.com/gitfrok/backend/gen/proto/ci/v1"
+	"github.com/gitfrok/backend/modules/ci"
 	"github.com/gitfrok/backend/modules/codesearch"
 	csapi "github.com/gitfrok/backend/modules/codesearch/api"
 	"github.com/gitfrok/backend/modules/identity"
@@ -42,6 +45,7 @@ type dataplane struct {
 	repositories repoapi.Repositories
 	searchIndex  csapi.Index
 	policy       policyapi.DecisionPoint
+	ci           *ci.Runtime
 }
 
 // newDataplane wires the plane. Concrete implementations are chosen in main and injected here; the
@@ -51,7 +55,8 @@ type dataplane struct {
 // configuration and can fail — and because it makes the dependency impossible to forget. There is
 // no "without a PDP" plane: a nil one would mean authorization silently had no answer, so it is
 // refused here rather than discovered on the first protected request.
-func newDataplane(pdp policyapi.DecisionPoint) *dataplane {
+// A nil ciLauncher means this environment records CI jobs but dispatches none.
+func newDataplane(pdp policyapi.DecisionPoint, ciConfig ci.RunnerConfig, ciLauncher ci.Launcher) *dataplane {
 	if pdp == nil {
 		panic("dataplane: no PDP — every protected action needs a decision (invariant 2)")
 	}
@@ -66,7 +71,11 @@ func newDataplane(pdp policyapi.DecisionPoint) *dataplane {
 	// against — the only two in-process routes a module may take (invariant 14).
 	searchIndex := codesearch.New(b, repositories)
 
-	return &dataplane{bus: b, repositories: repositories, searchIndex: searchIndex, policy: pdp}
+	// CI/CD context. It shares this plane's bus, so a RefUpdated published by
+	// Repository reaches CI without either module calling the other (invariant 14).
+	ciRuntime := ci.NewRuntime(pdp, b, ciConfig, ciLauncher)
+
+	return &dataplane{bus: b, repositories: repositories, searchIndex: searchIndex, policy: pdp, ci: ciRuntime}
 }
 
 func main() {
@@ -90,7 +99,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	dp := newDataplane(pdp)
+	// The CI runner configuration is per-environment. An unconfigured runner is not
+	// an error — the plane records jobs and dispatches none — but a misconfigured
+	// one fails the rollout rather than the first job.
+	ciConfig, ciDispatches, err := loadCIRunnerConfig(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dataplane CI runner: %v\n", err)
+		os.Exit(1)
+	}
+	var ciLauncher ci.Launcher
+	if ciDispatches {
+		// The dev launcher records attempts without contacting a cluster. The
+		// client-go implementation of the Kubernetes launcher's Client port is the
+		// remaining piece before a sandbox actually runs in a cluster.
+		ciLauncher = ci.NewDevLauncher()
+	}
+
+	dp := newDataplane(pdp, ciConfig, ciLauncher)
 	// Compile-time proof that the generated contracts compose into this plane alongside the
 	// modules; the agent gateway itself is wired in Phase 3.
 	_ = agentv1.HealthState_HEALTH_STATE_HEALTHY
@@ -115,6 +140,27 @@ func main() {
 		os.Exit(1)
 	}
 	defer doors.Close()
+
+	// The CI job surface shares the plane's gRPC door.
+	if doors.policyServer != nil {
+		civ1.RegisterCIJobServiceServer(doors.policyServer, ci.NewGRPCServer(dp.ci.Jobs()))
+	}
+
+	if dp.ci.Dispatches() {
+		go func() {
+			if err := dp.ci.RunDispatcher(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "dataplane CI dispatcher: %v\n", err)
+			}
+		}()
+		if addr := os.Getenv(ciMetricsAddrEnv); addr != "" {
+			closeMetrics, err := serveCIMetrics(ctx, addr, dp.ci.MetricsHandler())
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "dataplane CI metrics on %s: %v\n", addr, err)
+				os.Exit(1)
+			}
+			defer closeMetrics()
+		}
+	}
 
 	fmt.Printf("gitfrok dataplane-app: repository + codesearch on the in-process bus, PDP on %s\n", bundleDir)
 	if err := health.Run(ctx, health.ListenAddr(os.Getenv(listenAddrEnv))); err != nil {
