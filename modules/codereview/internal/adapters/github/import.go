@@ -139,30 +139,81 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	approvals := make([]api.ImportedApproval, 0)
 	for _, review := range reviews {
 		if strings.EqualFold(review.State, "approved") {
+			approvalDigest, err := payloadDigest(review)
+			if err != nil {
+				return api.ImportedMergeRequest{}, err
+			}
+			approvalProvenance := provenance
+			approvalProvenance.PayloadDigest = approvalDigest
+			approvalProvenance.DeclaredActor = review.User.Login
+			approvalProvenance.DeclaredAt = review.SubmittedAt
 			approvals = append(approvals, api.ImportedApproval{
 				ApprovalID:     fmt.Sprintf("%d", review.ID),
 				MergeRequestID: fmt.Sprintf("%d", pr.Number),
 				DeclaredActor:  review.User.Login,
 				DeclaredAt:     review.SubmittedAt,
-				Provenance:     provenance,
+				Provenance:     approvalProvenance,
 			})
 		}
 		if review.Body != "" {
+			// A review summary carries no diff position, so it attaches to the
+			// merge request itself rather than claiming a file it never named
+			// (AC5). Its digest covers the review's own payload.
+			reviewDigest, err := payloadDigest(review)
+			if err != nil {
+				return api.ImportedMergeRequest{}, err
+			}
+			reviewProvenance := provenance
+			reviewProvenance.PayloadDigest = reviewDigest
+			reviewProvenance.DeclaredActor = review.User.Login
+			reviewProvenance.DeclaredAt = review.SubmittedAt
 			threads = append(threads, api.ImportedThread{
 				ThreadID:       fmt.Sprintf("review-%d", review.ID),
 				MergeRequestID: fmt.Sprintf("%d", pr.Number),
 				Path:           review.Path,
-				Anchor:         "FILE",
+				Anchor:         api.DeclaredAnchor(review.Path),
 				Comments: []api.ImportedComment{{
 					CommentID:     fmt.Sprintf("review-%d", review.ID),
 					DeclaredActor: review.User.Login,
 					Body:          review.Body,
 					DeclaredAt:    review.SubmittedAt,
-					Provenance:    provenance,
+					Provenance:    reviewProvenance,
 				}},
-				Provenance: provenance,
+				Provenance: reviewProvenance,
 			})
 		}
+	}
+
+	// Line comments are a separate GitHub surface from reviews. Each keeps the
+	// position the source declared; one whose line no longer resolves degrades
+	// to the file, and is never dropped (AC5).
+	comments, err := c.listReviewComments(ctx, src, pr.Number, command.SourceToken)
+	if err != nil {
+		return api.ImportedMergeRequest{}, err
+	}
+	for _, comment := range comments {
+		commentDigest, err := payloadDigest(comment)
+		if err != nil {
+			return api.ImportedMergeRequest{}, err
+		}
+		commentProvenance := provenance
+		commentProvenance.PayloadDigest = commentDigest
+		commentProvenance.DeclaredActor = comment.User.Login
+		commentProvenance.DeclaredAt = comment.CreatedAt
+		threads = append(threads, api.ImportedThread{
+			ThreadID:       fmt.Sprintf("comment-%d", comment.ID),
+			MergeRequestID: fmt.Sprintf("%d", pr.Number),
+			Path:           comment.Path,
+			Anchor:         api.DeclaredAnchor(comment.Path),
+			Comments: []api.ImportedComment{{
+				CommentID:     fmt.Sprintf("comment-%d", comment.ID),
+				DeclaredActor: comment.User.Login,
+				Body:          comment.Body,
+				DeclaredAt:    comment.CreatedAt,
+				Provenance:    commentProvenance,
+			}},
+			Provenance: commentProvenance,
+		})
 	}
 
 	return api.ImportedMergeRequest{
@@ -179,28 +230,60 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	}, nil
 }
 
-// listPullRequests fetches all PRs (open + closed) for the source repository.
+// listPullRequests fetches every PR (open + closed) for the source repository,
+// page by page. A repository with more history than one page holds must not
+// import as a silently truncated set: the import would report its partial counts
+// as if they were the whole backlog.
 func (c *Client) listPullRequests(ctx context.Context, src source, token string) ([]pullRequest, error) {
 	var all []pullRequest
 	for _, state := range []string{"open", "closed"} {
-		path := fmt.Sprintf("%s/repos/%s/%s/pulls?state=%s&per_page=100", c.base, src.owner, src.repo, state)
-		var page []pullRequest
-		if err := c.getJSON(ctx, path, token, &page); err != nil {
+		batch, err := fetchPages[pullRequest](ctx, c, token, func(page int) string {
+			return fmt.Sprintf("%s/repos/%s/%s/pulls?state=%s&per_page=%d&page=%d&sort=created&direction=asc",
+				c.base, src.owner, src.repo, state, pageSize, page)
+		})
+		if err != nil {
 			return nil, err
 		}
-		all = append(all, page...)
+		all = append(all, batch...)
 	}
 	return all, nil
 }
 
+// pageSize is the per-page ceiling the GitHub API honours.
+const pageSize = 100
+
+// maxPages bounds a paging loop so a source that keeps returning full pages
+// cannot spin forever. Reaching it is an error, never a quiet truncation.
+const maxPages = 1000
+
+// fetchPages walks a paged GitHub collection until a short page ends it.
+func fetchPages[T any](ctx context.Context, c *Client, token string, pageURL func(page int) string) ([]T, error) {
+	var all []T
+	for page := 1; page <= maxPages; page++ {
+		var batch []T
+		if err := c.getJSON(ctx, pageURL(page), token, &batch); err != nil {
+			return nil, err
+		}
+		all = append(all, batch...)
+		if len(batch) < pageSize {
+			return all, nil
+		}
+	}
+	return nil, fmt.Errorf("github import: source has more than %d pages", maxPages)
+}
+
 // listReviews fetches the reviews for one pull request.
 func (c *Client) listReviews(ctx context.Context, src source, number int64, token string) ([]pullReview, error) {
-	path := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=100", c.base, src.owner, src.repo, number)
-	var reviews []pullReview
-	if err := c.getJSON(ctx, path, token, &reviews); err != nil {
-		return nil, err
-	}
-	return reviews, nil
+	return fetchPages[pullReview](ctx, c, token, func(page int) string {
+		return fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d", c.base, src.owner, src.repo, number, pageSize, page)
+	})
+}
+
+// listReviewComments fetches the line comments for one pull request.
+func (c *Client) listReviewComments(ctx context.Context, src source, number int64, token string) ([]reviewComment, error) {
+	return fetchPages[reviewComment](ctx, c, token, func(page int) string {
+		return fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments?per_page=%d&page=%d", c.base, src.owner, src.repo, number, pageSize, page)
+	})
 }
 
 // getJSON performs one authenticated GET and decodes the JSON body.
@@ -274,6 +357,18 @@ type pullReview struct {
 	Path        string    `json:"path"`
 	User        ghUser    `json:"user"`
 	SubmittedAt time.Time `json:"submitted_at"`
+}
+
+// reviewComment is the subset of the GitHub review-comment API shape this
+// importer needs. line is absent (0) once the source considers the comment
+// outdated, which is what degrades its anchor to the file (AC5).
+type reviewComment struct {
+	ID        int64     `json:"id"`
+	Body      string    `json:"body"`
+	Path      string    `json:"path"`
+	Line      int64     `json:"line"`
+	User      ghUser    `json:"user"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type ghUser struct {

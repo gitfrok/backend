@@ -113,6 +113,32 @@ var ErrImportDenied = errors.New("codereview: import unavailable")
 // state machine records STALLED, not FAILED (SPEC-0011 AC8).
 var ErrImportStalled = errors.New("codereview: import stalled by the source")
 
+// ErrUnknownSourceSystem is returned when an import names a source system no
+// adapter handles. It is a configuration failure, not a stall: retrying cannot
+// help until the caller names a supported system.
+var ErrUnknownSourceSystem = errors.New("codereview: unknown source system")
+
+// SourceHistoryImporter selects the history adapter by the import's
+// source_system, so one plane can import from GitHub or GitLab behind the same
+// port.
+type SourceHistoryImporter struct {
+	adapters map[string]HistoryImporter
+}
+
+// NewSourceHistoryImporter wires the per-system adapters.
+func NewSourceHistoryImporter(adapters map[string]HistoryImporter) *SourceHistoryImporter {
+	return &SourceHistoryImporter{adapters: adapters}
+}
+
+// ImportHistory dispatches to the adapter for the command's source system.
+func (s *SourceHistoryImporter) ImportHistory(ctx context.Context, command ImportHistoryCommand) (map[string]int64, error) {
+	adapter, ok := s.adapters[command.SourceSystem]
+	if !ok {
+		return nil, ErrUnknownSourceSystem
+	}
+	return adapter.ImportHistory(ctx, command)
+}
+
 // Create starts (or resumes) an import of one source repository. It is
 // idempotent per (tenant, repository, source URL): a retried Create returns the
 // import already running (SPEC-0011 AC6).

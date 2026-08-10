@@ -195,6 +195,39 @@ type ImportedThread struct {
 	Provenance     Provenance
 }
 
+// Anchor precisions for an imported thread. DIFF is the only exact anchor: the
+// source still declared a resolvable diff position. FILE and MERGE are
+// approximate, and the read surface marks them so the UI can render them as
+// such (SPEC-0011 AC5/AC19).
+const (
+	AnchorDiff  = "DIFF"
+	AnchorFile  = "FILE"
+	AnchorMerge = "MERGE"
+)
+
+// DeclaredAnchor is the strongest anchor an import may claim from what the
+// source declared alone: the file when the source named a path, the merge
+// request when it named none. No comment is ever dropped for want of an anchor
+// (AC5).
+//
+// It deliberately never returns DIFF. A diff anchor asserts that the position
+// still resolves, and only the imported git tree can settle that — the source's
+// own payload cannot: GitLab echoes a diff note's original path and line even
+// after the file is deleted, so trusting it would mark a stale anchor exact.
+// Until an import resolves positions against the refs it imported, every
+// imported anchor is approximate and says so.
+func DeclaredAnchor(path string) string {
+	if path != "" {
+		return AnchorFile
+	}
+	return AnchorMerge
+}
+
+// Approximate reports whether a thread's anchor is weaker than the diff
+// position it was written against, which is what the UI labels as approximate
+// (AC5, AC23).
+func (t ImportedThread) Approximate() bool { return t.Anchor != AnchorDiff }
+
 // ImportedComment is one imported review comment.
 type ImportedComment struct {
 	CommentID     string

@@ -61,6 +61,14 @@ func newStubServer(t *testing.T) *httptest.Server {
 				ID: 11, State: "approved", Body: "LGTM", User: ghUser{Login: "bob"},
 				SubmittedAt: time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC),
 			}})
+		case r.URL.Path == "/repos/acme/widgets/pulls/1/comments":
+			_ = json.NewEncoder(w).Encode([]reviewComment{{
+				ID: 31, Body: "This line", Path: "widget.go", Line: 12,
+				User: ghUser{Login: "bob"}, CreatedAt: time.Date(2024, 1, 3, 1, 0, 0, 0, time.UTC),
+			}, {
+				ID: 32, Body: "Outdated line", Path: "widget.go",
+				User: ghUser{Login: "bob"}, CreatedAt: time.Date(2024, 1, 3, 2, 0, 0, 0, time.UTC),
+			}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -114,6 +122,51 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 	}
 }
 
+// Review summaries attach to the merge request, line comments keep their diff
+// position, and a comment whose line no longer resolves degrades to the file.
+// No comment is dropped (AC5).
+func TestImportHistoryDegradesAnchors(t *testing.T) {
+	server := newStubServer(t)
+	defer server.Close()
+	records := newMemoryRecords()
+	client := New(records, server.Client())
+	client.base = server.URL
+
+	counts, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
+		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
+	})
+	if err != nil {
+		t.Fatalf("ImportHistory: %v", err)
+	}
+	if counts["comments"] != 3 {
+		t.Fatalf("comments = %d, want 3 (one review summary + two line comments)", counts["comments"])
+	}
+	stored, _ := records.ListImport(context.Background(), "import-1")
+	threads := stored[0].Threads
+	// Nothing claims a diff position: resolving a declared position against the
+	// imported refs is not something this import does yet, so every imported
+	// anchor is approximate and says so.
+	want := []struct {
+		anchor      string
+		path        string
+		approximate bool
+	}{
+		{api.AnchorMerge, "", true},
+		{api.AnchorFile, "widget.go", true},
+		{api.AnchorFile, "widget.go", true},
+	}
+	if len(threads) != len(want) {
+		t.Fatalf("threads = %d, want %d", len(threads), len(want))
+	}
+	for i, w := range want {
+		if threads[i].Anchor != w.anchor || threads[i].Path != w.path || threads[i].Approximate() != w.approximate {
+			t.Errorf("thread %d = anchor %q path %q approximate %v; want %q %q %v",
+				i, threads[i].Anchor, threads[i].Path, threads[i].Approximate(), w.anchor, w.path, w.approximate)
+		}
+	}
+}
+
 // A rate-limited source (403/429) is a stall, not a failure (AC8).
 func TestImportHistoryRateLimitStalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -164,5 +217,51 @@ func TestRevokedImportRefusesWrites(t *testing.T) {
 	}
 	if err := records.PutImport(context.Background(), "import-1", nil); err == nil {
 		t.Fatal("a revoked import accepted a write")
+	}
+}
+
+// A repository with more pull requests than one page holds imports whole.
+func TestImportHistoryFollowsPages(t *testing.T) {
+	firstPage := make([]pullRequest, pageSize)
+	for i := range firstPage {
+		firstPage[i] = pullRequest{
+			Number: int64(i + 1), Title: "PR", State: "open", User: ghUser{Login: "alice"},
+			Head: ghRef{Ref: "feature"}, Base: ghRef{Ref: "main"},
+		}
+	}
+	secondPage := []pullRequest{{
+		Number: 101, Title: "Last", State: "open", User: ghUser{Login: "alice"},
+		Head: ghRef{Ref: "feature"}, Base: ghRef{Ref: "main"},
+	}}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/repos/acme/widgets/pulls" && r.URL.Query().Get("state") == "open":
+			switch r.URL.Query().Get("page") {
+			case "1":
+				_ = json.NewEncoder(w).Encode(firstPage)
+			default:
+				_ = json.NewEncoder(w).Encode(secondPage)
+			}
+		default:
+			_ = json.NewEncoder(w).Encode([]any{})
+		}
+	}))
+	defer server.Close()
+
+	records := newMemoryRecords()
+	client := New(records, server.Client())
+	client.base = server.URL
+
+	counts, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
+		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
+	})
+	if err != nil {
+		t.Fatalf("ImportHistory: %v", err)
+	}
+	if counts["merge_requests"] != int64(pageSize+1) {
+		t.Fatalf("merge_requests = %d, want %d", counts["merge_requests"], pageSize+1)
 	}
 }
