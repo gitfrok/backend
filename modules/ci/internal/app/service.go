@@ -17,8 +17,6 @@ import (
 	"github.com/gitfrok/backend/platform/ids"
 )
 
-var ErrDenied = errors.New("ci: job unavailable")
-
 // Source validates that ref resolves to exactly commitSHA and returns the
 // digest of the v0 configuration parsed at that immutable revision.
 type Source interface {
@@ -77,21 +75,21 @@ func (s *Service) onRefUpdated(ctx context.Context, event repoapi.RefUpdated) er
 
 func (s *Service) Enqueue(ctx context.Context, req api.EnqueueRequest) (api.Job, error) {
 	if !validContext(req.Context) || req.Ref == "" || req.CommitSHA == "" || !validTrigger(req) {
-		return api.Job{}, ErrDenied
+		return api.Job{}, api.ErrDenied
 	}
 	if !s.allowed(ctx, req.Context, "ci.run", "repository", req.RepositoryID, map[string]string{"ref": req.Ref, "commit_sha": req.CommitSHA, "trigger": string(req.Trigger)}) {
-		return api.Job{}, ErrDenied
+		return api.Job{}, api.ErrDenied
 	}
 	digest, err := s.source.Validate(ctx, req.TenantID, req.RepositoryID, req.Ref, req.CommitSHA)
 	if err != nil || digest == "" {
-		return api.Job{}, ErrDenied
+		return api.Job{}, api.ErrDenied
 	}
 	key := idempotencyKey(req)
 	now := s.now().UTC()
-	candidate := api.Job{ID: s.newID(), TenantID: req.TenantID, RepositoryID: req.RepositoryID, Ref: req.Ref, CommitSHA: req.CommitSHA, Trigger: req.Trigger, State: api.JobQueued, QueuedAt: now, ConfigurationDigest: digest}
+	candidate := api.Job{ID: s.newID(), TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID, Ref: req.Ref, CommitSHA: req.CommitSHA, Trigger: req.Trigger, ActorRoles: append([]string(nil), req.ActorRoles...), State: api.JobQueued, QueuedAt: now, ConfigurationDigest: digest}
 	job, created, err := s.store.CreateOrGet(ctx, key, candidate)
 	if err != nil {
-		return api.Job{}, ErrDenied
+		return api.Job{}, api.ErrDenied
 	}
 	if !created {
 		return job, nil
@@ -107,11 +105,11 @@ func (s *Service) Enqueue(ctx context.Context, req api.EnqueueRequest) (api.Job,
 
 func (s *Service) Get(ctx context.Context, principal api.Context, jobID string) (api.Job, error) {
 	if !validContext(principal) || jobID == "" {
-		return api.Job{}, ErrDenied
+		return api.Job{}, api.ErrDenied
 	}
 	job, err := s.store.Get(ctx, jobID)
 	if err != nil || job.TenantID != principal.TenantID {
-		return api.Job{}, ErrDenied
+		return api.Job{}, api.ErrDenied
 	}
 	return job, nil
 }
@@ -119,7 +117,7 @@ func (s *Service) Get(ctx context.Context, principal api.Context, jobID string) 
 func (s *Service) Cancel(ctx context.Context, principal api.Context, jobID string) (api.Job, error) {
 	job, err := s.Get(ctx, principal, jobID)
 	if err != nil || !s.allowed(ctx, principal, "ci.cancel", "ci_job", jobID, map[string]string{"state": string(job.State)}) {
-		return api.Job{}, ErrDenied
+		return api.Job{}, api.ErrDenied
 	}
 	if job.State != api.JobQueued {
 		return job, nil
@@ -127,7 +125,7 @@ func (s *Service) Cancel(ctx context.Context, principal api.Context, jobID strin
 	now := s.now().UTC()
 	job.State, job.FinishedAt, job.OutcomeSummary = api.JobCancelled, &now, "cancelled before sandbox launch"
 	if err := s.store.Save(ctx, job); err != nil {
-		return api.Job{}, ErrDenied
+		return api.Job{}, api.ErrDenied
 	}
 	if err := s.queue.Cancel(ctx, job.ID); err != nil {
 		return api.Job{}, fmt.Errorf("ci: cancel queue job: %w", err)
@@ -157,12 +155,18 @@ func idempotencyKey(req api.EnqueueRequest) string {
 }
 
 // memoryStore is the local/test persistence adapter. Its mutex makes the
-// create-or-get operation atomic, the same contract a production tenant-scoped
+// create-or-get operation atomic, the same invariant a production tenant-scoped
 // database unique constraint must preserve.
 type memoryStore struct {
-	mu          sync.Mutex
-	jobs        map[string]api.Job
+	mu sync.Mutex
+	jobs map[string]api.Job
 	idempotency map[string]string
+}
+
+// NewMemoryStore returns a dev/in-memory job store preserving the
+// create-or-get atomicity invariant. Production injects a tenant-scoped DB store.
+func NewMemoryStore() Store {
+	return &memoryStore{jobs: map[string]api.Job{}, idempotency: map[string]string{}}
 }
 
 func newMemoryStore() *memoryStore {

@@ -5,8 +5,13 @@ package api
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrDenied is the coarse refusal returned by CI operations. It intentionally
+// does not distinguish non-existent state from cross-tenant access (SPEC-0020 AC6).
+var ErrDenied = errors.New("ci: job unavailable")
 
 type TriggerKind string
 
@@ -42,13 +47,14 @@ type EnqueueRequest struct {
 // Job is the bounded public lifecycle view. Attempt capabilities, pod names,
 // node details, raw output, and source bytes are CI implementation details.
 type Job struct {
-	ID, AttemptID, TenantID, RepositoryID string
-	Ref, CommitSHA                        string
-	Trigger                               TriggerKind
-	State                                 JobState
-	QueuedAt                              time.Time
-	StartedAt, FinishedAt                 *time.Time
-	ConfigurationDigest, OutcomeSummary   string
+	ID, AttemptID, TenantID, RepositoryID, ActorID string
+	Ref, CommitSHA                                 string
+	Trigger                                          TriggerKind
+	ActorRoles                                     []string
+	State                                          JobState
+	QueuedAt                                       time.Time
+	StartedAt, FinishedAt                          *time.Time
+	ConfigurationDigest, OutcomeSummary            string
 }
 
 type Jobs interface {

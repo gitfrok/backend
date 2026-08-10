@@ -42,7 +42,7 @@ func TestEnqueueRejectsMismatchedRevisionBeforeQueueWrite(t *testing.T) {
 	queue := &recordingQueue{}
 	svc := New(store, queue, sourceErr{errors.New("mismatch")}, allowPDP{}, bus.NewInProcess())
 	_, err := svc.Enqueue(context.Background(), api.EnqueueRequest{Context: api.Context{TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", RequestID: "request-a"}, Ref: "refs/heads/main", CommitSHA: "wrong", SourceEventID: "event-1", Trigger: api.TriggerRefUpdated})
-	if !errors.Is(err, ErrDenied) || len(queue.enqueued) != 0 || store.count() != 0 {
+	if !errors.Is(err, api.ErrDenied) || len(queue.enqueued) != 0 || store.count() != 0 {
 		t.Fatalf("err=%v queue=%v store=%d", err, queue.enqueued, store.count())
 	}
 }
@@ -55,7 +55,7 @@ func TestCancelQueuedJobIsTenantScopedAndNeverLaunches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Cancel(context.Background(), api.Context{TenantID: "tenant-b", RepositoryID: "repo-a", ActorID: "actor-b", RequestID: "request-b"}, job.ID); !errors.Is(err, ErrDenied) {
+	if _, err := svc.Cancel(context.Background(), api.Context{TenantID: "tenant-b", RepositoryID: "repo-a", ActorID: "actor-b", RequestID: "request-b"}, job.ID); !errors.Is(err, api.ErrDenied) {
 		t.Fatalf("cross tenant cancel = %v", err)
 	}
 	cancelled, err := svc.Cancel(context.Background(), api.Context{TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", RequestID: "request-a"}, job.ID)
