@@ -14,6 +14,7 @@ import (
 
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/modules/repository"
 	"github.com/gitfrok/backend/platform/bus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -156,6 +157,12 @@ func newReaderClient(t *testing.T, root string, pdp policyapi.DecisionPoint) (re
 
 func newReaderClientWithConfig(t *testing.T, config Config) (repositoryv1.RepositoryReaderClient, func()) {
 	t.Helper()
+	if config.Coordinator == nil {
+		config.Coordinator = repository.NewInMemoryCoordinator(testNodeID, config.Events)
+	}
+	if config.NodeID == "" {
+		config.NodeID = testNodeID
+	}
 	server, err := NewServer(config)
 	if err != nil {
 		t.Fatal(err)
