@@ -32,6 +32,7 @@ type Client struct {
 	base    string
 	http    *http.Client
 	records api.ImportedRecordStore
+	pacer   app.Pacer
 }
 
 // New wires the importer. records is where imported history is stored.
@@ -39,7 +40,23 @@ func New(records api.ImportedRecordStore, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Client{base: "https://gitlab.com/api/v4", http: httpClient, records: records}
+	return &Client{base: "https://gitlab.com/api/v4", http: httpClient, records: records, pacer: app.NoPacer{}}
+}
+
+// WithPacer paces this importer's source calls. Import work asks before every
+// fetch, so it yields throughput to the interactive traffic it shares a plane
+// with (SPEC-0011 AC21).
+func (c *Client) WithPacer(pacer app.Pacer) *Client {
+	if pacer != nil {
+		c.pacer = pacer
+	}
+	return c
+}
+
+// fetchState is one import's own accounting: the response bytes read so far. A
+// Client serves many imports, so the count cannot live on it.
+type fetchState struct {
+	read int64
 }
 
 // source is the parsed namespace/project from a source URL.
@@ -85,23 +102,25 @@ func parseSource(raw string) (source, bool) {
 // ImportHistory implements the Code Review history port. It fetches the source
 // merge requests and their approvals and notes, stores them as ATTESTED_IMPORT
 // records, and returns per-type counts for the manifest digest (AC16).
-func (c *Client) ImportHistory(ctx context.Context, command app.ImportHistoryCommand) (map[string]int64, error) {
+func (c *Client) ImportHistory(ctx context.Context, command app.ImportHistoryCommand) (app.HistoryResult, error) {
 	src, ok := parseSource(command.SourceURL)
 	if !ok {
-		return nil, fmt.Errorf("gitlab import: cannot parse source %q", command.SourceURL)
+		return app.HistoryResult{}, fmt.Errorf("gitlab import: cannot parse source %q", command.SourceURL)
 	}
 
-	mrs, err := c.listMergeRequests(ctx, src, command.SourceToken)
+	// st is this import's own accounting, threaded through every fetch.
+	st := &fetchState{}
+	mrs, err := c.listMergeRequests(ctx, st, src, command.SourceToken)
 	if err != nil {
-		return nil, err
+		return app.HistoryResult{}, err
 	}
 
 	counts := map[string]int64{"merge_requests": int64(len(mrs))}
 	records := make([]api.ImportedMergeRequest, 0, len(mrs))
 	for _, mr := range mrs {
-		record, err := c.buildRecord(ctx, src, command, mr)
+		record, err := c.buildRecord(ctx, st, src, command, mr)
 		if err != nil {
-			return nil, err
+			return app.HistoryResult{}, err
 		}
 		records = append(records, record)
 		counts["comments"] += int64(len(record.Threads))
@@ -109,14 +128,14 @@ func (c *Client) ImportHistory(ctx context.Context, command app.ImportHistoryCom
 	}
 
 	if err := c.records.PutImport(ctx, command.ImportID, records); err != nil {
-		return nil, err
+		return app.HistoryResult{}, err
 	}
-	return counts, nil
+	return app.HistoryResult{Counts: counts, SourceBytes: st.read}, nil
 }
 
 // buildRecord shapes one merge request plus its approvals and notes into an
 // imported MR.
-func (c *Client) buildRecord(ctx context.Context, src source, command app.ImportHistoryCommand, mr mergeRequest) (api.ImportedMergeRequest, error) {
+func (c *Client) buildRecord(ctx context.Context, st *fetchState, src source, command app.ImportHistoryCommand, mr mergeRequest) (api.ImportedMergeRequest, error) {
 	digest, err := payloadDigest(mr)
 	if err != nil {
 		return api.ImportedMergeRequest{}, err
@@ -133,7 +152,7 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	}
 
 	// GitLab merge-request approvals (may be absent for an unapproved MR).
-	approvals, err := c.listApprovals(ctx, src, mr.IID, command.SourceToken)
+	approvals, err := c.listApprovals(ctx, st, src, mr.IID, command.SourceToken)
 	if err != nil {
 		return api.ImportedMergeRequest{}, err
 	}
@@ -162,7 +181,7 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	}
 
 	// GitLab notes are the review threads/comments.
-	notes, err := c.listNotes(ctx, src, mr.IID, command.SourceToken)
+	notes, err := c.listNotes(ctx, st, src, mr.IID, command.SourceToken)
 	if err != nil {
 		return api.ImportedMergeRequest{}, err
 	}
@@ -213,31 +232,31 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 // page. A source with more history than one page holds must not import as a
 // silently truncated set: an import that stops early would report its partial
 // counts as if they were the whole backlog.
-func (c *Client) listMergeRequests(ctx context.Context, src source, token string) ([]mergeRequest, error) {
+func (c *Client) listMergeRequests(ctx context.Context, st *fetchState, src source, token string) ([]mergeRequest, error) {
 	project := url.PathEscape(src.namespace + "/" + src.project)
-	return fetchPages[mergeRequest](ctx, c, token, func(page int) string {
+	return fetchPages[mergeRequest](ctx, c, st, token, func(page int) string {
 		return fmt.Sprintf("%s/projects/%s/merge_requests?state=all&scope=all&per_page=%d&page=%d&order_by=created_at&sort=asc",
 			c.base, project, pageSize, page)
 	})
 }
 
 // listApprovals fetches the approvals for one MR.
-func (c *Client) listApprovals(ctx context.Context, src source, iid int64, token string) ([]approval, error) {
+func (c *Client) listApprovals(ctx context.Context, st *fetchState, src source, iid int64, token string) ([]approval, error) {
 	project := url.PathEscape(src.namespace + "/" + src.project)
 	path := fmt.Sprintf("%s/projects/%s/merge_requests/%d/approvals", c.base, project, iid)
 	var result struct {
 		ApprovedBy []approval `json:"approved_by"`
 	}
-	if err := c.getJSON(ctx, path, token, &result); err != nil {
+	if err := c.getJSON(ctx, st, path, token, &result); err != nil {
 		return nil, err
 	}
 	return result.ApprovedBy, nil
 }
 
 // listNotes fetches every note (comment) for one MR, page by page.
-func (c *Client) listNotes(ctx context.Context, src source, iid int64, token string) ([]note, error) {
+func (c *Client) listNotes(ctx context.Context, st *fetchState, src source, iid int64, token string) ([]note, error) {
 	project := url.PathEscape(src.namespace + "/" + src.project)
-	return fetchPages[note](ctx, c, token, func(page int) string {
+	return fetchPages[note](ctx, c, st, token, func(page int) string {
 		return fmt.Sprintf("%s/projects/%s/merge_requests/%d/notes?per_page=%d&page=%d&sort=asc",
 			c.base, project, iid, pageSize, page)
 	})
@@ -251,11 +270,11 @@ const pageSize = 100
 const maxPages = 1000
 
 // fetchPages walks a paged GitLab collection until a short page ends it.
-func fetchPages[T any](ctx context.Context, c *Client, token string, pageURL func(page int) string) ([]T, error) {
+func fetchPages[T any](ctx context.Context, c *Client, st *fetchState, token string, pageURL func(page int) string) ([]T, error) {
 	var all []T
 	for page := 1; page <= maxPages; page++ {
 		var batch []T
-		if err := c.getJSON(ctx, pageURL(page), token, &batch); err != nil {
+		if err := c.getJSON(ctx, st, pageURL(page), token, &batch); err != nil {
 			return nil, err
 		}
 		all = append(all, batch...)
@@ -267,7 +286,7 @@ func fetchPages[T any](ctx context.Context, c *Client, token string, pageURL fun
 }
 
 // getJSON performs one authenticated GET and decodes the JSON body.
-func (c *Client) getJSON(ctx context.Context, path, token string, into any) error {
+func (c *Client) getJSON(ctx context.Context, st *fetchState, path, token string, into any) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return err
@@ -276,6 +295,11 @@ func (c *Client) getJSON(ctx context.Context, path, token string, into any) erro
 	// audit record (SPEC-0011 AC22).
 	if token != "" {
 		request.Header.Set("PRIVATE-TOKEN", token)
+	}
+
+	// Every fetch waits its turn before it runs (AC21).
+	if err := c.pacer.Wait(ctx); err != nil {
+		return err
 	}
 
 	response, err := c.http.Do(request)
@@ -295,6 +319,8 @@ func (c *Client) getJSON(ctx context.Context, path, token string, into any) erro
 	if err != nil {
 		return err
 	}
+	// The bytes an import reads are the tenant's cost, charged by the caller.
+	st.read += int64(len(body))
 	if err := json.Unmarshal(body, into); err != nil {
 		return err
 	}

@@ -84,15 +84,15 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	counts, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
 	})
 	if err != nil {
 		t.Fatalf("ImportHistory: %v", err)
 	}
-	if counts["merge_requests"] != 1 || counts["approvals"] != 1 {
-		t.Fatalf("counts = %v", counts)
+	if result.Counts["merge_requests"] != 1 || result.Counts["approvals"] != 1 {
+		t.Fatalf("counts = %v", result.Counts)
 	}
 
 	stored, err := records.ListImport(context.Background(), "import-1")
@@ -132,15 +132,15 @@ func TestImportHistoryDegradesAnchors(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	counts, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
 	})
 	if err != nil {
 		t.Fatalf("ImportHistory: %v", err)
 	}
-	if counts["comments"] != 3 {
-		t.Fatalf("comments = %d, want 3 (one review summary + two line comments)", counts["comments"])
+	if result.Counts["comments"] != 3 {
+		t.Fatalf("comments = %d, want 3 (one review summary + two line comments)", result.Counts["comments"])
 	}
 	stored, _ := records.ListImport(context.Background(), "import-1")
 	threads := stored[0].Threads
@@ -254,14 +254,47 @@ func TestImportHistoryFollowsPages(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	counts, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
 	})
 	if err != nil {
 		t.Fatalf("ImportHistory: %v", err)
 	}
-	if counts["merge_requests"] != int64(pageSize+1) {
-		t.Fatalf("merge_requests = %d, want %d", counts["merge_requests"], pageSize+1)
+	if result.Counts["merge_requests"] != int64(pageSize+1) {
+		t.Fatalf("merge_requests = %d, want %d", result.Counts["merge_requests"], pageSize+1)
+	}
+}
+
+// countingPacer counts how many source fetches asked to proceed.
+type countingPacer struct{ waits int }
+
+func (p *countingPacer) Wait(context.Context) error {
+	p.waits++
+	return nil
+}
+
+// Every source fetch waits its turn, and the bytes read are reported so the
+// caller can charge them to the tenant (SPEC-0011 AC21).
+func TestImportHistoryPacesFetchesAndReportsBytes(t *testing.T) {
+	server := newStubServer(t)
+	defer server.Close()
+	pacer := &countingPacer{}
+	client := New(newMemoryRecords(), server.Client()).WithPacer(pacer)
+	client.base = server.URL
+
+	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
+		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
+	})
+	if err != nil {
+		t.Fatalf("ImportHistory: %v", err)
+	}
+	// open PRs, closed PRs, and the one PR's reviews and line comments.
+	if pacer.waits != 4 {
+		t.Fatalf("pacer waits = %d, want one per source fetch (4)", pacer.waits)
+	}
+	if result.SourceBytes <= 0 {
+		t.Fatalf("source bytes = %d, want the bytes actually read", result.SourceBytes)
 	}
 }

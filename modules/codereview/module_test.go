@@ -22,12 +22,12 @@ func (stubGitImporter) ImportRefs(context.Context, codereview.ImportRefsCommand)
 // which is the store the composition root is supposed to share.
 type stubHistoryImporter struct{ records api.ImportedRecordStore }
 
-func (s stubHistoryImporter) ImportHistory(ctx context.Context, command codereview.ImportHistoryCommand) (map[string]int64, error) {
+func (s stubHistoryImporter) ImportHistory(ctx context.Context, command codereview.ImportHistoryCommand) (codereview.HistoryResult, error) {
 	err := s.records.PutImport(ctx, command.ImportID, []api.ImportedMergeRequest{{
 		MergeRequestID: "1",
 		Provenance:     api.Provenance{Class: api.AttestImported, ImportID: command.ImportID},
 	}})
-	return map[string]int64{"merge_requests": 1}, err
+	return codereview.HistoryResult{Counts: map[string]int64{"merge_requests": 1}}, err
 }
 
 type allowAllPDP struct{}
@@ -42,8 +42,11 @@ func (allowAllPDP) Decide(context.Context, policyapi.Request) (policyapi.Decisio
 func TestImportRevokeTombstonesTheRecordsTheImporterWrote(t *testing.T) {
 	ctx := context.Background()
 	records := codereview.NewImportRecordStore()
+	// Pacing is off in this test: it is about what a revoke leaves readable, and a
+	// throttle would only make it slower.
 	service := codereview.NewImportService(
 		records, stubGitImporter{}, stubHistoryImporter{records: records}, allowAllPDP{}, bus.NewInProcess(),
+		codereview.NewImportPacer(0), codereview.NewImportStorageMeter(),
 	)
 
 	principal := api.Context{TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", RequestID: "req-1"}
@@ -74,7 +77,7 @@ func TestImportRevokeTombstonesTheRecordsTheImporterWrote(t *testing.T) {
 // The source selector refuses a system no adapter serves rather than handing
 // the import to the wrong API client.
 func TestSourceHistoryImporterRefusesUnknownSystem(t *testing.T) {
-	importer := codereview.NewSourceHistoryImporter(codereview.NewImportRecordStore(), nil)
+	importer := codereview.NewSourceHistoryImporter(codereview.NewImportRecordStore(), nil, codereview.NewImportPacer(0))
 	if _, err := importer.ImportHistory(context.Background(), codereview.ImportHistoryCommand{
 		TenantID: "tenant-a", RepositoryID: "repo-a", ImportID: "import-1",
 		SourceURL: "https://example.com/acme/widgets.git", SourceSystem: "bitbucket",
