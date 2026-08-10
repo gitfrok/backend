@@ -214,6 +214,26 @@ func TestFailedGitPhaseIsNotVisible(t *testing.T) {
 	}
 }
 
+// A history phase stalled by source-side rate limiting marks the import
+// STALLED — resumable, not failed — and returns the stall error (AC8).
+func TestHistoryRateLimitStallsNotFails(t *testing.T) {
+	store := newStubImportStore()
+	git := &stubGitImporter{moved: []RefUpdate{{Ref: "refs/heads/main", Revision: "abc"}}}
+	history := &stubHistoryImporter{err: ErrImportStalled}
+	svc, _, imported, _ := newTestImportService(store, git, history)
+
+	if _, err := svc.Create(context.Background(), importRequest()); err != ErrImportStalled {
+		t.Fatalf("Create = %v, want ErrImportStalled", err)
+	}
+	stored, _ := store.GetImport(context.Background(), "import-1")
+	if stored.State != api.ImportStalled {
+		t.Fatalf("state = %s, want STALLED", stored.State)
+	}
+	if len(*imported) != 0 {
+		t.Fatalf("a stalled import emitted %d HistoryImported events", len(*imported))
+	}
+}
+
 // An unauthorized caller is denied: the PDP decides, and denial is the coarse
 // refusal with no state change.
 func TestUnauthorizedImportIsDenied(t *testing.T) {
