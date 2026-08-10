@@ -11,6 +11,7 @@ import (
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	"github.com/gitfrok/backend/modules/codereview/api"
 	"github.com/gitfrok/backend/modules/codereview/internal/adapters/github"
+	"github.com/gitfrok/backend/modules/codereview/internal/adapters/gitlab"
 	"github.com/gitfrok/backend/modules/codereview/internal/adapters/gitwire"
 	codereviewgrpc "github.com/gitfrok/backend/modules/codereview/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/codereview/internal/app"
@@ -64,6 +65,22 @@ func NewGitImporter(client gitv1.GitStorageClient) GitImporter {
 // nil for the default client.
 func NewGithubHistoryImporter(httpClient *http.Client) HistoryImporter {
 	return github.New(app.NewMemoryRecordStore(), httpClient)
+}
+
+// NewGitlabHistoryImporter builds the history-phase port on the GitLab API,
+// storing imported records in the in-memory record store.
+func NewGitlabHistoryImporter(httpClient *http.Client) HistoryImporter {
+	return gitlab.New(app.NewMemoryRecordStore(), httpClient)
+}
+
+// NewSourceHistoryImporter returns a HistoryImporter that selects the source
+// adapter by the import's source_system ("github" or "gitlab"). Unknown
+// systems are refused rather than silently imported by the wrong adapter.
+func NewSourceHistoryImporter(httpClient *http.Client) HistoryImporter {
+	return app.NewSourceHistoryImporter(map[string]app.HistoryImporter{
+		"github": github.New(app.NewMemoryRecordStore(), httpClient),
+		"gitlab": gitlab.New(app.NewMemoryRecordStore(), httpClient),
+	})
 }
 
 // NewImportService builds the import service on the dev in-memory stores.
