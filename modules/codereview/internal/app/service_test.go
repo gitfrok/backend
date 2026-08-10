@@ -9,6 +9,7 @@ import (
 
 	"github.com/gitfrok/backend/modules/codereview/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	repoapi "github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
 )
@@ -46,15 +47,27 @@ func (p *recordingPDP) lastFor(action string) (policyapi.Request, bool) {
 }
 
 type recordingRefs struct {
-	moves []string
-	err   error
+	moves    []string
+	commands []MergeRefCommand
+	current  map[string]string
+	err      error
 }
 
-func (r *recordingRefs) MoveRef(_ context.Context, tenantID, repositoryID, targetRef, revision string) error {
+// MoveRef enforces the same compare-and-swap storage does, so a merge naming a
+// stale target revision fails here exactly as it would there.
+func (r *recordingRefs) MoveRef(_ context.Context, command MergeRefCommand) error {
+	r.commands = append(r.commands, command)
 	if r.err != nil {
 		return r.err
 	}
-	r.moves = append(r.moves, tenantID+"/"+repositoryID+"/"+targetRef+"@"+revision)
+	key := command.TenantID + "/" + command.RepositoryID + "/" + command.TargetRef
+	if r.current != nil {
+		if r.current[key] != command.ExpectedCurrentRevision {
+			return errors.New("the ref moved since the merge was decided")
+		}
+		r.current[key] = command.Revision
+	}
+	r.moves = append(r.moves, key+"@"+command.Revision)
 	return nil
 }
 
@@ -65,6 +78,9 @@ type collector struct {
 	reviews   []api.ReviewSubmitted
 	merged    []api.MergeRequestMerged
 	protected []api.BranchProtectionChanged
+	// events is the plane's bus, so a test can announce a ref update the way
+	// Repository/Git does.
+	events bus.Bus
 }
 
 func newService(t *testing.T) (*Service, *recordingPDP, *recordingRefs, *collector) {
@@ -106,6 +122,12 @@ func newService(t *testing.T) (*Service, *recordingPDP, *recordingRefs, *collect
 		WithIDs(func() string { counter++; return "id-" + strconv.Itoa(counter) }),
 		WithClock(func() time.Time { return time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC) }),
 	)
+	service.SubscribeRefUpdates(events)
+	got.events = events
+	// The target ref exists before any merge request opens against it, which is
+	// what Repository/Git would have announced by then.
+	announceTarget(t, events, "refs/heads/main", "sha-target")
+	announceTarget(t, events, "refs/heads/feature", "sha-head")
 	return service, pdp, refs, got
 }
 
@@ -113,12 +135,25 @@ func principal(tenant, actor, request string, roles ...string) api.Context {
 	return api.Context{TenantID: tenant, RepositoryID: "repo-a", ActorID: actor, RequestID: request, ActorRoles: roles}
 }
 
+// announceTarget is how Repository/Git tells Code Review where a ref stands. The
+// tests use it rather than seeding state directly, because the event is the only
+// route by which this context learns a revision.
+func announceTarget(t *testing.T, events bus.Bus, ref, revision string) {
+	t.Helper()
+	if err := events.Publish(context.Background(), repoapi.RefUpdated{
+		EventID: "event-" + revision, TenantID: "tenant-a", RepoID: "repo-a", Ref: ref,
+		NewSha: revision, ActorID: "actor-z", OccurredAt: time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Publish RefUpdated: %v", err)
+	}
+}
+
 func openOne(t *testing.T, s *Service, requestID string) api.MergeRequest {
 	t.Helper()
 	mr, err := s.Open(context.Background(), api.OpenRequest{
 		Context:   principal("tenant-a", "actor-a", requestID, "member"),
 		SourceRef: "refs/heads/feature", TargetRef: "refs/heads/main",
-		Title: "Add a thing", HeadRevision: "sha-head",
+		Title: "Add a thing",
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -409,7 +444,7 @@ func TestADeniedCommandChangesNoState(t *testing.T) {
 
 	if _, err := service.Open(ctx, api.OpenRequest{
 		Context:   principal("tenant-a", "actor-a", "request-open", "reader"),
-		SourceRef: "refs/heads/feature", TargetRef: "refs/heads/main", HeadRevision: "sha-head",
+		SourceRef: "refs/heads/feature", TargetRef: "refs/heads/main",
 	}); !errors.Is(err, api.ErrDenied) {
 		t.Fatalf("a PDP denial produced %v, want the coarse denial", err)
 	}
@@ -579,5 +614,144 @@ func TestAFailedRefMoveDoesNotMergeTheRequest(t *testing.T) {
 	}
 	if len(got.merged) != 0 || len(got.merges) != 0 {
 		t.Fatal("a failed ref move still announced or audited a merge")
+	}
+}
+
+// The move must name the revision the target ref was at when the merge was
+// decided, so storage can refuse it if the ref has since moved.
+func TestMergeNamesTheTargetRevisionItWasDecidedAgainst(t *testing.T) {
+	service, _, refs, _ := newService(t)
+	refs.current = map[string]string{"tenant-a/repo-a/refs/heads/main": "sha-target"}
+	ctx := context.Background()
+
+	mr := openOne(t, service, "request-open")
+	if _, err := service.Merge(ctx, api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
+	}); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	command := refs.commands[0]
+	if command.ExpectedCurrentRevision != "sha-target" {
+		t.Fatalf("expected current revision = %q, want the observed target revision", command.ExpectedCurrentRevision)
+	}
+	if command.Revision != "sha-head" || command.TargetRef != "refs/heads/main" {
+		t.Fatalf("move = %+v", command)
+	}
+	// The verified principal travels with the move: storage asks its own PDP.
+	if command.ActorID != "actor-a" || len(command.ActorRoles) == 0 || command.RequestID != "request-merge" {
+		t.Fatalf("move carried no verified principal: %+v", command)
+	}
+}
+
+// A ref that moved under an open merge request is observed from RefUpdated, not
+// read out of Git, and the next merge names the new revision.
+func TestRefUpdatedRefreshesTheTargetRevision(t *testing.T) {
+	service, _, refs, got := newService(t)
+	events := got.events
+	refs.current = map[string]string{"tenant-a/repo-a/refs/heads/main": "sha-moved"}
+	ctx := context.Background()
+
+	mr := openOne(t, service, "request-open")
+	if err := events.Publish(ctx, repoapi.RefUpdated{
+		EventID: "event-1", TenantID: "tenant-a", RepoID: "repo-a", Ref: "refs/heads/main",
+		OldSha: "sha-target", NewSha: "sha-moved", ActorID: "actor-c", OccurredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	current, err := service.Get(ctx, principal("tenant-a", "actor-a", "request-get", "member"), mr.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if current.TargetRevision != "sha-moved" {
+		t.Fatalf("target revision = %q, want the revision RefUpdated announced", current.TargetRevision)
+	}
+	if current.Version != mr.Version {
+		t.Fatalf("version = %d, want a ref move not to invalidate the caller's version", current.Version)
+	}
+	if _, err := service.Merge(ctx, api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: current.Version,
+	}); err != nil {
+		t.Fatalf("Merge after the target moved: %v", err)
+	}
+}
+
+// A ref update in another tenant, another repository, or on another ref must not
+// touch this merge request's view of its target.
+func TestRefUpdatedIsScopedToTheMergeRequestsOwnTarget(t *testing.T) {
+	service, _, _, got := newService(t)
+	events := got.events
+	ctx := context.Background()
+	mr := openOne(t, service, "request-open")
+
+	for _, event := range []repoapi.RefUpdated{
+		{EventID: "e1", TenantID: "tenant-b", RepoID: "repo-a", Ref: "refs/heads/main", NewSha: "other"},
+		{EventID: "e2", TenantID: "tenant-a", RepoID: "repo-b", Ref: "refs/heads/main", NewSha: "other"},
+		{EventID: "e3", TenantID: "tenant-a", RepoID: "repo-a", Ref: "refs/heads/release", NewSha: "other"},
+	} {
+		if err := events.Publish(ctx, event); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+
+	current, err := service.Get(ctx, principal("tenant-a", "actor-a", "request-get", "member"), mr.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if current.TargetRevision != "sha-target" {
+		t.Fatalf("target revision = %q, want it untouched by another scope's ref update", current.TargetRevision)
+	}
+}
+
+// If storage refuses the move because the ref moved, the merge request stays open
+// rather than reporting a merge that did not happen.
+func TestAMergeAgainstAMovedRefIsRefusedAndLeavesTheRequestOpen(t *testing.T) {
+	service, _, refs, got := newService(t)
+	refs.current = map[string]string{"tenant-a/repo-a/refs/heads/main": "sha-someone-else"}
+	ctx := context.Background()
+
+	mr := openOne(t, service, "request-open")
+	if _, err := service.Merge(ctx, api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
+	}); !errors.Is(err, api.ErrDenied) {
+		t.Fatalf("merging onto a moved ref: %v, want a denial", err)
+	}
+	current, err := service.Get(ctx, principal("tenant-a", "actor-a", "request-get", "member"), mr.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if current.State != api.StateOpen {
+		t.Fatalf("state = %s, want the request still OPEN", current.State)
+	}
+	if len(got.merged) != 0 || len(got.merges) != 0 {
+		t.Fatal("a refused move still announced or audited a merge")
+	}
+}
+
+// The target revision is Repository/Git's fact. A merge request opened before
+// this context has been told where the ref stands has no observed revision, which
+// is honest — it is not a guess, and it is not something the caller supplied.
+func TestTargetRevisionComesFromRepositoryGitNotTheCaller(t *testing.T) {
+	service, _, _, got := newService(t)
+
+	mr := openOne(t, service, "request-open")
+	if mr.TargetRevision != "sha-target" {
+		t.Fatalf("target revision = %q, want the announced revision", mr.TargetRevision)
+	}
+
+	// Nothing on the open surface can express a different one.
+	announceTarget(t, got.events, "refs/heads/release", "sha-release")
+	other, err := service.Open(context.Background(), api.OpenRequest{
+		Context:   principal("tenant-a", "actor-a", "request-other", "member"),
+		SourceRef: "refs/heads/feature", TargetRef: "refs/heads/release",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if other.TargetRevision != "sha-release" {
+		t.Fatalf("target revision = %q, want the revision announced for that ref", other.TargetRevision)
 	}
 }

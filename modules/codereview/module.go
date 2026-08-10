@@ -6,7 +6,10 @@
 package codereview
 
 import (
+	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	"github.com/gitfrok/backend/modules/codereview/api"
+	"github.com/gitfrok/backend/modules/codereview/internal/adapters/gitwire"
+	codereviewgrpc "github.com/gitfrok/backend/modules/codereview/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/codereview/internal/app"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
@@ -17,7 +20,23 @@ import (
 // under this module's internal/ tree.
 type RefMover = app.RefMover
 
-// New builds the Code Review context on the dev/in-memory store.
+// New builds the Code Review context on the dev/in-memory store and subscribes it
+// to ref updates, so each open merge request's view of its target ref stays
+// current without this context reading Git state.
 func New(refs RefMover, pdp policyapi.DecisionPoint, events bus.Bus) api.MergeRequests {
-	return app.New(app.NewMemoryStore(), refs, pdp, events)
+	service := app.New(app.NewMemoryStore(), refs, pdp, events)
+	service.SubscribeRefUpdates(events)
+	return service
+}
+
+// NewGRPCServer wraps the in-process merge-request surface in its gRPC adapter,
+// ready to register on the plane binary's gRPC server.
+func NewGRPCServer(requests api.MergeRequests) *codereviewgrpc.Server {
+	return codereviewgrpc.NewServer(requests)
+}
+
+// NewRefMover builds the ref-move port on the published GitStorage contract. It
+// is the only way this context reaches Git.
+func NewRefMover(client gitv1.GitStorageClient) RefMover {
+	return gitwire.NewRefMover(client)
 }

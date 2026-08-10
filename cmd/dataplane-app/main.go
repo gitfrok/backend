@@ -17,7 +17,10 @@ import (
 	"github.com/gitfrok/backend/cmd/internal/health"
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
 	civ1 "github.com/gitfrok/backend/gen/proto/ci/v1"
+	codereviewv1 "github.com/gitfrok/backend/gen/proto/codereview/v1"
 	"github.com/gitfrok/backend/modules/ci"
+	"github.com/gitfrok/backend/modules/codereview"
+	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
 	"github.com/gitfrok/backend/modules/codesearch"
 	csapi "github.com/gitfrok/backend/modules/codesearch/api"
 	"github.com/gitfrok/backend/modules/identity"
@@ -46,6 +49,8 @@ type dataplane struct {
 	searchIndex  csapi.Index
 	policy       policyapi.DecisionPoint
 	ci           *ci.Runtime
+	// codeReview is composed in main once the plane has a route to Git storage.
+	codeReview codereviewapi.MergeRequests
 }
 
 // newDataplane wires the plane. Concrete implementations are chosen in main and injected here; the
@@ -142,9 +147,19 @@ func main() {
 	}
 	defer doors.Close()
 
-	// The CI job surface shares the plane's gRPC door.
+	// Code Review needs a route to Git storage to complete a merge, and the plane
+	// only has one when the Git doors are configured. Without it the context is not
+	// composed at all, rather than composed with a merge path that cannot work.
+	if doors.storageClient != nil {
+		dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
+	}
+
+	// The CI and Code Review surfaces share the plane's gRPC door.
 	if doors.policyServer != nil {
 		civ1.RegisterCIJobServiceServer(doors.policyServer, ci.NewGRPCServer(dp.ci.Jobs()))
+		if dp.codeReview != nil {
+			codereviewv1.RegisterMergeRequestServiceServer(doors.policyServer, codereview.NewGRPCServer(dp.codeReview))
+		}
 	}
 
 	if dp.ci.Dispatches() {
