@@ -162,9 +162,16 @@ func main() {
 		// One record store, shared: the importers write imported history into it
 		// and a revoke tombstones the records that are actually there.
 		importRecords := codereview.NewImportRecordStore()
+		// One pacer for the whole import surface, and one meter for what imports
+		// cost each tenant. The interval is per-environment configuration: an
+		// unset one paces nothing, which is a load problem, whereas an import
+		// that silently blocks is an outage (SPEC-0011 AC21).
+		importPacer := codereview.NewImportPacer(importPaceInterval(os.Getenv))
+		importMeter := codereview.NewImportStorageMeter()
 		dp.imports = codereview.NewImportService(
 			importRecords, codereview.NewGitImporter(doors.storageClient),
-			codereview.NewSourceHistoryImporter(importRecords, nil), dp.policy, dp.bus,
+			codereview.NewSourceHistoryImporter(importRecords, nil, importPacer),
+			dp.policy, dp.bus, importPacer, importMeter,
 		)
 	}
 

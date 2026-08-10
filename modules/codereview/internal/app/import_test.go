@@ -93,12 +93,13 @@ func (s *stubGitImporter) ImportRefs(_ context.Context, command ImportRefsComman
 }
 
 type stubHistoryImporter struct {
-	counts map[string]int64
-	err    error
+	counts      map[string]int64
+	sourceBytes int64
+	err         error
 }
 
-func (s *stubHistoryImporter) ImportHistory(_ context.Context, command ImportHistoryCommand) (map[string]int64, error) {
-	return s.counts, s.err
+func (s *stubHistoryImporter) ImportHistory(_ context.Context, command ImportHistoryCommand) (HistoryResult, error) {
+	return HistoryResult{Counts: s.counts, SourceBytes: s.sourceBytes}, s.err
 }
 
 // stubPDP allows everything.
