@@ -14,9 +14,9 @@ type Gauge struct {
 	val *atomic.Int64
 }
 
-func NewGauge() *Gauge { return &Gauge{val: &atomic.Int64{}} }
-func (g *Gauge) Set(n int64) { g.val.Store(n) }
-func (g *Gauge) Add(n int64) { g.val.Add(n) }
+func NewGauge() *Gauge        { return &Gauge{val: &atomic.Int64{}} }
+func (g *Gauge) Set(n int64)  { g.val.Store(n) }
+func (g *Gauge) Add(n int64)  { g.val.Add(n) }
 func (g *Gauge) Value() int64 { return g.val.Load() }
 
 // Handler returns an HTTP handler that emits the queued-depth metric in

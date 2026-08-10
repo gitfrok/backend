@@ -49,7 +49,7 @@ type EnqueueRequest struct {
 type Job struct {
 	ID, AttemptID, TenantID, RepositoryID, ActorID string
 	Ref, CommitSHA                                 string
-	Trigger                                          TriggerKind
+	Trigger                                        TriggerKind
 	ActorRoles                                     []string
 	State                                          JobState
 	QueuedAt                                       time.Time

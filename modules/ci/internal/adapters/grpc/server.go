@@ -71,10 +71,10 @@ func intoEnqueueRequest(req *civ1.EnqueueJobRequest) (api.EnqueueRequest, error)
 	}
 	ctx := req.GetContext()
 	in := api.EnqueueRequest{
-		Context:     api.Context{TenantID: ctx.GetTenantId(), RepositoryID: ctx.GetRepositoryId(), ActorID: ctx.GetActorId(), ActorRoles: append([]string(nil), ctx.GetActorRoles()...), RequestID: ctx.GetRequestId()},
-		Ref:         req.GetRef(),
-		CommitSHA:   req.GetCommitSha(),
-		Trigger:     triggerKind(req.GetTriggerKind()),
+		Context:       api.Context{TenantID: ctx.GetTenantId(), RepositoryID: ctx.GetRepositoryId(), ActorID: ctx.GetActorId(), ActorRoles: append([]string(nil), ctx.GetActorRoles()...), RequestID: ctx.GetRequestId()},
+		Ref:           req.GetRef(),
+		CommitSHA:     req.GetCommitSha(),
+		Trigger:       triggerKind(req.GetTriggerKind()),
 		SourceEventID: req.GetSourceEventId(),
 	}
 	if in.TenantID == "" || in.RepositoryID == "" || in.ActorID == "" || in.RequestID == "" {
@@ -108,13 +108,13 @@ func toCIJobProto(j api.Job) *civ1.CIJob {
 		JobId: j.ID, AttemptId: j.AttemptID,
 		TenantId: j.TenantID, RepositoryId: j.RepositoryID,
 		Ref: j.Ref, CommitSha: j.CommitSHA,
-		TriggerKind: triggerKindProto(j.Trigger),
-		State: stateProto(j.State),
-		QueuedAt: ts(j.QueuedAt),
-		StartedAt: tsPtr(j.StartedAt),
-		FinishedAt: tsPtr(j.FinishedAt),
+		TriggerKind:         triggerKindProto(j.Trigger),
+		State:               stateProto(j.State),
+		QueuedAt:            ts(j.QueuedAt),
+		StartedAt:           tsPtr(j.StartedAt),
+		FinishedAt:          tsPtr(j.FinishedAt),
 		ConfigurationDigest: j.ConfigurationDigest,
-		OutcomeSummary: j.OutcomeSummary,
+		OutcomeSummary:      j.OutcomeSummary,
 	}
 }
 

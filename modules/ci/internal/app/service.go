@@ -158,8 +158,8 @@ func idempotencyKey(req api.EnqueueRequest) string {
 // create-or-get operation atomic, the same invariant a production tenant-scoped
 // database unique constraint must preserve.
 type memoryStore struct {
-	mu sync.Mutex
-	jobs map[string]api.Job
+	mu          sync.Mutex
+	jobs        map[string]api.Job
 	idempotency map[string]string
 }
 

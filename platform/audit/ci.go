@@ -42,14 +42,14 @@ func (e CIDispatch) Tenant() string  { return e.TenantID }
 // It carries no raw log, source, secret, source capability, Kubernetes node detail, or
 // authorization result (SPEC-0020 AC7).
 type CITerminal struct {
-	TenantID     string
-	ActorID      string
-	RepositoryID string
-	JobID        string
-	AttemptID    string
-	TerminalState string
+	TenantID       string
+	ActorID        string
+	RepositoryID   string
+	JobID          string
+	AttemptID      string
+	TerminalState  string
 	OutcomeSummary string
-	OccuredAt    time.Time
+	OccuredAt      time.Time
 }
 
 func (CITerminal) EventName() string { return EventAudit }

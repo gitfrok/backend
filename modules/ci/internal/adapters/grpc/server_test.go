@@ -70,8 +70,8 @@ func TestEnqueueJobDeniesMissingContext(t *testing.T) {
 func TestCancelJobCrossTenantIsDenied(t *testing.T) {
 	s, _ := newTestServer(t)
 	_, err := s.CancelJob(context.Background(), &civ1.CancelJobRequest{
-		Context:  &civ1.JobContext{TenantId: "tenant-b", RepositoryId: "repo-a", ActorId: "actor-b", RequestId: "req-1"},
-		JobId:    "job-1",
+		Context: &civ1.JobContext{TenantId: "tenant-b", RepositoryId: "repo-a", ActorId: "actor-b", RequestId: "req-1"},
+		JobId:   "job-1",
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("cross-tenant cancel = %v, want denied", err)
