@@ -38,7 +38,7 @@ func TestImportedBytesAreMeteredFromWhatStorageWrote(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, git, history)
 	svc.WithStorageMeter(meter)
 
-	if _, err := svc.Create(context.Background(), importRequest()); err != nil {
+	if _, err := svc.Create(t.Context(), importRequest()); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if meter.calls != 1 {
@@ -61,7 +61,7 @@ func TestFailedGitPhaseChargesNothing(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, git, &stubHistoryImporter{})
 	svc.WithStorageMeter(meter)
 
-	if _, err := svc.Create(context.Background(), importRequest()); err == nil {
+	if _, err := svc.Create(t.Context(), importRequest()); err == nil {
 		t.Fatal("Create succeeded on a failed git phase")
 	}
 	if meter.calls != 0 {
@@ -78,7 +78,7 @@ func TestNoGrowthChargesNothing(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, git, &stubHistoryImporter{counts: map[string]int64{}})
 	svc.WithStorageMeter(meter)
 
-	if _, err := svc.Create(context.Background(), importRequest()); err != nil {
+	if _, err := svc.Create(t.Context(), importRequest()); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if meter.calls != 0 {
@@ -96,7 +96,7 @@ func TestMeterFailureDoesNotFailTheImport(t *testing.T) {
 	svc, _, imported, _ := newTestImportService(store, git, &stubHistoryImporter{counts: map[string]int64{}})
 	svc.WithStorageMeter(meter)
 
-	imp, err := svc.Create(context.Background(), importRequest())
+	imp, err := svc.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestImportWithoutAMeterStillCompletes(t *testing.T) {
 	git := &stubGitImporter{moved: []RefUpdate{{Ref: "refs/heads/main", Revision: "abc123"}}, bytes: 2048}
 	svc, _, _, _ := newTestImportService(store, git, &stubHistoryImporter{counts: map[string]int64{}})
 
-	imp, err := svc.Create(context.Background(), importRequest())
+	imp, err := svc.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

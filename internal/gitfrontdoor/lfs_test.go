@@ -269,7 +269,7 @@ func TestLFSIsItsOwnPermission(t *testing.T) {
 		ActorRoles: []string{"member"}, RequestId: "request-1",
 	}
 
-	if _, _, _, err := objects.Download(context.Background(), operation, testOID); err == nil {
+	if _, _, _, err := objects.Download(t.Context(), operation, testOID); err == nil {
 		t.Fatal("a repository reader with no LFS grant was allowed to fetch an object")
 	}
 	if len(pdp.asked) == 0 || pdp.asked[0].Action != actionLFSRead {
@@ -280,7 +280,7 @@ func TestLFSIsItsOwnPermission(t *testing.T) {
 	}
 
 	pdp.allow[actionLFSRead] = true
-	href, size, ttl, err := objects.Download(context.Background(), operation, testOID)
+	href, size, ttl, err := objects.Download(t.Context(), operation, testOID)
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -299,11 +299,11 @@ func TestCredentialIsScopedToOneObjectAndOneMethod(t *testing.T) {
 	inA := &gitv1.OperationContext{TenantId: "tenant-a", RepositoryId: "repo-a", ActorId: "actor-a", RequestId: "r"}
 	inB := &gitv1.OperationContext{TenantId: "tenant-b", RepositoryId: "repo-b", ActorId: "actor-b", RequestId: "r"}
 
-	if _, _, _, err := objects.Download(context.Background(), inA, testOID); err != nil {
+	if _, _, _, err := objects.Download(t.Context(), inA, testOID); err != nil {
 		t.Fatalf("tenant A download: %v", err)
 	}
 	// The same OID in another tenant is another object, and that one is not stored.
-	if _, _, _, err := objects.Download(context.Background(), inB, testOID); err == nil {
+	if _, _, _, err := objects.Download(t.Context(), inB, testOID); err == nil {
 		t.Fatal("tenant B read tenant A's object by naming its OID")
 	}
 
@@ -324,7 +324,7 @@ func TestUploadOfAStoredObjectIsRefused(t *testing.T) {
 	objects, _ := NewObjectTier(pdp, tier)
 	operation := &gitv1.OperationContext{TenantId: "tenant-a", RepositoryId: "repo-a", ActorId: "actor-a", RequestId: "r"}
 
-	if _, _, err := objects.Upload(context.Background(), operation, testOID, 42); err == nil {
+	if _, _, err := objects.Upload(t.Context(), operation, testOID, 42); err == nil {
 		t.Fatal("an already-stored object was given an upload credential")
 	}
 }
@@ -341,10 +341,10 @@ func TestMalformedOIDNeverReachesTheTier(t *testing.T) {
 		"", "short", strings.Repeat("A", 64), "../../etc/passwd",
 		strings.Repeat("1", 63) + "/", strings.Repeat("1", 65),
 	} {
-		if _, _, _, err := objects.Download(context.Background(), operation, oid); err == nil {
+		if _, _, _, err := objects.Download(t.Context(), operation, oid); err == nil {
 			t.Errorf("download accepted OID %q", oid)
 		}
-		if _, _, err := objects.Upload(context.Background(), operation, oid, 1); err == nil {
+		if _, _, err := objects.Upload(t.Context(), operation, oid, 1); err == nil {
 			t.Errorf("upload accepted OID %q", oid)
 		}
 	}

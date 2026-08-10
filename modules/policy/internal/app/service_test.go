@@ -77,7 +77,7 @@ func TestDecisionIsReturnedUnaltered(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pdp := &stubPDP{decision: tc.want}
-			got, err := newService(pdp, &recorder{}).Decide(context.Background(), request())
+			got, err := newService(pdp, &recorder{}).Decide(t.Context(), request())
 			if err != nil {
 				t.Fatalf("Decide: %v", err)
 			}
@@ -91,7 +91,7 @@ func TestDecisionIsReturnedUnaltered(t *testing.T) {
 func TestRequestReachesTheEvaluatorUnaltered(t *testing.T) {
 	pdp := &stubPDP{decision: allowed()}
 	req := request()
-	if _, err := newService(pdp, &recorder{}).Decide(context.Background(), req); err != nil {
+	if _, err := newService(pdp, &recorder{}).Decide(t.Context(), req); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if pdp.calls != 1 {
@@ -107,7 +107,7 @@ func TestRequestReachesTheEvaluatorUnaltered(t *testing.T) {
 
 func TestDenialEmitsAnAuditEvent(t *testing.T) {
 	rec := &recorder{}
-	if _, err := newService(&stubPDP{decision: denied()}, rec).Decide(context.Background(), request()); err != nil {
+	if _, err := newService(&stubPDP{decision: denied()}, rec).Decide(t.Context(), request()); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 
@@ -137,7 +137,7 @@ func TestDenialEmitsAnAuditEvent(t *testing.T) {
 // refusals, which are what an investigation looks for.
 func TestAllowEmitsNothing(t *testing.T) {
 	rec := &recorder{}
-	if _, err := newService(&stubPDP{decision: allowed()}, rec).Decide(context.Background(), request()); err != nil {
+	if _, err := newService(&stubPDP{decision: allowed()}, rec).Decide(t.Context(), request()); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if len(rec.events) != 0 {
@@ -151,7 +151,7 @@ func TestAuditEventCarriesNoPolicyText(t *testing.T) {
 	rec := &recorder{}
 	d := denied()
 	d.Reason = "denied: subject lacks role owner on repo-1"
-	if _, err := newService(&stubPDP{decision: d}, rec).Decide(context.Background(), request()); err != nil {
+	if _, err := newService(&stubPDP{decision: d}, rec).Decide(t.Context(), request()); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	got := rec.events[0].(platformaudit.PolicyDecisionDenied)
@@ -172,7 +172,7 @@ func TestAuditEventCarriesNoPolicyText(t *testing.T) {
 func TestEvaluatorErrorDeniesAndAuditsNothing(t *testing.T) {
 	rec := &recorder{}
 	boom := errors.New("bundle exploded")
-	got, err := newService(&stubPDP{err: boom}, rec).Decide(context.Background(), request())
+	got, err := newService(&stubPDP{err: boom}, rec).Decide(t.Context(), request())
 
 	if !errors.Is(err, boom) {
 		t.Errorf("error = %v, want it to wrap the evaluator's", err)
@@ -189,7 +189,7 @@ func TestEvaluatorErrorDeniesAndAuditsNothing(t *testing.T) {
 // stands; what is lost is the record of it, so the error is surfaced rather than swallowed.
 func TestAuditFailureStillDenies(t *testing.T) {
 	rec := &recorder{err: errors.New("bus down")}
-	got, err := newService(&stubPDP{decision: denied()}, rec).Decide(context.Background(), request())
+	got, err := newService(&stubPDP{decision: denied()}, rec).Decide(t.Context(), request())
 
 	if err == nil {
 		t.Error("a dropped audit event was silent; an unrecorded denial is a compliance gap (G5)")
@@ -210,7 +210,7 @@ func TestAllowedIsNeverTrueOnError(t *testing.T) {
 		{"audit error on denial", &stubPDP{decision: denied()}, &recorder{err: errors.New("x")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := newService(tc.pdp, tc.rec).Decide(context.Background(), request())
+			got, err := newService(tc.pdp, tc.rec).Decide(t.Context(), request())
 			if err == nil {
 				t.Fatal("expected an error")
 			}

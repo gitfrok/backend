@@ -1,7 +1,6 @@
 package oidc
 
 import (
-	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -153,7 +152,7 @@ func TestVerifyMapsAVerifiedTokenToATenantScopedPrincipal(t *testing.T) {
 	verifier := testVerifier(t, provider, now)
 	token := provider.sign(t, header(provider.kid), provider.claimSet(now))
 
-	principal, ok := verifier.VerifyIDToken(context.Background(), token, testNonce)
+	principal, ok := verifier.VerifyIDToken(t.Context(), token, testNonce)
 	if !ok {
 		t.Fatal("a well-formed token was refused")
 	}
@@ -229,7 +228,7 @@ func TestVerifyRefusesEveryWayATokenCanBeWrong(t *testing.T) {
 			tokenHeader := header(provider.kid)
 			mutate(provider, claimSet, tokenHeader)
 
-			if _, ok := verifier.VerifyIDToken(context.Background(), provider.sign(t, tokenHeader, claimSet), testNonce); ok {
+			if _, ok := verifier.VerifyIDToken(t.Context(), provider.sign(t, tokenHeader, claimSet), testNonce); ok {
 				t.Fatalf("accepted a token that was %s", name)
 			}
 		})
@@ -247,7 +246,7 @@ func TestVerifyRefusesATokenSignedByAnotherKey(t *testing.T) {
 	attacker := &issuer{key: unpublished, kid: provider.kid}
 	forged := attacker.sign(t, header(provider.kid), provider.claimSet(now))
 
-	if _, ok := verifier.VerifyIDToken(context.Background(), forged, testNonce); ok {
+	if _, ok := verifier.VerifyIDToken(t.Context(), forged, testNonce); ok {
 		t.Fatal("accepted a token signed by a key the issuer never published")
 	}
 }
@@ -279,7 +278,7 @@ func TestVerifyRefusesDiscoveryThatNamesAnotherIssuer(t *testing.T) {
 		TenantMapping: map[string]string{"org-a": "tenant-a"},
 	}, impostor.Client()).WithNow(func() time.Time { return now })
 
-	if _, ok := verifier.VerifyIDToken(context.Background(), provider.sign(t, header(provider.kid), provider.claimSet(now)), testNonce); ok {
+	if _, ok := verifier.VerifyIDToken(t.Context(), provider.sign(t, header(provider.kid), provider.claimSet(now)), testNonce); ok {
 		t.Fatal("accepted a discovery document that named an issuer other than the configured one")
 	}
 }
@@ -311,7 +310,7 @@ func TestVerifyRefusesDiscoveryPointingOutsideTheIssuer(t *testing.T) {
 
 	claimSet := elsewhere.claimSet(now)
 	claimSet["iss"] = host.URL
-	if _, ok := verifier.VerifyIDToken(context.Background(), elsewhere.sign(t, header(elsewhere.kid), claimSet), testNonce); ok {
+	if _, ok := verifier.VerifyIDToken(t.Context(), elsewhere.sign(t, header(elsewhere.kid), claimSet), testNonce); ok {
 		t.Fatal("followed discovery endpoints outside the configured issuer")
 	}
 }
@@ -322,7 +321,7 @@ func TestExchangeCodeReturnsThePrincipalFromTheIssuedToken(t *testing.T) {
 	verifier := testVerifier(t, provider, now)
 	provider.idToken = provider.sign(t, header(provider.kid), provider.claimSet(now))
 
-	principal, ok := verifier.ExchangeCode(context.Background(), "code-a", "verifier-a", "https://app.gitsaas.test/callback", testNonce)
+	principal, ok := verifier.ExchangeCode(t.Context(), "code-a", "verifier-a", "https://app.gitsaas.test/callback", testNonce)
 	if !ok {
 		t.Fatal("a valid code exchange was refused")
 	}
@@ -338,7 +337,7 @@ func TestExchangeCodeRefusesAnotherRedirectURI(t *testing.T) {
 	verifier := testVerifier(t, provider, now)
 	provider.idToken = provider.sign(t, header(provider.kid), provider.claimSet(now))
 
-	if _, ok := verifier.ExchangeCode(context.Background(), "code-a", "verifier-a", "https://evil.example/callback", testNonce); ok {
+	if _, ok := verifier.ExchangeCode(t.Context(), "code-a", "verifier-a", "https://evil.example/callback", testNonce); ok {
 		t.Fatal("accepted a redirect URI this deployment never registered")
 	}
 }
@@ -352,13 +351,13 @@ func TestExchangeCodeRefusesAnIncompleteFlow(t *testing.T) {
 
 	for name, call := range map[string]func() (Principal, bool){
 		"no code": func() (Principal, bool) {
-			return verifier.ExchangeCode(context.Background(), "", "verifier-a", redirect, testNonce)
+			return verifier.ExchangeCode(t.Context(), "", "verifier-a", redirect, testNonce)
 		},
 		"no verifier": func() (Principal, bool) {
-			return verifier.ExchangeCode(context.Background(), "code-a", "", redirect, testNonce)
+			return verifier.ExchangeCode(t.Context(), "code-a", "", redirect, testNonce)
 		},
 		"no nonce": func() (Principal, bool) {
-			return verifier.ExchangeCode(context.Background(), "code-a", "verifier-a", redirect, "")
+			return verifier.ExchangeCode(t.Context(), "code-a", "verifier-a", redirect, "")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -375,7 +374,7 @@ func TestExchangeCodeRefusesARejectedCode(t *testing.T) {
 	provider.tokenCode = http.StatusBadRequest
 	verifier := testVerifier(t, provider, now)
 
-	if _, ok := verifier.ExchangeCode(context.Background(), "code-a", "verifier-a", "https://app.gitsaas.test/callback", testNonce); ok {
+	if _, ok := verifier.ExchangeCode(t.Context(), "code-a", "verifier-a", "https://app.gitsaas.test/callback", testNonce); ok {
 		t.Fatal("a code the issuer rejected produced a principal")
 	}
 }

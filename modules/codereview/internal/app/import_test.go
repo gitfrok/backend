@@ -154,7 +154,7 @@ func TestImportCompletesAndEmitsOneAuditEvent(t *testing.T) {
 	history := &stubHistoryImporter{counts: map[string]int64{"merge_requests": 3, "comments": 12}}
 	svc, _, imported, _ := newTestImportService(store, git, history)
 
-	imp, err := svc.Create(context.Background(), importRequest())
+	imp, err := svc.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -186,11 +186,11 @@ func TestCreateIsIdempotent(t *testing.T) {
 	history := &stubHistoryImporter{counts: map[string]int64{"merge_requests": 1}}
 	svc, _, imported, _ := newTestImportService(store, git, history)
 
-	first, err := svc.Create(context.Background(), importRequest())
+	first, err := svc.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := svc.Create(context.Background(), importRequest())
+	second, err := svc.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,10 +209,10 @@ func TestFailedGitPhaseIsNotVisible(t *testing.T) {
 	git := &stubGitImporter{err: errors.New("fetch failed")}
 	svc, _, imported, _ := newTestImportService(store, git, nil)
 
-	if _, err := svc.Create(context.Background(), importRequest()); err == nil {
+	if _, err := svc.Create(t.Context(), importRequest()); err == nil {
 		t.Fatal("a failed import must return an error")
 	}
-	stored, _ := store.GetImport(context.Background(), "import-1")
+	stored, _ := store.GetImport(t.Context(), "import-1")
 	if stored.State != api.ImportFailed {
 		t.Fatalf("state = %s, want FAILED", stored.State)
 	}
@@ -229,10 +229,10 @@ func TestHistoryRateLimitStallsNotFails(t *testing.T) {
 	history := &stubHistoryImporter{err: ErrImportStalled}
 	svc, _, imported, _ := newTestImportService(store, git, history)
 
-	if _, err := svc.Create(context.Background(), importRequest()); err != ErrImportStalled {
+	if _, err := svc.Create(t.Context(), importRequest()); err != ErrImportStalled {
 		t.Fatalf("Create = %v, want ErrImportStalled", err)
 	}
-	stored, _ := store.GetImport(context.Background(), "import-1")
+	stored, _ := store.GetImport(t.Context(), "import-1")
 	if stored.State != api.ImportStalled {
 		t.Fatalf("state = %s, want STALLED", stored.State)
 	}
@@ -248,7 +248,7 @@ func TestUnauthorizedImportIsDenied(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, &stubGitImporter{}, nil)
 	svc.pdp = denyPDP{}
 
-	if _, err := svc.Create(context.Background(), importRequest()); err == nil {
+	if _, err := svc.Create(t.Context(), importRequest()); err == nil {
 		t.Fatal("an unauthorized import must be denied")
 	}
 	if len(store.imports) != 0 {
@@ -265,11 +265,11 @@ func TestRevokeTombstonesAndEmitsEvent(t *testing.T) {
 	history := &stubHistoryImporter{counts: map[string]int64{"merge_requests": 1}}
 	svc, _, _, revoked := newTestImportService(store, git, history)
 
-	imp, err := svc.Create(context.Background(), importRequest())
+	imp, err := svc.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
-	rev, err := svc.Revoke(context.Background(), api.RevokeImportRequest{
+	rev, err := svc.Revoke(t.Context(), api.RevokeImportRequest{
 		Context:  api.Context{TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", RequestID: "req-2"},
 		ImportID: imp.ID,
 	})

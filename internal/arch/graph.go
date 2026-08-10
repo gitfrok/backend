@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -335,20 +336,11 @@ func (g *Graph) FanOut() map[string]int {
 // appendUnique appends values not already present, preserving order.
 func appendUnique(dst []string, vals ...string) []string {
 	for _, v := range vals {
-		if !contains(dst, v) {
+		if !slices.Contains(dst, v) {
 			dst = append(dst, v)
 		}
 	}
 	return dst
-}
-
-func contains(hay []string, needle string) bool {
-	for _, h := range hay {
-		if h == needle {
-			return true
-		}
-	}
-	return false
 }
 
 // FormatPath renders an import chain for a failure message.

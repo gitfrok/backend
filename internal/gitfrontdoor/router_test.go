@@ -39,7 +39,7 @@ func TestRoutePATBindsAuthenticatedPrincipalToOpaqueRepositoryHandle(t *testing.
 	auth := &fakeAuthenticator{principal: identityapi.Principal{TenantID: "tenant-a", ActorID: "actor-a", Roles: []string{"member"}}, ok: true}
 	router := Router{Authenticator: auth}
 
-	context, err := router.RoutePAT(context.Background(), "tenant-a/repo-a.git", "pat-secret", "request-1", gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC)
+	context, err := router.RoutePAT(t.Context(), "tenant-a/repo-a.git", "pat-secret", "request-1", gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestRoutePATDeniesBeforeStorageForInvalidOrCrossTenantIdentity(t *testing.T
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			router := Router{Authenticator: test.auth}
-			if _, err := router.RoutePAT(context.Background(), "tenant-a/repo-a.git", "secret", "request-1", gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC); err == nil {
+			if _, err := router.RoutePAT(t.Context(), "tenant-a/repo-a.git", "secret", "request-1", gitv1.GitTransport_GIT_TRANSPORT_SMART_HTTP_RPC); err == nil {
 				t.Fatal("RoutePAT succeeded for a denied credential")
 			}
 		})

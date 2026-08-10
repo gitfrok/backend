@@ -30,7 +30,7 @@ func TestImportRefsForwardsStorageMeasuredBytes(t *testing.T) {
 		Refs:          []*gitv1.RefUpdate{{Ref: "refs/heads/main", Revision: "abc123"}},
 		ImportedBytes: 5 * 1024 * 1024,
 	}}
-	result, err := NewGitImporter(storage).ImportRefs(context.Background(), app.ImportRefsCommand{
+	result, err := NewGitImporter(storage).ImportRefs(t.Context(), app.ImportRefsCommand{
 		TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", RequestID: "req-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceToken: "secret-token",
 	})
@@ -50,7 +50,7 @@ func TestImportRefsWithoutBytesChargesNothing(t *testing.T) {
 	storage := &stubStorage{response: &gitv1.ImportRefsResponse{
 		Refs: []*gitv1.RefUpdate{{Ref: "refs/heads/main", Revision: "abc123"}},
 	}}
-	result, err := NewGitImporter(storage).ImportRefs(context.Background(), app.ImportRefsCommand{
+	result, err := NewGitImporter(storage).ImportRefs(t.Context(), app.ImportRefsCommand{
 		TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", RequestID: "req-1",
 		SourceURL: "https://github.com/acme/widgets.git",
 	})
@@ -66,7 +66,7 @@ func TestImportRefsWithoutBytesChargesNothing(t *testing.T) {
 // verified context the decision is made on (SPEC-0011 AC22).
 func TestImportRefsKeepsTheTokenOutOfTheContext(t *testing.T) {
 	storage := &stubStorage{response: &gitv1.ImportRefsResponse{}}
-	if _, err := NewGitImporter(storage).ImportRefs(context.Background(), app.ImportRefsCommand{
+	if _, err := NewGitImporter(storage).ImportRefs(t.Context(), app.ImportRefsCommand{
 		TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", RequestID: "req-1",
 		ActorRoles: []string{"maintainer"},
 		SourceURL:  "https://github.com/acme/widgets.git", SourceToken: "secret-token",

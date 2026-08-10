@@ -60,7 +60,7 @@ func store(t *testing.T) (*auditpg.Store, context.Context) {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set — needs a Postgres with the T-0006 migration applied")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	t.Cleanup(cancel)
 	pool, err := db.Open(ctx, dsn)
 	if err != nil {
@@ -79,7 +79,7 @@ func superuser(t *testing.T) *pgxpool.Pool {
 	if dsn == "" {
 		t.Skip("TEST_SUPERUSER_DATABASE_URL not set — cannot simulate tampering that bypasses the grants")
 	}
-	p, err := pgxpool.New(context.Background(), dsn)
+	p, err := pgxpool.New(t.Context(), dsn)
 	if err != nil {
 		t.Fatalf("superuser pool: %v", err)
 	}
@@ -90,7 +90,7 @@ func superuser(t *testing.T) *pgxpool.Pool {
 func appendN(t *testing.T, s *auditpg.Store, ctx context.Context, n int) []api.Record {
 	t.Helper()
 	var out []api.Record
-	for i := 0; i < n; i++ {
+	for i := range n {
 		r, err := s.Append(ctx, api.Entry{
 			TenantID:   string(tenantFor(t)),
 			Action:     api.ActionTenantIsolationViolation,
@@ -120,13 +120,13 @@ func appendN(t *testing.T, s *auditpg.Store, ctx context.Context, n int) []api.R
 func withTriggerDisabled(t *testing.T, su *pgxpool.Pool, trigger string, fn func()) {
 	t.Helper()
 	enable := func() {
-		if _, err := su.Exec(context.Background(),
+		if _, err := su.Exec(t.Context(),
 			fmt.Sprintf(`ALTER TABLE audit.entries ENABLE TRIGGER %s`, trigger)); err != nil {
 			t.Fatalf("re-enable %s: %v", trigger, err)
 		}
 	}
 	enable() // repair anything a previous run left behind
-	if _, err := su.Exec(context.Background(),
+	if _, err := su.Exec(t.Context(),
 		fmt.Sprintf(`ALTER TABLE audit.entries DISABLE TRIGGER %s`, trigger)); err != nil {
 		t.Fatalf("disable %s: %v", trigger, err)
 	}
@@ -140,23 +140,23 @@ func TestAC1_NoUpdateOrDeletePathExists(t *testing.T) {
 	recs := appendN(t, s, ctx, 1)
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
-	app, err := pgxpool.New(context.Background(), dsn)
+	app, err := pgxpool.New(t.Context(), dsn)
 	if err != nil {
 		t.Fatalf("app pool: %v", err)
 	}
 	defer app.Close()
 
 	scoped := func(sql string, args ...any) error {
-		tx, err := app.Begin(context.Background())
+		tx, err := app.Begin(t.Context())
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback(context.Background()) }()
-		if _, err := tx.Exec(context.Background(),
+		defer func() { _ = tx.Rollback(t.Context()) }()
+		if _, err := tx.Exec(t.Context(),
 			"SET LOCAL app.tenant_id = '"+string(tenantFor(t))+"'"); err != nil {
 			return err
 		}
-		_, err = tx.Exec(context.Background(), sql, args...)
+		_, err = tx.Exec(t.Context(), sql, args...)
 		return err
 	}
 
@@ -199,7 +199,7 @@ func TestAC2_TamperedRecordIsDetected(t *testing.T) {
 	// wrong one silently matches zero rows, and a row-level trigger that never fires looks exactly
 	// like a trigger that does not work.
 	su := superuser(t)
-	if _, err := su.Exec(context.Background(),
+	if _, err := su.Exec(t.Context(),
 		`UPDATE audit.entries SET resource = 'covered-up'
 		  WHERE tenant_id = $1 AND tenant_seq = $2`, string(tenantFor(t)), recs[1].Seq); err == nil {
 		t.Fatal("expected the append-only trigger to reject even a superuser UPDATE")
@@ -209,7 +209,7 @@ func TestAC2_TamperedRecordIsDetected(t *testing.T) {
 	// would: drop the guard first. That this takes DDL is itself part of the defence, and the chain
 	// must still catch what happens afterwards.
 	withTriggerDisabled(t, su, "no_update", func() {
-		if _, err := su.Exec(context.Background(),
+		if _, err := su.Exec(t.Context(),
 			`UPDATE audit.entries SET resource = 'covered-up'
 			  WHERE tenant_id = $1 AND tenant_seq = $2`, string(tenantFor(t)), recs[1].Seq); err != nil {
 			t.Fatalf("tamper: %v", err)
@@ -239,7 +239,7 @@ func TestAC2_DeletedRecordIsDetected(t *testing.T) {
 
 	su := superuser(t)
 	withTriggerDisabled(t, su, "no_delete", func() {
-		if _, err := su.Exec(context.Background(),
+		if _, err := su.Exec(t.Context(),
 			`DELETE FROM audit.entries WHERE tenant_id = $1 AND tenant_seq = $2`,
 			string(tenantFor(t)), recs[1].Seq); err != nil {
 			t.Fatalf("delete: %v", err)
@@ -265,25 +265,25 @@ func TestSealingHelperCannotRewriteAnExistingHash(t *testing.T) {
 	recs := appendN(t, s, ctx, 1)
 
 	dsn := os.Getenv("TEST_DATABASE_URL")
-	app, err := pgxpool.New(context.Background(), dsn)
+	app, err := pgxpool.New(t.Context(), dsn)
 	if err != nil {
 		t.Fatalf("app pool: %v", err)
 	}
 	defer app.Close()
 
-	tx, err := app.Begin(context.Background())
+	tx, err := app.Begin(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(context.Background(), "SET LOCAL app.tenant_id = '"+string(tenantFor(t))+"'"); err != nil {
+	defer func() { _ = tx.Rollback(t.Context()) }()
+	if _, err := tx.Exec(t.Context(), "SET LOCAL app.tenant_id = '"+string(tenantFor(t))+"'"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(context.Background(),
+	if _, err := tx.Exec(t.Context(),
 		`SELECT audit.set_entry_hash($1, $2)`, recs[0].Seq, "0000000000000000"); err != nil {
 		t.Fatalf("call: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -301,7 +301,7 @@ func TestSealingHelperCannotRewriteAnExistingHash(t *testing.T) {
 func TestAC4_AuditIsASeparateStore(t *testing.T) {
 	su := superuser(t)
 	var schema string
-	err := su.QueryRow(context.Background(),
+	err := su.QueryRow(t.Context(),
 		`SELECT table_schema FROM information_schema.tables WHERE table_name = 'entries' AND table_schema = 'audit'`,
 	).Scan(&schema)
 	if err != nil {
@@ -313,7 +313,7 @@ func TestAC4_AuditIsASeparateStore(t *testing.T) {
 
 	// And nothing else shares it: a telemetry or application table appearing here would mean the
 	// trail inherits that table's retention and access rules.
-	rows, err := su.Query(context.Background(),
+	rows, err := su.Query(t.Context(),
 		`SELECT table_name FROM information_schema.tables WHERE table_schema = 'audit'`)
 	if err != nil {
 		t.Fatal(err)
@@ -340,7 +340,7 @@ func TestTrailIsTenantScoped(t *testing.T) {
 	s, ctx := store(t)
 	appendN(t, s, ctx, 2)
 
-	other := tenancy.WithTenant(context.Background(), tenancy.ID("tenant-audit-other"))
+	other := tenancy.WithTenant(t.Context(), tenancy.ID("tenant-audit-other"))
 	res, err := s.Verify(other)
 	if err != nil {
 		t.Fatalf("verify as another tenant: %v", err)

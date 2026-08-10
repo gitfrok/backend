@@ -18,7 +18,7 @@ func TestServe_AnswersHealthAndStopsOnContextCancel(t *testing.T) {
 	}
 	defer listener.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- Serve(ctx, listener) }()
 

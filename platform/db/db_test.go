@@ -42,7 +42,7 @@ func dsn(t *testing.T) string {
 
 func openPool(t *testing.T) (*db.Pool, context.Context) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	t.Cleanup(cancel)
 	pool, err := db.Open(ctx, dsn(t))
 	if err != nil {
@@ -71,7 +71,7 @@ func seed(t *testing.T, pool *db.Pool, ctx context.Context) {
 	}
 	t.Cleanup(func() {
 		for _, id := range []tenancy.ID{tenantA, tenantB} {
-			tctx := tenancy.WithTenant(context.Background(), id)
+			tctx := tenancy.WithTenant(t.Context(), id)
 			_ = pool.InTx(tctx, func(ctx context.Context, tx pgx.Tx) error {
 				_, err := tx.Exec(ctx, `DELETE FROM tenant.tenants WHERE id = $1`, string(id))
 				return err
@@ -236,7 +236,7 @@ func TestOpenRefusesARoleThatBypassesRLS(t *testing.T) {
 	if os.Getenv("TEST_SUPERUSER_DATABASE_URL") == "" {
 		t.Skip("TEST_SUPERUSER_DATABASE_URL not set — cannot verify the BYPASSRLS guard without a superuser DSN")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	pool, err := db.Open(ctx, os.Getenv("TEST_SUPERUSER_DATABASE_URL"))
 	if err == nil {

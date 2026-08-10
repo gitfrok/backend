@@ -83,7 +83,7 @@ func TestUploadPackStreamsFetchThroughRPC(t *testing.T) {
 	})
 	defer closeClient()
 
-	stream, err := client.UploadPack(context.Background())
+	stream, err := client.UploadPack(t.Context())
 	if err != nil {
 		t.Fatalf("UploadPack(): %v", err)
 	}
@@ -142,7 +142,7 @@ func TestUploadPackWrongTenantIsUnavailableAndNeverStartsGit(t *testing.T) {
 	})
 	defer closeClient()
 
-	stream, err := client.UploadPack(context.Background())
+	stream, err := client.UploadPack(t.Context())
 	if err != nil {
 		t.Fatalf("UploadPack(): %v", err)
 	}
@@ -176,7 +176,7 @@ func TestPreparePassesVerifiedActorRolesToPDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = server.prepare(context.Background(), &gitv1.OperationContext{
+	_, err = server.prepare(t.Context(), &gitv1.OperationContext{
 		TenantId: tenantID, RepositoryId: repositoryID, ActorId: "actor-a", RequestId: "request-1", ActorRoles: []string{"test-a", "test-b"}, Transport: gitv1.GitTransport_GIT_TRANSPORT_SSH,
 	}, "repo.read")
 	if err != nil {
@@ -219,7 +219,7 @@ func TestReceivePackPublishesRefUpdated(t *testing.T) {
 	client, closeClient := newClient(t, root, allowPDP{}, events)
 	defer closeClient()
 
-	stream, err := client.ReceivePack(context.Background())
+	stream, err := client.ReceivePack(t.Context())
 	if err != nil {
 		t.Fatalf("ReceivePack(): %v", err)
 	}
@@ -444,7 +444,7 @@ func TestReceivePackDeniedOnReadOnlyShardNeverStartsGit(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SeedShard: %v", err)
 	}
-	if err := coord.(testCoordinator).MarkDegraded(context.Background(), tenantID, repositoryID); err != nil {
+	if err := coord.(testCoordinator).MarkDegraded(t.Context(), tenantID, repositoryID); err != nil {
 		t.Fatalf("MarkDegraded: %v", err)
 	}
 
@@ -461,7 +461,7 @@ func TestReceivePackDeniedOnReadOnlyShardNeverStartsGit(t *testing.T) {
 	})
 	defer closeClient()
 
-	stream, err := client.ReceivePack(context.Background())
+	stream, err := client.ReceivePack(t.Context())
 	if err != nil {
 		t.Fatalf("ReceivePack(): %v", err)
 	}
@@ -525,7 +525,7 @@ func TestReceivePackQuorumWithholdsAckWhenSyncUnreachable(t *testing.T) {
 	})
 	defer closeClient()
 
-	stream, err := client.ReceivePack(context.Background())
+	stream, err := client.ReceivePack(t.Context())
 	if err != nil {
 		t.Fatalf("ReceivePack(): %v", err)
 	}

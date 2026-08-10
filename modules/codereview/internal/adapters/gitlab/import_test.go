@@ -86,7 +86,7 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://gitlab.com/group/widgets.git", SourceSystem: "gitlab", SourceInstance: "gitlab.com",
 	})
@@ -97,7 +97,7 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 		t.Fatalf("counts = %v", result.Counts)
 	}
 
-	stored, err := records.ListImport(context.Background(), "import-1")
+	stored, err := records.ListImport(t.Context(), "import-1")
 	if err != nil || len(stored) != 1 {
 		t.Fatalf("stored = %v err = %v", stored, err)
 	}
@@ -140,13 +140,13 @@ func TestImportHistoryDegradesAnchors(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	if _, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	if _, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://gitlab.com/group/widgets.git", SourceSystem: "gitlab", SourceInstance: "gitlab.com",
 	}); err != nil {
 		t.Fatalf("ImportHistory: %v", err)
 	}
-	stored, _ := records.ListImport(context.Background(), "import-1")
+	stored, _ := records.ListImport(t.Context(), "import-1")
 	threads := stored[0].Threads
 	// No imported anchor claims a diff position: this import never resolved the
 	// declared positions against the refs it imported, and GitLab echoes a note's
@@ -180,7 +180,7 @@ func TestImportHistoryRateLimitStalls(t *testing.T) {
 	client := New(newMemoryRecords(), server.Client())
 	client.base = server.URL
 
-	_, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	_, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://gitlab.com/group/widgets.git", SourceSystem: "gitlab", SourceInstance: "gitlab.com",
 	})
@@ -248,7 +248,7 @@ func TestImportHistoryFollowsPages(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://gitlab.com/group/widgets.git", SourceSystem: "gitlab", SourceInstance: "gitlab.com",
 	})
@@ -258,7 +258,7 @@ func TestImportHistoryFollowsPages(t *testing.T) {
 	if result.Counts["merge_requests"] != int64(pageSize+1) {
 		t.Fatalf("merge_requests = %d, want %d", result.Counts["merge_requests"], pageSize+1)
 	}
-	stored, _ := records.ListImport(context.Background(), "import-1")
+	stored, _ := records.ListImport(t.Context(), "import-1")
 	if len(stored) != pageSize+1 {
 		t.Fatalf("stored = %d records, want %d", len(stored), pageSize+1)
 	}

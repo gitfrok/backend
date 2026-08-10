@@ -49,18 +49,18 @@ func TestLifecycleResponsesExposeOnlyMetadata(t *testing.T) {
 	revoked := now.Add(2 * time.Hour)
 	s := NewServer(&fakeAuthenticator{pat: api.PAT{ID: "pat-1", Label: "ci", Scopes: []string{"repo.read"}, CreatedAt: now, ExpiresAt: &expires, RevokedAt: &revoked}, token: "gfp_secret"})
 
-	issue, err := s.IssuePAT(context.Background(), &identityv1.IssuePATRequest{ExpiresAt: timestamppb.New(expires)})
+	issue, err := s.IssuePAT(t.Context(), &identityv1.IssuePATRequest{ExpiresAt: timestamppb.New(expires)})
 	if err != nil || issue.GetPlaintextToken() != "gfp_secret" {
 		t.Fatalf("issue = %#v, %v", issue, err)
 	}
-	listed, err := s.ListPATs(context.Background(), &identityv1.ListPATsRequest{})
+	listed, err := s.ListPATs(t.Context(), &identityv1.ListPATsRequest{})
 	if err != nil || len(listed.GetPats()) != 1 {
 		t.Fatalf("list = %#v, %v", listed, err)
 	}
 	if got := listed.GetPats()[0]; got.GetCreatedAt().AsTime() != now || got.GetExpiresAt().AsTime() != expires || got.GetRevokedAt().AsTime() != revoked {
 		t.Fatalf("metadata = %#v", got)
 	}
-	revocation, err := s.RevokePAT(context.Background(), &identityv1.RevokePATRequest{})
+	revocation, err := s.RevokePAT(t.Context(), &identityv1.RevokePATRequest{})
 	if err != nil || revocation.GetPat().GetPatId() != "pat-1" {
 		t.Fatalf("revoke = %#v, %v", revocation, err)
 	}
@@ -69,11 +69,11 @@ func TestLifecycleResponsesExposeOnlyMetadata(t *testing.T) {
 // SPEC-0016 coarse denial means failed credential checks do not enumerate why.
 func TestAuthenticationFailureReturnsEmptyPrincipal(t *testing.T) {
 	s := NewServer(&fakeAuthenticator{})
-	pat, err := s.AuthenticatePAT(context.Background(), &identityv1.AuthenticatePATRequest{PersonalAccessToken: "invalid"})
+	pat, err := s.AuthenticatePAT(t.Context(), &identityv1.AuthenticatePATRequest{PersonalAccessToken: "invalid"})
 	if err != nil || pat.GetPrincipal() != nil {
 		t.Fatalf("PAT response = %#v, %v", pat, err)
 	}
-	ssh, err := s.AuthenticateSSHKey(context.Background(), &identityv1.AuthenticateSSHKeyRequest{VerifiedPublicKey: []byte("unknown")})
+	ssh, err := s.AuthenticateSSHKey(t.Context(), &identityv1.AuthenticateSSHKeyRequest{VerifiedPublicKey: []byte("unknown")})
 	if err != nil || ssh.GetPrincipal() != nil {
 		t.Fatalf("SSH response = %#v, %v", ssh, err)
 	}
@@ -85,7 +85,7 @@ func TestAuthenticateSSHKeyForwardsVerifierKeyID(t *testing.T) {
 	auth := &fakeAuthenticator{principal: api.Principal{TenantID: "tenant-a", ActorID: "actor-a"}, ok: true}
 	s := NewServer(auth)
 
-	resp, err := s.AuthenticateSSHKey(context.Background(), &identityv1.AuthenticateSSHKeyRequest{
+	resp, err := s.AuthenticateSSHKey(t.Context(), &identityv1.AuthenticateSSHKeyRequest{
 		VerifiedPublicKey: []byte("ssh-ed25519 AAA"),
 		VerifierKeyId:     "key-2026-08",
 	})
@@ -99,7 +99,7 @@ func TestAuthenticateSSHKeyForwardsVerifierKeyID(t *testing.T) {
 
 func TestLifecycleErrorIsCoarsePermissionDenied(t *testing.T) {
 	s := NewServer(&fakeAuthenticator{err: errors.New("token does not exist")})
-	_, err := s.RevokePAT(context.Background(), &identityv1.RevokePATRequest{})
+	_, err := s.RevokePAT(t.Context(), &identityv1.RevokePATRequest{})
 	if status.Code(err) != codes.PermissionDenied || status.Convert(err).Message() != "credential lifecycle denied" {
 		t.Fatalf("error = %v", err)
 	}

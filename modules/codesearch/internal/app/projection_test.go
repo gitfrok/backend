@@ -58,11 +58,11 @@ func TestIndexesARepositoryOnCreation(t *testing.T) {
 	proj := app.NewProjection(reader)
 	proj.Register(b)
 
-	if err := b.Publish(context.Background(), created("t-1", "repo-1")); err != nil {
+	if err := b.Publish(t.Context(), created("t-1", "repo-1")); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 
-	got, err := proj.Lookup(context.Background(), "t-1", "repo-1")
+	got, err := proj.Lookup(t.Context(), "t-1", "repo-1")
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestTracksRefUpdates(t *testing.T) {
 	proj := app.NewProjection(newReader(repoapi.RepositoryView{TenantID: "t-1", RepoID: "repo-1", Name: "infra"}))
 	proj.Register(b)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := b.Publish(ctx, created("t-1", "repo-1")); err != nil {
 		t.Fatalf("Publish created: %v", err)
 	}
@@ -110,11 +110,11 @@ func TestLookupIsTenantScoped(t *testing.T) {
 	proj := app.NewProjection(newReader(repoapi.RepositoryView{TenantID: "t-1", RepoID: "repo-1", Name: "infra"}))
 	proj.Register(b)
 
-	if err := b.Publish(context.Background(), created("t-1", "repo-1")); err != nil {
+	if err := b.Publish(t.Context(), created("t-1", "repo-1")); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 
-	if _, err := proj.Lookup(context.Background(), "t-2", "repo-1"); err == nil {
+	if _, err := proj.Lookup(t.Context(), "t-2", "repo-1"); err == nil {
 		t.Error("want another tenant's repository to be invisible")
 	}
 }
@@ -126,14 +126,14 @@ func TestRefUpdateForAnUnknownRepositoryIsIgnored(t *testing.T) {
 	proj := app.NewProjection(newReader())
 	proj.Register(b)
 
-	err := b.Publish(context.Background(), repoapi.RefUpdated{
+	err := b.Publish(t.Context(), repoapi.RefUpdated{
 		EventID: "01ARYZ6S41000000000000000C", TenantID: "t-1", RepoID: "ghost",
 		Ref: "refs/heads/main", NewSha: "abc123", OccurredAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatalf("an out-of-order event must not fail the publisher: %v", err)
 	}
-	if _, err := proj.Lookup(context.Background(), "t-1", "ghost"); err == nil {
+	if _, err := proj.Lookup(t.Context(), "t-1", "ghost"); err == nil {
 		t.Error("want no entry created for an unknown repository")
 	}
 }
@@ -146,7 +146,7 @@ func TestIndexingFailureSurfaces(t *testing.T) {
 	reader.err = errors.New("repository unavailable")
 	app.NewProjection(reader).Register(b)
 
-	if err := b.Publish(context.Background(), created("t-1", "repo-1")); err == nil {
+	if err := b.Publish(t.Context(), created("t-1", "repo-1")); err == nil {
 		t.Error("want the api failure surfaced to the publisher")
 	}
 }

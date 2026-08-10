@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
@@ -31,7 +30,7 @@ func seedImportedHistory(t *testing.T, svc *ImportService, store *stubImportStor
 			},
 		})
 	}
-	if err := svc.records.PutImport(context.Background(), importID, records); err != nil {
+	if err := svc.records.PutImport(t.Context(), importID, records); err != nil {
 		t.Fatalf("PutImport: %v", err)
 	}
 }
@@ -54,7 +53,7 @@ func TestListImportedHistoryPages(t *testing.T) {
 		if pages > 5 {
 			t.Fatal("paging did not terminate")
 		}
-		page, err := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+		page, err := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 			Context: readContext("tenant-a"), ImportID: "import-1", PageSize: 2, PageToken: token,
 		})
 		if err != nil {
@@ -91,7 +90,7 @@ func TestListImportedHistoryCarriesProvenance(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, &stubGitImporter{}, &stubHistoryImporter{})
 	seedImportedHistory(t, svc, store, "import-1", "tenant-a", 1)
 
-	page, err := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+	page, err := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 		Context: readContext("tenant-a"), ImportID: "import-1",
 	})
 	if err != nil {
@@ -120,13 +119,13 @@ func TestListImportedHistoryOfRevokedImportIsEmpty(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, &stubGitImporter{}, &stubHistoryImporter{})
 	seedImportedHistory(t, svc, store, "import-1", "tenant-a", 3)
 
-	if _, err := svc.Revoke(context.Background(), api.RevokeImportRequest{
+	if _, err := svc.Revoke(t.Context(), api.RevokeImportRequest{
 		Context: readContext("tenant-a"), ImportID: "import-1",
 	}); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
-	page, err := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+	page, err := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 		Context: readContext("tenant-a"), ImportID: "import-1",
 	})
 	if err != nil {
@@ -144,13 +143,13 @@ func TestListImportedHistoryDeniesAnotherTenant(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, &stubGitImporter{}, &stubHistoryImporter{})
 	seedImportedHistory(t, svc, store, "import-1", "tenant-a", 3)
 
-	_, err := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+	_, err := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 		Context: readContext("tenant-b"), ImportID: "import-1",
 	})
 	if err == nil {
 		t.Fatal("a cross-tenant read was allowed")
 	}
-	_, missing := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+	_, missing := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 		Context: readContext("tenant-b"), ImportID: "import-nonexistent",
 	})
 	if err.Error() != missing.Error() {
@@ -165,7 +164,7 @@ func TestListImportedHistoryClampsPageSize(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, &stubGitImporter{}, &stubHistoryImporter{})
 	seedImportedHistory(t, svc, store, "import-1", "tenant-a", api.MaxImportedHistoryPageSize+10)
 
-	page, err := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+	page, err := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 		Context: readContext("tenant-a"), ImportID: "import-1", PageSize: 10_000,
 	})
 	if err != nil {
@@ -178,7 +177,7 @@ func TestListImportedHistoryClampsPageSize(t *testing.T) {
 		t.Fatal("a clamped page claimed to be the last one")
 	}
 
-	defaulted, err := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+	defaulted, err := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 		Context: readContext("tenant-a"), ImportID: "import-1",
 	})
 	if err != nil {
@@ -197,7 +196,7 @@ func TestListImportedHistoryUnknownTokenReturnsNothing(t *testing.T) {
 	svc, _, _, _ := newTestImportService(store, &stubGitImporter{}, &stubHistoryImporter{})
 	seedImportedHistory(t, svc, store, "import-1", "tenant-a", 3)
 
-	page, err := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+	page, err := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 		Context: readContext("tenant-a"), ImportID: "import-1", PageToken: "mr-zz",
 	})
 	if err != nil {
@@ -219,7 +218,7 @@ func TestListImportedHistoryRequiresVerifiedContext(t *testing.T) {
 		"no actor":     {Context: api.Context{TenantID: "tenant-a", RepositoryID: "repo-a"}, ImportID: "import-1"},
 		"no import id": {Context: readContext("tenant-a")},
 	} {
-		if _, err := svc.ListImportedHistory(context.Background(), req); err == nil {
+		if _, err := svc.ListImportedHistory(t.Context(), req); err == nil {
 			t.Fatalf("%s was allowed", name)
 		}
 	}

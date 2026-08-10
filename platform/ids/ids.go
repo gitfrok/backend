@@ -95,7 +95,7 @@ func encode(millis uint64, entropy [entropyBytes]byte) string {
 // where the missing high bits read as zero.
 func extract5(raw [16]byte, bitPos int) byte {
 	var v byte
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		p := bitPos + i
 		if p < 0 {
 			v <<= 1

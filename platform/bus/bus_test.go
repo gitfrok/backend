@@ -42,7 +42,7 @@ func TestPublishDeliversToEverySubscriber(t *testing.T) {
 		return nil
 	})
 
-	if err := b.Publish(context.Background(), ev(1)); err != nil {
+	if err := b.Publish(t.Context(), ev(1)); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestPublishOnlyReachesMatchingName(t *testing.T) {
 	b.Subscribe("test.Stub", func(context.Context, bus.Event) error { stubSeen++; return nil })
 	b.Subscribe("test.Other", func(context.Context, bus.Event) error { otherSeen++; return nil })
 
-	if err := b.Publish(context.Background(), ev(1)); err != nil {
+	if err := b.Publish(t.Context(), ev(1)); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	if stubSeen != 1 || otherSeen != 0 {
@@ -72,7 +72,7 @@ func TestPublishOnlyReachesMatchingName(t *testing.T) {
 // TestPublishWithoutSubscribersIsNoOp: choreography means a producer never knows or cares whether
 // anyone is listening (invariant 17). No subscriber is not an error.
 func TestPublishWithoutSubscribersIsNoOp(t *testing.T) {
-	if err := bus.NewInProcess().Publish(context.Background(), ev(1)); err != nil {
+	if err := bus.NewInProcess().Publish(t.Context(), ev(1)); err != nil {
 		t.Errorf("publish with no subscribers should succeed, got %v", err)
 	}
 }
@@ -86,7 +86,7 @@ func TestEveryHandlerRunsEvenWhenOneFails(t *testing.T) {
 	b.Subscribe("test.Stub", func(context.Context, bus.Event) error { ran++; return boom })
 	b.Subscribe("test.Stub", func(context.Context, bus.Event) error { ran++; return nil })
 
-	err := b.Publish(context.Background(), ev(1))
+	err := b.Publish(t.Context(), ev(1))
 	if ran != 2 {
 		t.Errorf("every handler must run, got %d of 2", ran)
 	}
@@ -102,7 +102,7 @@ func TestPublishRejectsUntenantedEvent(t *testing.T) {
 	var seen int
 	b.Subscribe("test.Stub", func(context.Context, bus.Event) error { seen++; return nil })
 
-	err := b.Publish(context.Background(), stubEvent{tenant: ""})
+	err := b.Publish(t.Context(), stubEvent{tenant: ""})
 	if !errors.Is(err, bus.ErrTenantRequired) {
 		t.Errorf("want ErrTenantRequired, got %v", err)
 	}
@@ -113,7 +113,7 @@ func TestPublishRejectsUntenantedEvent(t *testing.T) {
 
 // TestPublishRejectsNilEvent: a nil event is a programmer error at a call site, not a delivery.
 func TestPublishRejectsNilEvent(t *testing.T) {
-	if err := bus.NewInProcess().Publish(context.Background(), nil); err == nil {
+	if err := bus.NewInProcess().Publish(t.Context(), nil); err == nil {
 		t.Error("want an error publishing a nil event")
 	}
 }
@@ -128,7 +128,7 @@ func TestPublishPropagatesContext(t *testing.T) {
 		got = ctx.Value(ctxKey{})
 		return nil
 	})
-	ctx := context.WithValue(context.Background(), ctxKey{}, "carried")
+	ctx := context.WithValue(t.Context(), ctxKey{}, "carried")
 	if err := b.Publish(ctx, ev(1)); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestSubscribeTypedGivesTheHandlerAConcreteType(t *testing.T) {
 		return nil
 	})
 
-	if err := b.Publish(context.Background(), ev(42)); err != nil {
+	if err := b.Publish(t.Context(), ev(42)); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	if got.seq != 42 {
@@ -163,7 +163,7 @@ func TestSubscribeTypedRejectsAForeignPayload(t *testing.T) {
 
 	// otherEvent reports a different name; publishing it under the stub name is only reachable
 	// through a name collision, which is exactly what this guards.
-	err := b.Publish(context.Background(), renamed{otherEvent{tenant: "t-1"}})
+	err := b.Publish(t.Context(), renamed{otherEvent{tenant: "t-1"}})
 	if err == nil {
 		t.Error("want an error when a typed handler receives a foreign payload")
 	}
@@ -229,13 +229,11 @@ func TestConcurrentUseIsSafe(t *testing.T) {
 	})
 
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(2)
-		go func() { defer wg.Done(); _ = b.Publish(context.Background(), ev(1)) }()
-		go func() {
-			defer wg.Done()
+	for range 50 {
+		wg.Go(func() { _ = b.Publish(t.Context(), ev(1)) })
+		wg.Go(func() {
 			b.Subscribe("test.Late", func(context.Context, bus.Event) error { return nil })
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -257,7 +255,7 @@ func TestHandlerMayPublish(t *testing.T) {
 	b.Subscribe("test.Other", func(context.Context, bus.Event) error { chained = true; return nil })
 
 	done := make(chan error, 1)
-	go func() { done <- b.Publish(context.Background(), ev(1)) }()
+	go func() { done <- b.Publish(t.Context(), ev(1)) }()
 	select {
 	case err := <-done:
 		if err != nil {

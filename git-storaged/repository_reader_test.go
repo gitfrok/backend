@@ -44,19 +44,19 @@ func TestRepositoryReaderPaginatesTreeAndStreamsFileAndDiff(t *testing.T) {
 	client, closeClient := newReaderClient(t, root, allowPDP{})
 	defer closeClient()
 	ctx := readContext(tenantID, repositoryID)
-	first, err := client.GetTree(context.Background(), &repositoryv1.GetTreeRequest{Context: ctx, Revision: head, PageSize: 1})
+	first, err := client.GetTree(t.Context(), &repositoryv1.GetTreeRequest{Context: ctx, Revision: head, PageSize: 1})
 	if err != nil || len(first.GetEntries()) != 1 || first.GetNextPageToken() == "" {
 		t.Fatalf("first tree page = %#v, %v", first, err)
 	}
-	second, err := client.GetTree(context.Background(), &repositoryv1.GetTreeRequest{Context: ctx, Revision: head, PageSize: 1, PageToken: first.GetNextPageToken()})
+	second, err := client.GetTree(t.Context(), &repositoryv1.GetTreeRequest{Context: ctx, Revision: head, PageSize: 1, PageToken: first.GetNextPageToken()})
 	if err != nil || len(second.GetEntries()) != 1 {
 		t.Fatalf("second tree page = %#v, %v", second, err)
 	}
-	if _, err := client.GetTree(context.Background(), &repositoryv1.GetTreeRequest{Context: ctx, Revision: head, PageToken: "forged"}); status.Code(err) != codes.NotFound {
+	if _, err := client.GetTree(t.Context(), &repositoryv1.GetTreeRequest{Context: ctx, Revision: head, PageToken: "forged"}); status.Code(err) != codes.NotFound {
 		t.Fatalf("forged token error = %v", err)
 	}
 
-	file, err := client.GetFile(context.Background(), &repositoryv1.GetFileRequest{Context: ctx, Revision: head, Path: "LARGE.bin"})
+	file, err := client.GetFile(t.Context(), &repositoryv1.GetFileRequest{Context: ctx, Revision: head, Path: "LARGE.bin"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestRepositoryReaderPaginatesTreeAndStreamsFileAndDiff(t *testing.T) {
 		t.Fatalf("file metadata count=%d bytes=%d", metadataCount, content.Len())
 	}
 
-	diff, err := client.GetDiff(context.Background(), &repositoryv1.GetDiffRequest{Context: ctx, BaseRevision: base, HeadRevision: head})
+	diff, err := client.GetDiff(t.Context(), &repositoryv1.GetDiffRequest{Context: ctx, BaseRevision: base, HeadRevision: head})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestRepositoryReaderWrongTenantSendsNoContent(t *testing.T) {
 		return exec.Command("false")
 	}})
 	defer closeClient()
-	_, err := client.GetTree(context.Background(), &repositoryv1.GetTreeRequest{Context: readContext("tenant-b", repositoryID), Revision: head})
+	_, err := client.GetTree(t.Context(), &repositoryv1.GetTreeRequest{Context: readContext("tenant-b", repositoryID), Revision: head})
 	if status.Code(err) != codes.NotFound || called {
 		t.Fatalf("wrong-tenant error=%v command-started=%t", err, called)
 	}
@@ -134,7 +134,7 @@ func TestRepositoryReaderPDPDenialSendsNoFileContent(t *testing.T) {
 	}})
 	defer closeClient()
 
-	stream, err := client.GetFile(context.Background(), &repositoryv1.GetFileRequest{Context: readContext(tenantID, repositoryID), Revision: head, Path: "README.md"})
+	stream, err := client.GetFile(t.Context(), &repositoryv1.GetFileRequest{Context: readContext(tenantID, repositoryID), Revision: head, Path: "README.md"})
 	if err != nil {
 		t.Fatal(err)
 	}

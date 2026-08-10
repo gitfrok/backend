@@ -2,7 +2,6 @@ package objectstore_test
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -68,7 +67,7 @@ func digestOf(content []byte) string {
 // returns the same bytes.
 func TestLiveSeaweedFSRoundTrip(t *testing.T) {
 	store, _ := liveStore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	payload := []byte("a large object that really travelled over the wire")
 	digest := digestOf(payload)
@@ -111,7 +110,7 @@ func TestLiveSeaweedFSRoundTrip(t *testing.T) {
 // depends on to decide whether it still owes a fetch.
 func TestLiveSeaweedFSAbsentObject(t *testing.T) {
 	store, _ := liveStore(t)
-	_, err := store.Stat(context.Background(), "lfs/tenant-a/zz/"+digestOf([]byte("never stored")))
+	_, err := store.Stat(t.Context(), "lfs/tenant-a/zz/"+digestOf([]byte("never stored")))
 	if err == nil {
 		t.Fatal("an object that was never stored reported present")
 	}
@@ -128,7 +127,7 @@ func TestLiveSeaweedFSAbsentObject(t *testing.T) {
 // LFS transfer failing in production while every unit test stayed green.
 func TestLiveSeaweedFSHonoursOurPresignedURL(t *testing.T) {
 	store, _ := liveStore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	payload := []byte("bytes fetched with nothing but a presigned URL")
 	digest := digestOf(payload)
@@ -167,7 +166,7 @@ func TestLiveSeaweedFSHonoursOurPresignedURL(t *testing.T) {
 // would pass it whether or not the signature was ever checked.
 func TestLiveSeaweedFSRefusesAnUnsignedRequest(t *testing.T) {
 	store, bucket := liveStore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	payload := []byte("this object is not public")
 	digest := digestOf(payload)
@@ -193,7 +192,7 @@ func TestLiveSeaweedFSRefusesAnUnsignedRequest(t *testing.T) {
 // to the bucket (SPEC-0023 AC4).
 func TestLiveSeaweedFSRefusesATamperedPresignedURL(t *testing.T) {
 	store, _ := liveStore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	first := []byte("the object the credential names")
 	second := []byte("the object it does not")

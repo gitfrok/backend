@@ -27,7 +27,7 @@ func TestExtractionTriggerReport(t *testing.T) {
 		t.Fatalf("LoadGraph: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	defer cancel()
 
 	rep, err := arch.BuildReport(ctx, g, root, arch.DefaultBudgets(), !testing.Short())
@@ -59,7 +59,7 @@ func TestReportCoversEveryModule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadGraph: %v", err)
 	}
-	rep, err := arch.BuildReport(context.Background(), g, root, arch.DefaultBudgets(), false)
+	rep, err := arch.BuildReport(t.Context(), g, root, arch.DefaultBudgets(), false)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestBudgetBreachIsReported(t *testing.T) {
 
 	// codesearch depends on repository, so a fan-out budget of zero must breach.
 	impossible := arch.Budgets{MonolithBuildSeconds: 120, MonolithTestSeconds: 300, ModuleFanOut: 0}
-	rep, err := arch.BuildReport(context.Background(), g, root, impossible, false)
+	rep, err := arch.BuildReport(t.Context(), g, root, impossible, false)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestReportIsSerialisable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadGraph: %v", err)
 	}
-	rep, err := arch.BuildReport(context.Background(), g, root, arch.DefaultBudgets(), false)
+	rep, err := arch.BuildReport(t.Context(), g, root, arch.DefaultBudgets(), false)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
 	}

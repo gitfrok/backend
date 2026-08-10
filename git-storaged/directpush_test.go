@@ -37,7 +37,7 @@ func (p *protectionPDP) Decide(_ context.Context, req policyapi.Request) (policy
 // pushOne runs a full receive-pack exchange and reports git's own outcome.
 func pushOne(t *testing.T, client gitv1.GitStorageClient, tenantID, repositoryID, ref, commit string, pack []byte) string {
 	t.Helper()
-	stream, err := client.ReceivePack(context.Background())
+	stream, err := client.ReceivePack(t.Context())
 	if err != nil {
 		t.Fatalf("ReceivePack(): %v", err)
 	}

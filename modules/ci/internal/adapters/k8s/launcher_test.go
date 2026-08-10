@@ -187,7 +187,7 @@ func TestLaunchRejectsAMutableImageBeforeTouchingTheCluster(t *testing.T) {
 	config := testRunnerConfig()
 	config.Image = "ghcr.io/gitfrok/ci-runner:latest"
 
-	if _, err := NewLauncher(client, "gitfrok-ci").Launch(context.Background(), testJob(), config); err == nil {
+	if _, err := NewLauncher(client, "gitfrok-ci").Launch(t.Context(), testJob(), config); err == nil {
 		t.Fatal("Launch accepted a mutable image reference")
 	}
 	if len(client.created) != 0 {
@@ -197,7 +197,7 @@ func TestLaunchRejectsAMutableImageBeforeTouchingTheCluster(t *testing.T) {
 
 func TestAwaitDeletesTheSandboxAndReportsItsOutcome(t *testing.T) {
 	client := &fakeClient{succeeded: true, summary: "passed"}
-	attempt, err := NewLauncher(client, "gitfrok-ci").Launch(context.Background(), testJob(), testRunnerConfig())
+	attempt, err := NewLauncher(client, "gitfrok-ci").Launch(t.Context(), testJob(), testRunnerConfig())
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestAwaitDeletesTheSandboxAndReportsItsOutcome(t *testing.T) {
 		t.Fatalf("expected 1 Job created, got %d", len(client.created))
 	}
 
-	state, summary, err := attempt.Await(context.Background())
+	state, summary, err := attempt.Await(t.Context())
 	if err != nil {
 		t.Fatalf("Await: %v", err)
 	}
@@ -221,11 +221,11 @@ func TestAwaitDeletesTheSandboxAndReportsItsOutcome(t *testing.T) {
 // attempt fails rather than reporting a clean success.
 func TestAwaitTreatsUnconfirmedCleanupAsFailure(t *testing.T) {
 	client := &fakeClient{succeeded: true, summary: "passed", deleteErr: errors.New("api server unavailable")}
-	attempt, err := NewLauncher(client, "gitfrok-ci").Launch(context.Background(), testJob(), testRunnerConfig())
+	attempt, err := NewLauncher(client, "gitfrok-ci").Launch(t.Context(), testJob(), testRunnerConfig())
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	state, _, err := attempt.Await(context.Background())
+	state, _, err := attempt.Await(t.Context())
 	if err == nil {
 		t.Fatal("Await hid an unconfirmed cleanup")
 	}
@@ -238,7 +238,7 @@ func TestAwaitTreatsUnconfirmedCleanupAsFailure(t *testing.T) {
 // instead of starting a second sandbox for the same attempt.
 func TestJobNameIsDerivedFromTheAttempt(t *testing.T) {
 	client := &fakeClient{succeeded: true}
-	if _, err := NewLauncher(client, "gitfrok-ci").Launch(context.Background(), testJob(), testRunnerConfig()); err != nil {
+	if _, err := NewLauncher(client, "gitfrok-ci").Launch(t.Context(), testJob(), testRunnerConfig()); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	if got, want := client.created[0].Name, "ci-attempt-attempt1"; got != want {

@@ -376,10 +376,8 @@ func (s *Server) exchange(ctx context.Context, op *gitv1.OperationContext, actio
 	}
 
 	var sendWG sync.WaitGroup
-	sendWG.Add(1)
 	var sendErr error
-	go func() {
-		defer sendWG.Done()
+	sendWG.Go(func() {
 		buffer := make([]byte, 32*1024)
 		for {
 			count, readErr := stdout.Read(buffer)
@@ -396,7 +394,7 @@ func (s *Server) exchange(ctx context.Context, op *gitv1.OperationContext, actio
 				return
 			}
 		}
-	}()
+	})
 
 	for {
 		data, closeStream, recvErr := incoming()

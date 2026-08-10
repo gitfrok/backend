@@ -29,7 +29,7 @@ func TestImportPacesEachPhase(t *testing.T) {
 	svc, _, imported, _ := newTestImportService(store, &stubGitImporter{}, &stubHistoryImporter{counts: map[string]int64{"merge_requests": 2}})
 	svc.pacer = pacer
 
-	if _, err := svc.Create(context.Background(), importRequest()); err != nil {
+	if _, err := svc.Create(t.Context(), importRequest()); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	// One for the git phase, one for the history phase.
@@ -51,14 +51,14 @@ func TestImportRefusedByPacerStallsRatherThanFails(t *testing.T) {
 	svc, _, imported, _ := newTestImportService(store, &stubGitImporter{}, &stubHistoryImporter{})
 	svc.pacer = pacer
 
-	_, err := svc.Create(context.Background(), importRequest())
+	_, err := svc.Create(t.Context(), importRequest())
 	if !errors.Is(err, ErrImportStalled) {
 		t.Fatalf("err = %v, want ErrImportStalled", err)
 	}
 	if len(*imported) != 0 {
 		t.Fatalf("HistoryImported events = %d, want 0", len(*imported))
 	}
-	imp, err := store.GetImport(context.Background(), "import-1")
+	imp, err := store.GetImport(t.Context(), "import-1")
 	if err != nil {
 		t.Fatalf("GetImport: %v", err)
 	}
@@ -81,16 +81,16 @@ func TestIntervalPacerSpacesSteps(t *testing.T) {
 	}
 
 	// The first step has nothing to wait for.
-	if err := pacer.Wait(context.Background()); err != nil {
+	if err := pacer.Wait(t.Context()); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
 	// The second, taken immediately, waits the whole interval.
-	if err := pacer.Wait(context.Background()); err != nil {
+	if err := pacer.Wait(t.Context()); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
 	// The third, taken well after the interval, waits not at all.
 	now = now.Add(time.Second)
-	if err := pacer.Wait(context.Background()); err != nil {
+	if err := pacer.Wait(t.Context()); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestIntervalPacerSpacesSteps(t *testing.T) {
 // A cancelled context ends the wait rather than pacing on.
 func TestIntervalPacerHonoursCancellation(t *testing.T) {
 	pacer := NewIntervalPacer(time.Hour)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := pacer.Wait(ctx); err == nil {
 		t.Fatal("Wait ignored a cancelled context")
@@ -112,7 +112,7 @@ func TestIntervalPacerHonoursCancellation(t *testing.T) {
 // An unpaced import service is still a paced one: the zero pacer permits every
 // step, so a build that forgets to configure pacing does not silently block.
 func TestNoPacerPermits(t *testing.T) {
-	if err := (NoPacer{}).Wait(context.Background()); err != nil {
+	if err := (NoPacer{}).Wait(t.Context()); err != nil {
 		t.Fatalf("NoPacer.Wait: %v", err)
 	}
 }
@@ -134,14 +134,12 @@ func TestIntervalPacerSerialisesConcurrentSteps(t *testing.T) {
 
 	const steps = 8
 	var wg sync.WaitGroup
-	wg.Add(steps)
 	for range steps {
-		go func() {
-			defer wg.Done()
-			if err := pacer.Wait(context.Background()); err != nil {
+		wg.Go(func() {
+			if err := pacer.Wait(t.Context()); err != nil {
 				t.Errorf("Wait: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -164,13 +162,13 @@ func TestStalledImportResumesOnRetry(t *testing.T) {
 	svc, _, imported, _ := newTestImportService(store, git, &stubHistoryImporter{counts: map[string]int64{"merge_requests": 1}})
 	svc.pacer = pacer
 
-	if _, err := svc.Create(context.Background(), importRequest()); !errors.Is(err, ErrImportStalled) {
+	if _, err := svc.Create(t.Context(), importRequest()); !errors.Is(err, ErrImportStalled) {
 		t.Fatalf("first Create: err = %v, want ErrImportStalled", err)
 	}
 
 	// The pace clears and the caller retries the same import.
 	pacer.err = nil
-	imp, err := svc.Create(context.Background(), importRequest())
+	imp, err := svc.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -191,10 +189,10 @@ func TestCompletedImportIsNotRerun(t *testing.T) {
 	git := &stubGitImporter{}
 	svc, _, imported, _ := newTestImportService(store, git, &stubHistoryImporter{counts: map[string]int64{"merge_requests": 1}})
 
-	if _, err := svc.Create(context.Background(), importRequest()); err != nil {
+	if _, err := svc.Create(t.Context(), importRequest()); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := svc.Create(context.Background(), importRequest()); err != nil {
+	if _, err := svc.Create(t.Context(), importRequest()); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	if git.calls != 1 || len(*imported) != 1 {

@@ -43,7 +43,7 @@ func mappingFixture(t *testing.T, allow ...string) (*ImportService, api.Import, 
 		&actionPDP{allow: granted}, b)
 	setup.newID = func() string { return "import-1" }
 	setup.now = func() time.Time { return time.Unix(1780000000, 0).UTC() }
-	imp, err := setup.Create(context.Background(), importRequest())
+	imp, err := setup.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -91,7 +91,7 @@ func mapRequest(imp api.Import) api.MapDeclaredActorRequest {
 func TestMapDeclaredActorIsANamedAssertion(t *testing.T) {
 	svc, imp, pdp, mapped := mappingFixture(t, "repository.import.map_actor")
 
-	mapping, err := svc.MapDeclaredActor(context.Background(), mapRequest(imp))
+	mapping, err := svc.MapDeclaredActor(t.Context(), mapRequest(imp))
 	if err != nil {
 		t.Fatalf("MapDeclaredActor: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestMapDeclaredActorIsANamedAssertion(t *testing.T) {
 func TestMapDeclaredActorWithoutTheGrantIsDenied(t *testing.T) {
 	svc, imp, _, mapped := mappingFixture(t, "repository.import.read")
 
-	if _, err := svc.MapDeclaredActor(context.Background(), mapRequest(imp)); !errors.Is(err, ErrImportDenied) {
+	if _, err := svc.MapDeclaredActor(t.Context(), mapRequest(imp)); !errors.Is(err, ErrImportDenied) {
 		t.Fatalf("MapDeclaredActor = %v, want ErrImportDenied", err)
 	}
 	if len(*mapped) != 0 {
@@ -133,10 +133,10 @@ func TestMapDeclaredActorWithoutTheGrantIsDenied(t *testing.T) {
 func TestMappingDoesNotChangeProvenance(t *testing.T) {
 	svc, imp, _, _ := mappingFixture(t, "repository.import.map_actor", "repository.import.read")
 
-	if _, err := svc.MapDeclaredActor(context.Background(), mapRequest(imp)); err != nil {
+	if _, err := svc.MapDeclaredActor(t.Context(), mapRequest(imp)); err != nil {
 		t.Fatalf("MapDeclaredActor: %v", err)
 	}
-	page, err := svc.ListImportedHistory(context.Background(), api.ListImportedHistoryRequest{
+	page, err := svc.ListImportedHistory(t.Context(), api.ListImportedHistoryRequest{
 		Context:  mapRequest(imp).Context,
 		ImportID: imp.ID,
 	})
@@ -160,11 +160,11 @@ func TestMappingDoesNotChangeProvenance(t *testing.T) {
 func TestMappingIsIdempotentAndRefusesAConflict(t *testing.T) {
 	svc, imp, _, mapped := mappingFixture(t, "repository.import.map_actor")
 
-	first, err := svc.MapDeclaredActor(context.Background(), mapRequest(imp))
+	first, err := svc.MapDeclaredActor(t.Context(), mapRequest(imp))
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	again, err := svc.MapDeclaredActor(context.Background(), mapRequest(imp))
+	again, err := svc.MapDeclaredActor(t.Context(), mapRequest(imp))
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestMappingIsIdempotentAndRefusesAConflict(t *testing.T) {
 
 	conflicting := mapRequest(imp)
 	conflicting.MappedActorID = "user-9"
-	if _, err := svc.MapDeclaredActor(context.Background(), conflicting); !errors.Is(err, api.ErrMappingConflict) {
+	if _, err := svc.MapDeclaredActor(t.Context(), conflicting); !errors.Is(err, api.ErrMappingConflict) {
 		t.Fatalf("conflicting assertion = %v, want ErrMappingConflict", err)
 	}
 	if len(*mapped) != 2 {
@@ -187,17 +187,17 @@ func TestMappingIsIdempotentAndRefusesAConflict(t *testing.T) {
 func TestHandleIsScopedToItsSourceInstance(t *testing.T) {
 	svc, imp, _, _ := mappingFixture(t, "repository.import.map_actor", "repository.import.read")
 
-	if _, err := svc.MapDeclaredActor(context.Background(), mapRequest(imp)); err != nil {
+	if _, err := svc.MapDeclaredActor(t.Context(), mapRequest(imp)); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	elsewhere := mapRequest(imp)
 	elsewhere.SourceInstance = "gitlab.example.com"
 	elsewhere.MappedActorID = "user-9"
-	if _, err := svc.MapDeclaredActor(context.Background(), elsewhere); err != nil {
+	if _, err := svc.MapDeclaredActor(t.Context(), elsewhere); err != nil {
 		t.Fatalf("same handle on another instance: %v", err)
 	}
 
-	mappings, err := svc.ListDeclaredActorMappings(context.Background(), mapRequest(imp).Context, imp.ID)
+	mappings, err := svc.ListDeclaredActorMappings(t.Context(), mapRequest(imp).Context, imp.ID)
 	if err != nil {
 		t.Fatalf("ListDeclaredActorMappings: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestMappingDeniesAnotherTenant(t *testing.T) {
 	other := mapRequest(imp)
 	other.Context.TenantID = "tenant-b"
 	other.Context.ActorID = "admin-b"
-	if _, err := svc.MapDeclaredActor(context.Background(), other); !errors.Is(err, ErrImportDenied) {
+	if _, err := svc.MapDeclaredActor(t.Context(), other); !errors.Is(err, ErrImportDenied) {
 		t.Fatalf("cross-tenant assertion = %v, want ErrImportDenied", err)
 	}
 }
@@ -234,7 +234,7 @@ func TestIncompleteAssertionIsRefused(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			req := mapRequest(imp)
 			mutate(&req)
-			if _, err := svc.MapDeclaredActor(context.Background(), req); err == nil {
+			if _, err := svc.MapDeclaredActor(t.Context(), req); err == nil {
 				t.Fatalf("an assertion with %s was accepted", name)
 			}
 		})
@@ -247,20 +247,20 @@ func TestRevokedImportAcceptsNoMapping(t *testing.T) {
 	svc, imp, pdp, _ := mappingFixture(t, "repository.import.map_actor", "repository.import.revoke", "repository.import.read")
 	pdp.allow["repository.import.revoke"] = true
 
-	if _, err := svc.MapDeclaredActor(context.Background(), mapRequest(imp)); err != nil {
+	if _, err := svc.MapDeclaredActor(t.Context(), mapRequest(imp)); err != nil {
 		t.Fatalf("MapDeclaredActor: %v", err)
 	}
-	if _, err := svc.Revoke(context.Background(), api.RevokeImportRequest{
+	if _, err := svc.Revoke(t.Context(), api.RevokeImportRequest{
 		Context:  mapRequest(imp).Context,
 		ImportID: imp.ID,
 	}); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
-	if _, err := svc.MapDeclaredActor(context.Background(), mapRequest(imp)); !errors.Is(err, ErrImportDenied) {
+	if _, err := svc.MapDeclaredActor(t.Context(), mapRequest(imp)); !errors.Is(err, ErrImportDenied) {
 		t.Fatalf("assertion on a revoked import = %v, want ErrImportDenied", err)
 	}
-	mappings, err := svc.ListDeclaredActorMappings(context.Background(), mapRequest(imp).Context, imp.ID)
+	mappings, err := svc.ListDeclaredActorMappings(t.Context(), mapRequest(imp).Context, imp.ID)
 	if err != nil {
 		t.Fatalf("ListDeclaredActorMappings: %v", err)
 	}
