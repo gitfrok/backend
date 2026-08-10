@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1
+# T-0021 / ADR-0048: git-storaged is the one first-party Go image that does NOT ship
+# from scratch.
+#
+# Its whole purpose is to execute git as a subprocess — upload-pack, receive-pack,
+# for-each-ref, update-ref, rev-parse, show-ref, ls-tree, show, diff — and to run a
+# POSIX sh pre-receive hook that refuses a direct push to a protected ref. On
+# scratch this image would build, pass its digest and signature checks, start,
+# serve health, and then fail every Git operation with "executable file not found".
+# ADR-0048 records the exception and the cost; the two plane images stay on scratch.
+FROM docker.io/library/golang:1.26.0-alpine3.22 AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' \
+    -o /out/git-storaged ./git-storaged
+
+FROM docker.io/library/alpine:3.22.2
+
+# git and nothing else on top of the base. --no-cache leaves no package index
+# behind, so the image carries no apk metadata it will never use.
+RUN apk add --no-cache git
+
+COPY --from=build /out/git-storaged /git-storaged
+
+# ADR-0048 decision 3: prove, at build time, that the programs this binary shells
+# out to are actually here. A correct binary in an image that cannot run it is the
+# exact failure this image exists to avoid, and it is invisible to every other gate
+# — so it fails the build rather than the first clone.
+RUN git --version \
+    && command -v git-upload-pack \
+    && command -v git-receive-pack \
+    && [ -x /bin/sh ] \
+    && [ -x /git-storaged ]
+
+USER 65532:65532
+ENTRYPOINT ["/git-storaged"]
