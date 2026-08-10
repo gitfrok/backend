@@ -39,6 +39,34 @@ for plane in dataplane controlplane; do
   fi
 done
 
+# ADR-0048: git-storaged is the one first-party Go image with a base, because its
+# whole job is to execute git. The assertions are therefore the opposite of the
+# planes' — it MUST contain git and a shell — plus the parts of the ADR-0035
+# posture that still apply.
+gitstoraged_file="$root/Dockerfile.gitstoraged"
+if [ ! -f "$gitstoraged_file" ]; then
+  report "missing Dockerfile.gitstoraged"
+else
+  gitstoraged_image="localhost/gitfrok-git-storaged:test"
+  "$runtime" build --file "$gitstoraged_file" --tag "$gitstoraged_image" "$root"
+
+  user=$("$runtime" image inspect "$gitstoraged_image" --format '{{.Config.User}}')
+  [ "$user" = "65532:65532" ] || report "git-storaged image user is '$user', want 65532:65532"
+
+  entrypoint=$("$runtime" image inspect "$gitstoraged_image" --format '{{json .Config.Entrypoint}}')
+  [ "$entrypoint" = '["/git-storaged"]' ] || report "git-storaged entrypoint is '$entrypoint'"
+
+  # The failure this image exists to avoid: a correct binary in an image that
+  # cannot run the programs it shells out to. The Dockerfile asserts this at build
+  # time; asserting it again on the built image means a base change cannot quietly
+  # remove git and still ship.
+  for program in git git-upload-pack git-receive-pack; do
+    if ! "$runtime" run --rm --entrypoint /bin/sh "$gitstoraged_image" -c "command -v $program" >/dev/null 2>&1; then
+      report "git-storaged image has no $program — every Git operation would fail at runtime"
+    fi
+  done
+fi
+
 # A read-only root filesystem is a runtime setting, not an OCI-image field. The data plane proves
 # its deliberate no-policy fail-fast here. The real policy-bundle mount needs governance, which is
 # intentionally not a backend CI dependency; the super-repo dev-cluster integration owns that
