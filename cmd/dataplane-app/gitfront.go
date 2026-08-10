@@ -7,11 +7,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	policyv1 "github.com/gitfrok/backend/gen/proto/policy/v1"
@@ -41,12 +43,27 @@ const (
 	// The SeaweedFS-S3 tier the LFS batch endpoint hands credentials for
 	// (SPEC-0023, ADR-0020). SeaweedFS is the object store, and the variable names
 	// say so. All five together, or none.
+	// The FUSE mount is the tier (ADR-0050); the S3 variables below serve a plane
+	// that has no mount.
+	objectMountEnv = "GITFROK_SEAWEEDFS_MOUNT"
+
 	objectEndpointEnv  = "GITFROK_SEAWEEDFS_S3_ENDPOINT"
 	objectRegionEnv    = "GITFROK_SEAWEEDFS_S3_REGION"
 	objectBucketEnv    = "GITFROK_SEAWEEDFS_S3_BUCKET"
 	objectAccessKeyEnv = "GITFROK_SEAWEEDFS_S3_ACCESS_KEY"
 	objectSecretKeyEnv = "GITFROK_SEAWEEDFS_S3_SECRET_KEY"
 )
+
+// objectTier is the shape both large-object adapters satisfy. It lives here
+// rather than in the platform package because it is this composition root's
+// requirement — the batch surface needs a presigner, and the proxied path needs
+// bytes (ADR-0050).
+type objectTier interface {
+	Stat(ctx context.Context, key string) (int64, error)
+	Presign(method, key string, ttl time.Duration) (string, error)
+	Get(ctx context.Context, key string) (io.ReadCloser, int64, error)
+	Put(ctx context.Context, key string, size int64, sha256Hex string, body io.Reader) (int64, error)
+}
 
 type frontDoorConfig struct {
 	storageAddr   string
@@ -56,10 +73,11 @@ type frontDoorConfig struct {
 	verifierKeyID string
 	patKey        []byte
 	policyAddr    string
-	// objects is the SeaweedFS-S3 tier (SPEC-0023). Nil means this plane serves no
-	// LFS batch endpoint at all, rather than one that answers with actions nothing
-	// can honour.
-	objects *objectstore.Store
+	// objects is the large-object tier: a SeaweedFS FUSE mount (ADR-0050), or the
+	// S3 gateway when no mount is configured. Nil means this plane serves no LFS
+	// batch endpoint at all, rather than one that answers with actions nothing can
+	// honour.
+	objects objectTier
 }
 
 func (c frontDoorConfig) enabled() bool {
@@ -96,6 +114,18 @@ func loadFrontDoorConfig(getenv func(string) string) (frontDoorConfig, error) {
 	}
 	if cfg.sshAddr != "" && cfg.verifierKeyID == "" {
 		return cfg, fmt.Errorf("the SSH listener requires %s", sshVerifierKeyIDEnv)
+	}
+
+	// ADR-0050: the mount is the tier when it is configured, and the S3 variables
+	// are then ignored rather than quietly forming a second live path to the same
+	// bytes.
+	if mount := getenv(objectMountEnv); mount != "" {
+		tier, err := objectstore.NewMount(objectstore.MountConfig{Root: mount})
+		if err != nil {
+			return cfg, err
+		}
+		cfg.objects = tier
+		return cfg, nil
 	}
 
 	// The SeaweedFS-S3 tier, all-or-nothing for the same reason the doors are: a plane

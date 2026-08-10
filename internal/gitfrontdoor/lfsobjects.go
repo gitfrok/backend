@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
@@ -26,11 +27,19 @@ type ObjectTier struct {
 	uploadTTL   time.Duration
 }
 
-// presigner is the slice of the SeaweedFS-S3 store this adapter needs, so a test
-// can supply one without a running SeaweedFS gateway.
+// presigner is the slice of the object tier this adapter needs. Presign may
+// report ErrPresignUnsupported — a FUSE mount has no signed URLs (ADR-0050 §4) —
+// in which case transfers proxy through this plane instead.
 type presigner interface {
 	Stat(ctx context.Context, key string) (int64, error)
 	Presign(method, key string, ttl time.Duration) (string, error)
+}
+
+// transferrer is the tier as the proxy path uses it: bytes in and out, rather
+// than a capability handed to the client.
+type transferrer interface {
+	Get(ctx context.Context, key string) (io.ReadCloser, int64, error)
+	Put(ctx context.Context, key string, size int64, sha256Hex string, body io.Reader) (int64, error)
 }
 
 // LFS PDP actions. They are asked about the repository, because that is the thing
@@ -81,6 +90,11 @@ func (t *ObjectTier) Download(ctx context.Context, operation *gitv1.OperationCon
 		return "", 0, 0, err
 	}
 	href, err := t.objects.Presign("GET", key, t.downloadTTL)
+	if errors.Is(err, objectstore.ErrPresignUnsupported) {
+		// The tier has no capabilities to hand out, so this plane carries the bytes
+		// (ADR-0050 §4). An empty href tells the batch surface to name itself.
+		return "", size, t.downloadTTL, nil
+	}
 	if err != nil {
 		return "", 0, 0, err
 	}
@@ -105,10 +119,51 @@ func (t *ObjectTier) Upload(ctx context.Context, operation *gitv1.OperationConte
 		return "", 0, errors.New("gitfrontdoor: object already stored")
 	}
 	href, err := t.objects.Presign("PUT", key, t.uploadTTL)
+	if errors.Is(err, objectstore.ErrPresignUnsupported) {
+		return "", t.uploadTTL, nil
+	}
 	if err != nil {
 		return "", 0, err
 	}
 	return href, t.uploadTTL, nil
+}
+
+// Read streams one object through this plane, authorized as a read. It exists for
+// the proxied path; a tier that hands out signed URLs never reaches it.
+func (t *ObjectTier) Read(ctx context.Context, operation *gitv1.OperationContext, oid string) (io.ReadCloser, int64, error) {
+	if !validOID(oid) {
+		return nil, 0, ErrObjectMissing
+	}
+	if !t.allowed(ctx, operation, actionLFSRead) {
+		return nil, 0, errors.New("gitfrontdoor: denied")
+	}
+	transfers, ok := t.objects.(transferrer)
+	if !ok {
+		return nil, 0, errors.New("gitfrontdoor: this tier does not carry bytes")
+	}
+	body, size, err := transfers.Get(ctx, objectKey(operation.GetTenantId(), oid))
+	if errors.Is(err, objectstore.ErrNotFound) {
+		return nil, 0, ErrObjectMissing
+	}
+	return body, size, err
+}
+
+// Write stores one object through this plane, authorized as a write. The OID is
+// the digest the content is verified against — a client cannot store bytes under
+// a name that does not describe them (SPEC-0023 AC5).
+func (t *ObjectTier) Write(ctx context.Context, operation *gitv1.OperationContext, oid string, size int64, body io.Reader) error {
+	if !validOID(oid) || size < 0 {
+		return errors.New("gitfrontdoor: not an object identifier")
+	}
+	if !t.allowed(ctx, operation, actionLFSWrite) {
+		return errors.New("gitfrontdoor: denied")
+	}
+	transfers, ok := t.objects.(transferrer)
+	if !ok {
+		return errors.New("gitfrontdoor: this tier does not carry bytes")
+	}
+	_, err := transfers.Put(ctx, objectKey(operation.GetTenantId(), oid), size, oid, body)
+	return err
 }
 
 func (t *ObjectTier) allowed(ctx context.Context, operation *gitv1.OperationContext, action string) bool {

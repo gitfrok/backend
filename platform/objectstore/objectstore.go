@@ -151,6 +151,22 @@ func (s *Store) Put(ctx context.Context, key string, size int64, sha256Hex strin
 		// a failed write (SPEC-0023 AC5).
 		return counter.count, fmt.Errorf("%w: stored %s, promised %s", ErrDigestMismatch, got, sha256Hex)
 	}
+
+	// Confirm the object is actually readable back before reporting success
+	// (SPEC-0023 AC2).
+	//
+	// This is not belt-and-braces. A live SeaweedFS gateway answers 200 to a PUT
+	// into a bucket that does not exist, and the object is not there afterwards —
+	// so a 2xx alone is not the tier saying "I have this". Trusting the status code
+	// would let an import report a repository complete whose objects were silently
+	// dropped, which is precisely the failure AC2 exists to forbid.
+	stored, err := s.Stat(ctx, key)
+	if err != nil {
+		return counter.count, fmt.Errorf("objectstore: %s was accepted but is not readable back: %w", key, err)
+	}
+	if stored != counter.count {
+		return counter.count, fmt.Errorf("objectstore: %s stored %d bytes, wrote %d", key, stored, counter.count)
+	}
 	return counter.count, nil
 }
 

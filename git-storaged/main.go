@@ -34,6 +34,11 @@ const (
 	// later. All five are required together: a node configured with some of them
 	// has an operator who intended LFS and a deployment that would refuse it,
 	// which is worse than one that never had it.
+	// The FUSE mount is the preferred tier (ADR-0050). When it is set, the S3
+	// variables are ignored: two live paths to the same bytes is how one of them
+	// quietly stops being tested.
+	objectMountEnv = "GITFROK_SEAWEEDFS_MOUNT"
+
 	objectEndpointEnv  = "GITFROK_SEAWEEDFS_S3_ENDPOINT"
 	objectRegionEnv    = "GITFROK_SEAWEEDFS_S3_REGION"
 	objectBucketEnv    = "GITFROK_SEAWEEDFS_S3_BUCKET"
@@ -49,6 +54,12 @@ const (
 // none would fail imports later with nothing pointing at the cause. A node with
 // none of them set serves no LFS, which is a deployment choice.
 func objectTier(getenv func(string) string) (ObjectStore, error) {
+	// ADR-0050: large objects come from the SeaweedFS FUSE mount. The S3 adapter
+	// stays for a deployment that has no mount, and stays the reference the mount
+	// is compared against.
+	if mount := getenv(objectMountEnv); mount != "" {
+		return objectstore.NewMount(objectstore.MountConfig{Root: mount})
+	}
 	values := map[string]string{
 		objectEndpointEnv:  getenv(objectEndpointEnv),
 		objectRegionEnv:    getenv(objectRegionEnv),
