@@ -31,6 +31,12 @@ const (
 	// RuleDirectCredentialQuery protects ADR-0043's narrow pre-authentication resolver: only the
 	// Identity Postgres adapter may name the credential table in application code.
 	RuleDirectCredentialQuery = "direct-credential-table-query"
+	// RuleAuditImportsCodereview keeps ADR-0029's two-class provenance physical: the audit
+	// store's write surface must never reach the Code Review contract types that carry
+	// ATTESTED_IMPORT records. If Audit could see them, a future refactor could append one to
+	// the trail. The store rejects non-FIRST_PARTY at runtime (SPEC-0011 AC6/AC11); this rule
+	// makes that rejection structurally unreachable from the wrong direction.
+	RuleAuditImportsCodereview = "audit-imports-codereview"
 )
 
 // infraMarkers are import substrings a domain package must never pull in (invariant 16).
@@ -79,11 +85,20 @@ func checkFile(file, owningModule string, imports []string) []Violation {
 	slash := filepath.ToSlash(file)
 	inDomain := strings.Contains(slash, "/internal/domain/")
 	inAPI := moduleAPIDirRe.MatchString(slash)
+	inAudit := strings.Contains(slash, "/modules/audit/")
 	for _, imp := range imports {
 		if m := moduleInternalRe.FindStringSubmatch(imp); m != nil {
 			if owningModule == "" || m[1] != owningModule {
 				vs = append(vs, Violation{File: file, Import: imp, Rule: RuleCrossModuleInternal})
 			}
+		}
+		// ADR-0029: the audit trail must never reach the Code Review contract
+		// types that carry ATTESTED_IMPORT records (SPEC-0011 AC6/AC11). The
+		// runtime rejection in the store is the mechanism; this import edge is
+		// the tripwire that keeps a future refactor from routing attested data
+		// into the trail.
+		if inAudit && strings.HasPrefix(imp, ModulePath+"/gen/proto/codereview/") {
+			vs = append(vs, Violation{File: file, Import: imp, Rule: RuleAuditImportsCodereview})
 		}
 		if !isInfra(imp) {
 			continue

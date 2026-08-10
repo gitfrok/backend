@@ -8,6 +8,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,12 @@ type Store struct {
 // another's incidents.
 func New(pool *db.Pool) *Store { return &Store{pool: pool} }
 
+// ErrNotFirstParty is returned when a caller attempts to append a record whose
+// provenance is not FIRST_PARTY (ADR-0029 §1, SPEC-0011 AC6/AC11). This is an
+// error, not a silent drop: an ATTESTED_IMPORT record in the audit trail would
+// be a forged platform assertion, and the boundary must refuse it loudly.
+var ErrNotFirstParty = errors.New("audit: only FIRST_PARTY records may be appended")
+
 // Append writes one entry and returns it as persisted.
 //
 // The hash is computed here, from the sequence number the database assigned, and never taken from
@@ -43,6 +50,12 @@ func New(pool *db.Pool) *Store { return &Store{pool: pool} }
 // Everything happens in one transaction, so a crash cannot leave a record whose predecessor's hash
 // was read but whose own row never landed.
 func (s *Store) Append(ctx context.Context, e api.Entry) (api.Record, error) {
+	// ADR-0029 §1: there is no third class and no default. A writer that cannot
+	// state provenance cannot write. Only witnessed, first-party events enter the
+	// trail; an import must never forge a platform assertion.
+	if e.Provenance != api.ProvenanceFirstParty {
+		return api.Record{}, ErrNotFirstParty
+	}
 	var rec api.Record
 	err := s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		// Appends are serialised with a transaction-scoped advisory lock keyed on the tenant.

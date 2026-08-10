@@ -107,6 +107,12 @@ func TestForbiddenEdgesAreRejected(t *testing.T) {
 			relDir:  "modules/repository/internal/app",
 			want:    RuleDirectCredentialQuery,
 		},
+		{
+			name:    "AC11 audit store reaches codereview attested types",
+			fixture: "bad_audit_codereview.go.txt",
+			relDir:  "modules/audit/internal/adapters/postgres",
+			want:    RuleAuditImportsCodereview,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

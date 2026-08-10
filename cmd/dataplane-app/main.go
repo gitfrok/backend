@@ -52,6 +52,9 @@ type dataplane struct {
 	ci           *ci.Runtime
 	// codeReview is composed in main once the plane has a route to Git storage.
 	codeReview codereviewapi.MergeRequests
+	// imports is the repository & review-history import surface (SPEC-0011),
+	// composed alongside codeReview on the same route to Git storage.
+	imports codereviewapi.ImportService
 }
 
 // newDataplane wires the plane. Concrete implementations are chosen in main and injected here; the
@@ -153,6 +156,11 @@ func main() {
 	// composed at all, rather than composed with a merge path that cannot work.
 	if doors.storageClient != nil {
 		dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
+		// The import surface (SPEC-0011) rides the same route to Git storage.
+		// The history phase is not wired in this build; the git phase is.
+		dp.imports = codereview.NewImportService(
+			codereview.NewGitImporter(doors.storageClient), nil, dp.policy, dp.bus,
+		)
 	}
 
 	// OIDC login, when this environment has an identity provider. Built before the
@@ -174,6 +182,9 @@ func main() {
 		civ1.RegisterCIJobServiceServer(doors.policyServer, ci.NewGRPCServer(dp.ci.Jobs()))
 		if dp.codeReview != nil {
 			codereviewv1.RegisterMergeRequestServiceServer(doors.policyServer, codereview.NewGRPCServer(dp.codeReview))
+		}
+		if dp.imports != nil {
+			codereviewv1.RegisterImportServiceServer(doors.policyServer, codereview.NewImportGRPCServer(dp.imports))
 		}
 		if oidcEnabled {
 			if err := identity.RegisterOIDCLogin(doors.policyServer, oidcConfig, http.DefaultClient); err != nil {

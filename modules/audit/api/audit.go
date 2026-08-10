@@ -45,7 +45,26 @@ type Entry struct {
 	Outcome    Outcome
 	Detail     map[string]string
 	OccurredAt time.Time
+	// Provenance classifies this record (ADR-0029 §1). There is no default: a writer that
+	// cannot state provenance cannot write. Only FIRST_PARTY may be appended; the store rejects
+	// anything else as an error, not a silent drop (SPEC-0011 AC6/AC11).
+	Provenance Provenance
 }
+
+// Provenance is the classification a historical record carries (ADR-0029 §1).
+// FIRST_PARTY records are witnessed by our services and may enter the audit log;
+// ATTESTED_IMPORT records are asserted by a foreign system and never do.
+type Provenance string
+
+const (
+	// ProvenanceFirstParty is the only class the audit log accepts. The actor was
+	// authenticated by us, authorized by the PDP, timestamped by our clock.
+	ProvenanceFirstParty Provenance = "FIRST_PARTY"
+	// ProvenanceAttestedImport is a record asserted by a foreign system and
+	// copied by us. It never enters the audit log and never satisfies a merge
+	// policy (ADR-0029 §2/§4).
+	ProvenanceAttestedImport Provenance = "ATTESTED_IMPORT"
+)
 
 // Record is a persisted entry, including the chain fields the writer assigned.
 type Record struct {

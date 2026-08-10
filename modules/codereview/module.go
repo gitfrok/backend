@@ -20,6 +20,15 @@ import (
 // under this module's internal/ tree.
 type RefMover = app.RefMover
 
+// GitImporter is Repository/Git's boundary for the import git phase, aliased
+// so cmd/ can supply one without naming a package under this module's
+// internal/ tree.
+type GitImporter = app.GitImporter
+
+// HistoryImporter imports review history as ATTESTED_IMPORT records, aliased
+// so cmd/ can supply one.
+type HistoryImporter = app.HistoryImporter
+
 // New builds the Code Review context on the dev/in-memory store and subscribes it
 // to ref updates, so each open merge request's view of its target ref stays
 // current without this context reading Git state.
@@ -39,4 +48,22 @@ func NewGRPCServer(requests api.MergeRequests) *codereviewgrpc.Server {
 // is the only way this context reaches Git.
 func NewRefMover(client gitv1.GitStorageClient) RefMover {
 	return gitwire.NewRefMover(client)
+}
+
+// NewGitImporter builds the import git-phase port on the published GitStorage
+// contract.
+func NewGitImporter(client gitv1.GitStorageClient) GitImporter {
+	return gitwire.NewGitImporter(client)
+}
+
+// NewImportService builds the import service on the dev/in-memory import store.
+// history may be nil when the history phase is not wired; the git phase is
+// required.
+func NewImportService(git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus) api.ImportService {
+	return app.NewImportService(app.NewMemoryImportStore(), git, history, pdp, events)
+}
+
+// NewImportGRPCServer wraps the in-process import surface in its gRPC adapter.
+func NewImportGRPCServer(imports api.ImportService) *codereviewgrpc.ImportServer {
+	return codereviewgrpc.NewImportServer(imports)
 }

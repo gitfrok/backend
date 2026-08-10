@@ -280,3 +280,255 @@ var MergeRequestService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "proto/codereview/v1/codereview.proto",
 }
+
+const (
+	ImportService_CreateImport_FullMethodName = "/gitsaas.codereview.v1.ImportService/CreateImport"
+	ImportService_GetImport_FullMethodName    = "/gitsaas.codereview.v1.ImportService/GetImport"
+	ImportService_ListImports_FullMethodName  = "/gitsaas.codereview.v1.ImportService/ListImports"
+	ImportService_RevokeImport_FullMethodName = "/gitsaas.codereview.v1.ImportService/RevokeImport"
+)
+
+// ImportServiceClient is the client API for ImportService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ---------------------------------------------------------------------------
+// Repository & review-history import (SPEC-0011, ADR-0029, T-0018).
+//
+// Import is a one-shot, resumable operation: git data (all refs, tags, LFS
+// objects) through the ordinary write path, and pull/merge-request history as
+// ATTESTED_IMPORT records in this context's own schema. Imported history never
+// enters the audit log, never satisfies a merge policy, and is never rendered
+// as a platform approval. The import operation itself emits exactly one
+// first-party HistoryImported audit event; revocation emits HistoryImportRevoked
+// and tombstones the records (the original chain entry stays unaltered).
+type ImportServiceClient interface {
+	// CreateImport starts (or resumes) an import of one source repository.
+	// Idempotent per (tenant, repository, source_ref).
+	CreateImport(ctx context.Context, in *CreateImportRequest, opts ...grpc.CallOption) (*CreateImportResponse, error)
+	// GetImport returns one import's state and provenance summary.
+	GetImport(ctx context.Context, in *GetImportRequest, opts ...grpc.CallOption) (*GetImportResponse, error)
+	// ListImports lists the imports for a repository, newest first.
+	ListImports(ctx context.Context, in *ListImportsRequest, opts ...grpc.CallOption) (*ListImportsResponse, error)
+	// RevokeImport tombstones every record of an import and emits
+	// HistoryImportRevoked. The original HistoryImported chain entry is
+	// unaltered.
+	RevokeImport(ctx context.Context, in *RevokeImportRequest, opts ...grpc.CallOption) (*RevokeImportResponse, error)
+}
+
+type importServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewImportServiceClient(cc grpc.ClientConnInterface) ImportServiceClient {
+	return &importServiceClient{cc}
+}
+
+func (c *importServiceClient) CreateImport(ctx context.Context, in *CreateImportRequest, opts ...grpc.CallOption) (*CreateImportResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateImportResponse)
+	err := c.cc.Invoke(ctx, ImportService_CreateImport_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *importServiceClient) GetImport(ctx context.Context, in *GetImportRequest, opts ...grpc.CallOption) (*GetImportResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetImportResponse)
+	err := c.cc.Invoke(ctx, ImportService_GetImport_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *importServiceClient) ListImports(ctx context.Context, in *ListImportsRequest, opts ...grpc.CallOption) (*ListImportsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListImportsResponse)
+	err := c.cc.Invoke(ctx, ImportService_ListImports_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *importServiceClient) RevokeImport(ctx context.Context, in *RevokeImportRequest, opts ...grpc.CallOption) (*RevokeImportResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeImportResponse)
+	err := c.cc.Invoke(ctx, ImportService_RevokeImport_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ImportServiceServer is the server API for ImportService service.
+// All implementations must embed UnimplementedImportServiceServer
+// for forward compatibility.
+//
+// ---------------------------------------------------------------------------
+// Repository & review-history import (SPEC-0011, ADR-0029, T-0018).
+//
+// Import is a one-shot, resumable operation: git data (all refs, tags, LFS
+// objects) through the ordinary write path, and pull/merge-request history as
+// ATTESTED_IMPORT records in this context's own schema. Imported history never
+// enters the audit log, never satisfies a merge policy, and is never rendered
+// as a platform approval. The import operation itself emits exactly one
+// first-party HistoryImported audit event; revocation emits HistoryImportRevoked
+// and tombstones the records (the original chain entry stays unaltered).
+type ImportServiceServer interface {
+	// CreateImport starts (or resumes) an import of one source repository.
+	// Idempotent per (tenant, repository, source_ref).
+	CreateImport(context.Context, *CreateImportRequest) (*CreateImportResponse, error)
+	// GetImport returns one import's state and provenance summary.
+	GetImport(context.Context, *GetImportRequest) (*GetImportResponse, error)
+	// ListImports lists the imports for a repository, newest first.
+	ListImports(context.Context, *ListImportsRequest) (*ListImportsResponse, error)
+	// RevokeImport tombstones every record of an import and emits
+	// HistoryImportRevoked. The original HistoryImported chain entry is
+	// unaltered.
+	RevokeImport(context.Context, *RevokeImportRequest) (*RevokeImportResponse, error)
+	mustEmbedUnimplementedImportServiceServer()
+}
+
+// UnimplementedImportServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedImportServiceServer struct{}
+
+func (UnimplementedImportServiceServer) CreateImport(context.Context, *CreateImportRequest) (*CreateImportResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateImport not implemented")
+}
+func (UnimplementedImportServiceServer) GetImport(context.Context, *GetImportRequest) (*GetImportResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetImport not implemented")
+}
+func (UnimplementedImportServiceServer) ListImports(context.Context, *ListImportsRequest) (*ListImportsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListImports not implemented")
+}
+func (UnimplementedImportServiceServer) RevokeImport(context.Context, *RevokeImportRequest) (*RevokeImportResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RevokeImport not implemented")
+}
+func (UnimplementedImportServiceServer) mustEmbedUnimplementedImportServiceServer() {}
+func (UnimplementedImportServiceServer) testEmbeddedByValue()                       {}
+
+// UnsafeImportServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ImportServiceServer will
+// result in compilation errors.
+type UnsafeImportServiceServer interface {
+	mustEmbedUnimplementedImportServiceServer()
+}
+
+func RegisterImportServiceServer(s grpc.ServiceRegistrar, srv ImportServiceServer) {
+	// If the following call pancis, it indicates UnimplementedImportServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ImportService_ServiceDesc, srv)
+}
+
+func _ImportService_CreateImport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateImportRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ImportServiceServer).CreateImport(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ImportService_CreateImport_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ImportServiceServer).CreateImport(ctx, req.(*CreateImportRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ImportService_GetImport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetImportRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ImportServiceServer).GetImport(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ImportService_GetImport_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ImportServiceServer).GetImport(ctx, req.(*GetImportRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ImportService_ListImports_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListImportsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ImportServiceServer).ListImports(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ImportService_ListImports_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ImportServiceServer).ListImports(ctx, req.(*ListImportsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ImportService_RevokeImport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeImportRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ImportServiceServer).RevokeImport(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ImportService_RevokeImport_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ImportServiceServer).RevokeImport(ctx, req.(*RevokeImportRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ImportService_ServiceDesc is the grpc.ServiceDesc for ImportService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ImportService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "gitsaas.codereview.v1.ImportService",
+	HandlerType: (*ImportServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateImport",
+			Handler:    _ImportService_CreateImport_Handler,
+		},
+		{
+			MethodName: "GetImport",
+			Handler:    _ImportService_GetImport_Handler,
+		},
+		{
+			MethodName: "ListImports",
+			Handler:    _ImportService_ListImports_Handler,
+		},
+		{
+			MethodName: "RevokeImport",
+			Handler:    _ImportService_RevokeImport_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/codereview/v1/codereview.proto",
+}
