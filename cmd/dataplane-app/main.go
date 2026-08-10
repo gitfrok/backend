@@ -109,10 +109,11 @@ func main() {
 	}
 	var ciLauncher ci.Launcher
 	if ciDispatches {
-		// The dev launcher records attempts without contacting a cluster. The
-		// client-go implementation of the Kubernetes launcher's Client port is the
-		// remaining piece before a sandbox actually runs in a cluster.
-		ciLauncher = ci.NewDevLauncher()
+		ciLauncher, err = newCILauncher(os.Getenv, ciConfig)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dataplane CI launcher: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	dp := newDataplane(pdp, ciConfig, ciLauncher)
