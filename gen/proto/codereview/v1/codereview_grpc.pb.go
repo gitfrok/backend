@@ -282,11 +282,13 @@ var MergeRequestService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ImportService_CreateImport_FullMethodName        = "/gitsaas.codereview.v1.ImportService/CreateImport"
-	ImportService_GetImport_FullMethodName           = "/gitsaas.codereview.v1.ImportService/GetImport"
-	ImportService_ListImports_FullMethodName         = "/gitsaas.codereview.v1.ImportService/ListImports"
-	ImportService_RevokeImport_FullMethodName        = "/gitsaas.codereview.v1.ImportService/RevokeImport"
-	ImportService_ListImportedHistory_FullMethodName = "/gitsaas.codereview.v1.ImportService/ListImportedHistory"
+	ImportService_CreateImport_FullMethodName              = "/gitsaas.codereview.v1.ImportService/CreateImport"
+	ImportService_GetImport_FullMethodName                 = "/gitsaas.codereview.v1.ImportService/GetImport"
+	ImportService_ListImports_FullMethodName               = "/gitsaas.codereview.v1.ImportService/ListImports"
+	ImportService_RevokeImport_FullMethodName              = "/gitsaas.codereview.v1.ImportService/RevokeImport"
+	ImportService_ListImportedHistory_FullMethodName       = "/gitsaas.codereview.v1.ImportService/ListImportedHistory"
+	ImportService_MapDeclaredActor_FullMethodName          = "/gitsaas.codereview.v1.ImportService/MapDeclaredActor"
+	ImportService_ListDeclaredActorMappings_FullMethodName = "/gitsaas.codereview.v1.ImportService/ListDeclaredActorMappings"
 )
 
 // ImportServiceClient is the client API for ImportService service.
@@ -321,6 +323,20 @@ type ImportServiceClient interface {
 	// Every record carries its provenance block; a revoked import returns nothing
 	// (AC12 on the read path).
 	ListImportedHistory(ctx context.Context, in *ListImportedHistoryRequest, opts ...grpc.CallOption) (*ListImportedHistoryResponse, error)
+	// MapDeclaredActor asserts that a foreign handle from an import is a given
+	// platform identity (SPEC-0011 AC10). It is an assertion by a named tenant
+	// admin, PDP-authorized, and it emits a first-party audit event naming the
+	// admin who asserted it — never an inference. Email equality alone never
+	// produces a mapping (ADR-0029 §4).
+	//
+	// A mapping changes how a handle is *labelled*, never what it means: an
+	// imported approval stays an imported approval, and a mapped actor still
+	// satisfies no merge policy. There is no unmapped-to-mapped upgrade of
+	// provenance.
+	MapDeclaredActor(ctx context.Context, in *MapDeclaredActorRequest, opts ...grpc.CallOption) (*MapDeclaredActorResponse, error)
+	// ListDeclaredActorMappings returns the mappings asserted for one import, so a
+	// reader can see who asserted what.
+	ListDeclaredActorMappings(ctx context.Context, in *ListDeclaredActorMappingsRequest, opts ...grpc.CallOption) (*ListDeclaredActorMappingsResponse, error)
 }
 
 type importServiceClient struct {
@@ -381,6 +397,26 @@ func (c *importServiceClient) ListImportedHistory(ctx context.Context, in *ListI
 	return out, nil
 }
 
+func (c *importServiceClient) MapDeclaredActor(ctx context.Context, in *MapDeclaredActorRequest, opts ...grpc.CallOption) (*MapDeclaredActorResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MapDeclaredActorResponse)
+	err := c.cc.Invoke(ctx, ImportService_MapDeclaredActor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *importServiceClient) ListDeclaredActorMappings(ctx context.Context, in *ListDeclaredActorMappingsRequest, opts ...grpc.CallOption) (*ListDeclaredActorMappingsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListDeclaredActorMappingsResponse)
+	err := c.cc.Invoke(ctx, ImportService_ListDeclaredActorMappings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ImportServiceServer is the server API for ImportService service.
 // All implementations must embed UnimplementedImportServiceServer
 // for forward compatibility.
@@ -413,6 +449,20 @@ type ImportServiceServer interface {
 	// Every record carries its provenance block; a revoked import returns nothing
 	// (AC12 on the read path).
 	ListImportedHistory(context.Context, *ListImportedHistoryRequest) (*ListImportedHistoryResponse, error)
+	// MapDeclaredActor asserts that a foreign handle from an import is a given
+	// platform identity (SPEC-0011 AC10). It is an assertion by a named tenant
+	// admin, PDP-authorized, and it emits a first-party audit event naming the
+	// admin who asserted it — never an inference. Email equality alone never
+	// produces a mapping (ADR-0029 §4).
+	//
+	// A mapping changes how a handle is *labelled*, never what it means: an
+	// imported approval stays an imported approval, and a mapped actor still
+	// satisfies no merge policy. There is no unmapped-to-mapped upgrade of
+	// provenance.
+	MapDeclaredActor(context.Context, *MapDeclaredActorRequest) (*MapDeclaredActorResponse, error)
+	// ListDeclaredActorMappings returns the mappings asserted for one import, so a
+	// reader can see who asserted what.
+	ListDeclaredActorMappings(context.Context, *ListDeclaredActorMappingsRequest) (*ListDeclaredActorMappingsResponse, error)
 	mustEmbedUnimplementedImportServiceServer()
 }
 
@@ -437,6 +487,12 @@ func (UnimplementedImportServiceServer) RevokeImport(context.Context, *RevokeImp
 }
 func (UnimplementedImportServiceServer) ListImportedHistory(context.Context, *ListImportedHistoryRequest) (*ListImportedHistoryResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListImportedHistory not implemented")
+}
+func (UnimplementedImportServiceServer) MapDeclaredActor(context.Context, *MapDeclaredActorRequest) (*MapDeclaredActorResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MapDeclaredActor not implemented")
+}
+func (UnimplementedImportServiceServer) ListDeclaredActorMappings(context.Context, *ListDeclaredActorMappingsRequest) (*ListDeclaredActorMappingsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListDeclaredActorMappings not implemented")
 }
 func (UnimplementedImportServiceServer) mustEmbedUnimplementedImportServiceServer() {}
 func (UnimplementedImportServiceServer) testEmbeddedByValue()                       {}
@@ -549,6 +605,42 @@ func _ImportService_ListImportedHistory_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ImportService_MapDeclaredActor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MapDeclaredActorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ImportServiceServer).MapDeclaredActor(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ImportService_MapDeclaredActor_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ImportServiceServer).MapDeclaredActor(ctx, req.(*MapDeclaredActorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ImportService_ListDeclaredActorMappings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListDeclaredActorMappingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ImportServiceServer).ListDeclaredActorMappings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ImportService_ListDeclaredActorMappings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ImportServiceServer).ListDeclaredActorMappings(ctx, req.(*ListDeclaredActorMappingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ImportService_ServiceDesc is the grpc.ServiceDesc for ImportService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -575,6 +667,14 @@ var ImportService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListImportedHistory",
 			Handler:    _ImportService_ListImportedHistory_Handler,
+		},
+		{
+			MethodName: "MapDeclaredActor",
+			Handler:    _ImportService_MapDeclaredActor_Handler,
+		},
+		{
+			MethodName: "ListDeclaredActorMappings",
+			Handler:    _ImportService_ListDeclaredActorMappings_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
