@@ -16,7 +16,7 @@ func TestCredentialResolverMigrationIsNarrowAndReadOnly(t *testing.T) {
 	}
 	sql := string(b)
 	for _, want := range []string{
-		"CREATE FUNCTION identity.resolve_active_credential",
+		"CREATE OR REPLACE FUNCTION identity.resolve_active_credential",
 		"SECURITY DEFINER",
 		"SET search_path = pg_catalog, identity",
 		"RETURNS TABLE (tenant_id TEXT, actor_id TEXT, roles TEXT[])",
