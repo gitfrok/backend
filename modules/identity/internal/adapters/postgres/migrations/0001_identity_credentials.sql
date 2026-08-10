@@ -72,7 +72,9 @@ CREATE POLICY tenant_isolation ON identity.credentials
 
 -- The only unauthenticated credential read. The fixed query has no dynamic SQL,
 -- accepts no tenant/routing claim and returns no verifier or credential metadata.
-CREATE FUNCTION identity.resolve_active_credential(
+-- CREATE OR REPLACE (not plain CREATE): dev-provision.sh re-applies migrations
+-- idempotently and bare CREATE FUNCTION has no IF NOT EXISTS form.
+CREATE OR REPLACE FUNCTION identity.resolve_active_credential(
   p_kind TEXT,
   p_key_id TEXT,
   p_verifier TEXT
