@@ -85,6 +85,21 @@ func (s *Server) ImportRefs(ctx context.Context, req *gitv1.ImportRefsRequest) (
 		return nil, err
 	}
 
+	// The LFS phase, before any ref is announced. A repository whose pointers
+	// resolve to objects that were never fetched looks complete and is not
+	// (SPEC-0011 AC2, SPEC-0023 AC6/AC7), so an import that cannot bring the
+	// objects across does not get to announce the refs that reference them.
+	movedRefs := make([]string, 0, len(moved))
+	for _, delta := range moved {
+		if delta.newSHA != "" {
+			movedRefs = append(movedRefs, delta.ref)
+		}
+	}
+	lfsBytes, err := s.importLFSObjects(ctx, repository, movedRefs, sourceURL, token)
+	if err != nil {
+		return nil, err
+	}
+
 	now := time.Now().UTC()
 	var response []*gitv1.RefUpdate
 	for _, delta := range moved {
@@ -111,7 +126,92 @@ func (s *Server) ImportRefs(ctx context.Context, req *gitv1.ImportRefsRequest) (
 	if imported < 0 {
 		imported = 0
 	}
-	return &gitv1.ImportRefsResponse{Refs: response, ImportedBytes: imported}, nil
+	// LFS objects are charged too: they are bytes this tenant now stores, on a
+	// different tier but out of the same envelope (SPEC-0023 AC9).
+	return &gitv1.ImportRefsResponse{Refs: response, ImportedBytes: imported + lfsBytes}, nil
+}
+
+// importLFSObjects brings the LFS objects the imported refs reference across from
+// the source, and reports the bytes stored (SPEC-0023 AC6/AC7).
+//
+// The contract with the caller is the important part: any error here fails the
+// import. There is no partial success and no "imported except the large files"
+// state, because a repository advertising pointers whose objects are absent is
+// worse than a refused import — it looks whole, and the failure surfaces later as
+// a checkout error against a repository the customer believes was migrated.
+func (s *Server) importLFSObjects(ctx context.Context, repository repositoryOperation, refs []string, sourceURL, token string) (int64, error) {
+	pointers, err := lfsPointersInRefs(ctx, repository.path, refs)
+	if err != nil {
+		return 0, unavailable()
+	}
+	if len(pointers) == 0 {
+		// Nothing referenced, nothing owed. A repository with no LFS content is
+		// importable by a deployment with no object tier.
+		return 0, nil
+	}
+	if s.objects == nil {
+		// Pointers exist and there is nowhere to put their objects. Refuse rather
+		// than land half a repository (ErrLFSUnavailable's whole reason).
+		return 0, unavailable()
+	}
+
+	endpoint, err := lfsSourceEndpoint(sourceURL)
+	if err != nil {
+		return 0, unavailable()
+	}
+
+	// Objects already on the tier are not re-fetched: an import is idempotent per
+	// source (SPEC-0011 AC6), and a resumed import must not pay for what the first
+	// attempt already stored.
+	missing := make([]lfsPointer, 0, len(pointers))
+	for _, pointer := range pointers {
+		if _, err := s.objects.Stat(ctx, lfsObjectKey(repository.tenantID, pointer.oid)); err == nil {
+			continue
+		}
+		missing = append(missing, pointer)
+	}
+	if len(missing) == 0 {
+		return 0, nil
+	}
+
+	batch, err := s.sourceLFS.batchDownload(ctx, endpoint, token, missing)
+	if err != nil {
+		return 0, unavailable()
+	}
+
+	// Every object the pointers named must come back with a download action. A
+	// source that omits one, or reports an error for one, means the set cannot be
+	// completed — which fails the import rather than shrinking what it promised.
+	byOID := map[string]int{}
+	for i, object := range batch.Objects {
+		byOID[object.OID] = i
+	}
+
+	var stored int64
+	for _, pointer := range missing {
+		index, found := byOID[pointer.oid]
+		if !found {
+			return 0, unavailable()
+		}
+		object := batch.Objects[index]
+		if object.Error != nil || object.Actions.Download == nil {
+			return 0, unavailable()
+		}
+		body, err := s.sourceLFS.fetchObject(ctx, object.Actions.Download.Href, object.Actions.Download.Header)
+		if err != nil {
+			return 0, unavailable()
+		}
+		// The object is verified against the OID the pointer named as it is stored:
+		// a source that serves different bytes under the same OID must not have
+		// them land under a name that lies about them (SPEC-0023 AC5).
+		written, putErr := s.objects.Put(ctx, lfsObjectKey(repository.tenantID, pointer.oid), pointer.size, pointer.oid, body)
+		_ = body.Close()
+		if putErr != nil {
+			return 0, unavailable()
+		}
+		stored += written
+	}
+	return stored, nil
 }
 
 // repositoryBytes is what this repository weighs on the storage tier, as git
