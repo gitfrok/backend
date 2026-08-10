@@ -48,7 +48,15 @@ type HistoryImporter interface {
 	// ImportHistory fetches and stores the source's review history under the
 	// given import ID, returning per-type counts. The source token is a
 	// request-only secret.
-	ImportHistory(ctx context.Context, command ImportHistoryCommand) (map[string]int64, error)
+	ImportHistory(ctx context.Context, command ImportHistoryCommand) (HistoryResult, error)
+}
+
+// HistoryResult is what one history phase produced: the per-type record counts
+// the manifest is computed over, and the bytes read from the source, which are
+// charged to the tenant's fair-use storage dimension (SPEC-0011 AC9).
+type HistoryResult struct {
+	Counts      map[string]int64
+	SourceBytes int64
 }
 
 // ImportHistoryCommand is the verified principal plus the source identity for
@@ -87,6 +95,8 @@ type ImportService struct {
 	history HistoryImporter
 	pdp     policyapi.DecisionPoint
 	bus     bus.Bus
+	pacer   Pacer
+	meter   StorageMeter
 	newID   func() string
 	now     func() time.Time
 }
@@ -101,9 +111,25 @@ func NewImportService(store ImportStore, records api.ImportedRecordStore, git Gi
 		history: history,
 		pdp:     pdp,
 		bus:     events,
-		newID:   ids.NewULID,
-		now:     time.Now,
+		// An unconfigured plane imports unpaced and unmetered rather than
+		// refusing to import; WithPacing replaces both.
+		pacer: NoPacer{},
+		meter: NoMeter{},
+		newID: ids.NewULID,
+		now:   time.Now,
 	}
+}
+
+// WithPacing sets the throttle and the storage meter import work runs under
+// (SPEC-0011 AC9). A nil argument leaves that half unchanged.
+func (s *ImportService) WithPacing(pacer Pacer, meter StorageMeter) *ImportService {
+	if pacer != nil {
+		s.pacer = pacer
+	}
+	if meter != nil {
+		s.meter = meter
+	}
+	return s
 }
 
 // ErrImportDenied is the coarse refusal an unauthorized import command returns.
@@ -131,10 +157,10 @@ func NewSourceHistoryImporter(adapters map[string]HistoryImporter) *SourceHistor
 }
 
 // ImportHistory dispatches to the adapter for the command's source system.
-func (s *SourceHistoryImporter) ImportHistory(ctx context.Context, command ImportHistoryCommand) (map[string]int64, error) {
+func (s *SourceHistoryImporter) ImportHistory(ctx context.Context, command ImportHistoryCommand) (HistoryResult, error) {
 	adapter, ok := s.adapters[command.SourceSystem]
 	if !ok {
-		return nil, ErrUnknownSourceSystem
+		return HistoryResult{}, ErrUnknownSourceSystem
 	}
 	return adapter.ImportHistory(ctx, command)
 }
@@ -168,6 +194,13 @@ func (s *ImportService) Create(ctx context.Context, req api.CreateImportRequest)
 		return imp, nil
 	}
 
+	// Import work yields to the interactive traffic it shares the plane with:
+	// each phase asks the pacer first, and a refusal stops the import instead of
+	// running it unthrottled (AC9).
+	if err := s.pacer.Wait(ctx); err != nil {
+		s.fail(ctx, imp, "import paced out")
+		return api.Import{}, ErrImportDenied
+	}
 	// The git phase runs inline for the dev posture. The source token is used
 	// once, here, and never stored.
 	if err := s.runGitPhase(ctx, req, &imp); err != nil {
@@ -175,7 +208,11 @@ func (s *ImportService) Create(ctx context.Context, req api.CreateImportRequest)
 		return api.Import{}, ErrImportDenied
 	}
 	if s.history != nil {
-		counts, err := s.history.ImportHistory(ctx, ImportHistoryCommand{
+		if err := s.pacer.Wait(ctx); err != nil {
+			s.fail(ctx, imp, "import paced out")
+			return api.Import{}, ErrImportDenied
+		}
+		result, err := s.history.ImportHistory(ctx, ImportHistoryCommand{
 			TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID,
 			RequestID: req.RequestID, ActorRoles: append([]string(nil), req.ActorRoles...),
 			ImportID: imp.ID, SourceURL: req.SourceURL, SourceToken: req.SourceToken,
@@ -191,8 +228,14 @@ func (s *ImportService) Create(ctx context.Context, req api.CreateImportRequest)
 			s.fail(ctx, imp, "history phase failed")
 			return api.Import{}, ErrImportDenied
 		}
-		imp.RecordCounts = counts
+		imp.RecordCounts = result.Counts
 		imp.HistoryPhaseComplete = true
+		// Imported bytes are the tenant's bytes: they count against the same
+		// fair-use storage dimension as anything else it stores (AC9). A meter
+		// that cannot record is not a reason to lose the import.
+		if err := s.meter.RecordImportedBytes(ctx, imp.TenantID, imp.RepositoryID, result.SourceBytes); err != nil {
+			_ = err
+		}
 	}
 
 	// One first-party HistoryImported audit event per import, chained normally,
