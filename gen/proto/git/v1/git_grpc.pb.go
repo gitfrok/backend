@@ -27,6 +27,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	GitStorage_UploadPack_FullMethodName  = "/gitsaas.git.v1.GitStorage/UploadPack"
 	GitStorage_ReceivePack_FullMethodName = "/gitsaas.git.v1.GitStorage/ReceivePack"
+	GitStorage_MergeRef_FullMethodName    = "/gitsaas.git.v1.GitStorage/MergeRef"
 )
 
 // GitStorageClient is the client API for GitStorage service.
@@ -37,6 +38,17 @@ type GitStorageClient interface {
 	UploadPack(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[UploadPackRequest, UploadPackResponse], error)
 	// ReceivePack carries an unmodified git-receive-pack exchange for push.
 	ReceivePack(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ReceivePackRequest, ReceivePackResponse], error)
+	// MergeRef moves one exact branch ref to an existing revision on behalf of an
+	// authorized merge (SPEC-0019). It is the only route by which a ref changes
+	// without a Git protocol exchange, and it exists so Code Review can complete a
+	// merge through a contract boundary instead of against Git storage.
+	//
+	// It is not a general ref-write API: it moves one ref, it names no source
+	// repository or path, it carries no pack bytes, and it cannot create or delete
+	// a repository. git-storaged asks the PDP itself before applying it, exactly as
+	// it does for a push — a caller that has already been allowed by its own PEP is
+	// still not trusted to assert that here.
+	MergeRef(ctx context.Context, in *MergeRefRequest, opts ...grpc.CallOption) (*MergeRefResponse, error)
 }
 
 type gitStorageClient struct {
@@ -73,6 +85,16 @@ func (c *gitStorageClient) ReceivePack(ctx context.Context, opts ...grpc.CallOpt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type GitStorage_ReceivePackClient = grpc.BidiStreamingClient[ReceivePackRequest, ReceivePackResponse]
 
+func (c *gitStorageClient) MergeRef(ctx context.Context, in *MergeRefRequest, opts ...grpc.CallOption) (*MergeRefResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MergeRefResponse)
+	err := c.cc.Invoke(ctx, GitStorage_MergeRef_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GitStorageServer is the server API for GitStorage service.
 // All implementations must embed UnimplementedGitStorageServer
 // for forward compatibility.
@@ -81,6 +103,17 @@ type GitStorageServer interface {
 	UploadPack(grpc.BidiStreamingServer[UploadPackRequest, UploadPackResponse]) error
 	// ReceivePack carries an unmodified git-receive-pack exchange for push.
 	ReceivePack(grpc.BidiStreamingServer[ReceivePackRequest, ReceivePackResponse]) error
+	// MergeRef moves one exact branch ref to an existing revision on behalf of an
+	// authorized merge (SPEC-0019). It is the only route by which a ref changes
+	// without a Git protocol exchange, and it exists so Code Review can complete a
+	// merge through a contract boundary instead of against Git storage.
+	//
+	// It is not a general ref-write API: it moves one ref, it names no source
+	// repository or path, it carries no pack bytes, and it cannot create or delete
+	// a repository. git-storaged asks the PDP itself before applying it, exactly as
+	// it does for a push — a caller that has already been allowed by its own PEP is
+	// still not trusted to assert that here.
+	MergeRef(context.Context, *MergeRefRequest) (*MergeRefResponse, error)
 	mustEmbedUnimplementedGitStorageServer()
 }
 
@@ -96,6 +129,9 @@ func (UnimplementedGitStorageServer) UploadPack(grpc.BidiStreamingServer[UploadP
 }
 func (UnimplementedGitStorageServer) ReceivePack(grpc.BidiStreamingServer[ReceivePackRequest, ReceivePackResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method ReceivePack not implemented")
+}
+func (UnimplementedGitStorageServer) MergeRef(context.Context, *MergeRefRequest) (*MergeRefResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MergeRef not implemented")
 }
 func (UnimplementedGitStorageServer) mustEmbedUnimplementedGitStorageServer() {}
 func (UnimplementedGitStorageServer) testEmbeddedByValue()                    {}
@@ -132,13 +168,36 @@ func _GitStorage_ReceivePack_Handler(srv interface{}, stream grpc.ServerStream) 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type GitStorage_ReceivePackServer = grpc.BidiStreamingServer[ReceivePackRequest, ReceivePackResponse]
 
+func _GitStorage_MergeRef_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MergeRefRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GitStorageServer).MergeRef(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GitStorage_MergeRef_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GitStorageServer).MergeRef(ctx, req.(*MergeRefRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GitStorage_ServiceDesc is the grpc.ServiceDesc for GitStorage service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var GitStorage_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "gitsaas.git.v1.GitStorage",
 	HandlerType: (*GitStorageServer)(nil),
-	Methods:     []grpc.MethodDesc{},
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "MergeRef",
+			Handler:    _GitStorage_MergeRef_Handler,
+		},
+	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "UploadPack",
