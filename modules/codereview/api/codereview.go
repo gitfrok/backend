@@ -205,18 +205,22 @@ const (
 	AnchorMerge = "MERGE"
 )
 
-// AnchorFor degrades an imported comment's anchor from the position the source
-// declared: a resolvable diff position anchors to DIFF, a path alone to FILE,
-// and neither to MERGE. No comment is ever dropped for want of an anchor (AC5).
-func AnchorFor(path string, line int64) string {
-	switch {
-	case path != "" && line > 0:
-		return AnchorDiff
-	case path != "":
+// DeclaredAnchor is the strongest anchor an import may claim from what the
+// source declared alone: the file when the source named a path, the merge
+// request when it named none. No comment is ever dropped for want of an anchor
+// (AC5).
+//
+// It deliberately never returns DIFF. A diff anchor asserts that the position
+// still resolves, and only the imported git tree can settle that — the source's
+// own payload cannot: GitLab echoes a diff note's original path and line even
+// after the file is deleted, so trusting it would mark a stale anchor exact.
+// Until an import resolves positions against the refs it imported, every
+// imported anchor is approximate and says so.
+func DeclaredAnchor(path string) string {
+	if path != "" {
 		return AnchorFile
-	default:
-		return AnchorMerge
 	}
+	return AnchorMerge
 }
 
 // Approximate reports whether a thread's anchor is weaker than the diff

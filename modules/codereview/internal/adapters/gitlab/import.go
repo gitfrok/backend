@@ -139,12 +139,25 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	}
 	importedApprovals := make([]api.ImportedApproval, 0, len(approvals))
 	for _, a := range approvals {
+		// Each record's digest covers that record's own payload, so tampering
+		// with one is detectable against it rather than against its parent.
+		approvalDigest, err := payloadDigest(a)
+		if err != nil {
+			return api.ImportedMergeRequest{}, err
+		}
+		approvalProvenance := provenance
+		approvalProvenance.PayloadDigest = approvalDigest
+		approvalProvenance.DeclaredActor = a.User.Username
+		// GitLab's approvals response carries no per-approval timestamp. The
+		// source declared none, so none is recorded: substituting the merge
+		// request's own updated_at would put a value this system invented into an
+		// immutable provenance block (ADR-0029).
+		approvalProvenance.DeclaredAt = time.Time{}
 		importedApprovals = append(importedApprovals, api.ImportedApproval{
 			ApprovalID:     strconv.FormatInt(a.ID, 10),
 			MergeRequestID: strconv.FormatInt(mr.IID, 10),
 			DeclaredActor:  a.User.Username,
-			DeclaredAt:     mr.UpdatedAt,
-			Provenance:     provenance,
+			Provenance:     approvalProvenance,
 		})
 	}
 
@@ -155,22 +168,30 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	}
 	threads := make([]api.ImportedThread, 0, len(notes))
 	for _, note := range notes {
-		// A diff note keeps its position; a note the source can no longer place
-		// on a line degrades to the file, and one with no path at all attaches to
-		// the merge request. The note itself is never dropped (AC5).
+		// A note the source placed in a file anchors to that file; one it placed
+		// nowhere attaches to the merge request. Neither is dropped, and neither
+		// claims a diff position this import has not resolved (AC5).
+		noteDigest, err := payloadDigest(note)
+		if err != nil {
+			return api.ImportedMergeRequest{}, err
+		}
+		noteProvenance := provenance
+		noteProvenance.PayloadDigest = noteDigest
+		noteProvenance.DeclaredActor = note.Author.Username
+		noteProvenance.DeclaredAt = note.CreatedAt
 		threads = append(threads, api.ImportedThread{
 			ThreadID:       "note-" + strconv.FormatInt(note.ID, 10),
 			MergeRequestID: strconv.FormatInt(mr.IID, 10),
 			Path:           note.Position.NewPath,
-			Anchor:         api.AnchorFor(note.Position.NewPath, note.Position.NewLine),
+			Anchor:         api.DeclaredAnchor(note.Position.NewPath),
 			Comments: []api.ImportedComment{{
 				CommentID:     "note-" + strconv.FormatInt(note.ID, 10),
 				DeclaredActor: note.Author.Username,
 				Body:          note.Body,
 				DeclaredAt:    note.CreatedAt,
-				Provenance:    provenance,
+				Provenance:    noteProvenance,
 			}},
-			Provenance: provenance,
+			Provenance: noteProvenance,
 		})
 	}
 
@@ -188,15 +209,16 @@ func (c *Client) buildRecord(ctx context.Context, src source, command app.Import
 	}, nil
 }
 
-// listMergeRequests fetches all MRs (any state) for the source project.
+// listMergeRequests fetches every MR (any state) for the source project, page by
+// page. A source with more history than one page holds must not import as a
+// silently truncated set: an import that stops early would report its partial
+// counts as if they were the whole backlog.
 func (c *Client) listMergeRequests(ctx context.Context, src source, token string) ([]mergeRequest, error) {
 	project := url.PathEscape(src.namespace + "/" + src.project)
-	path := fmt.Sprintf("%s/projects/%s/merge_requests?state=all&per_page=100&scope=all", c.base, project)
-	var mrs []mergeRequest
-	if err := c.getJSON(ctx, path, token, &mrs); err != nil {
-		return nil, err
-	}
-	return mrs, nil
+	return fetchPages[mergeRequest](ctx, c, token, func(page int) string {
+		return fmt.Sprintf("%s/projects/%s/merge_requests?state=all&scope=all&per_page=%d&page=%d&order_by=created_at&sort=asc",
+			c.base, project, pageSize, page)
+	})
 }
 
 // listApprovals fetches the approvals for one MR.
@@ -212,15 +234,36 @@ func (c *Client) listApprovals(ctx context.Context, src source, iid int64, token
 	return result.ApprovedBy, nil
 }
 
-// listNotes fetches the notes (comments) for one MR.
+// listNotes fetches every note (comment) for one MR, page by page.
 func (c *Client) listNotes(ctx context.Context, src source, iid int64, token string) ([]note, error) {
 	project := url.PathEscape(src.namespace + "/" + src.project)
-	path := fmt.Sprintf("%s/projects/%s/merge_requests/%d/notes?per_page=100&sort=asc", c.base, project, iid)
-	var notes []note
-	if err := c.getJSON(ctx, path, token, &notes); err != nil {
-		return nil, err
+	return fetchPages[note](ctx, c, token, func(page int) string {
+		return fmt.Sprintf("%s/projects/%s/merge_requests/%d/notes?per_page=%d&page=%d&sort=asc",
+			c.base, project, iid, pageSize, page)
+	})
+}
+
+// pageSize is the per-page ceiling GitLab honours.
+const pageSize = 100
+
+// maxPages bounds a paging loop so a source that keeps returning full pages
+// cannot spin forever. Reaching it is an error, never a quiet truncation.
+const maxPages = 1000
+
+// fetchPages walks a paged GitLab collection until a short page ends it.
+func fetchPages[T any](ctx context.Context, c *Client, token string, pageURL func(page int) string) ([]T, error) {
+	var all []T
+	for page := 1; page <= maxPages; page++ {
+		var batch []T
+		if err := c.getJSON(ctx, pageURL(page), token, &batch); err != nil {
+			return nil, err
+		}
+		all = append(all, batch...)
+		if len(batch) < pageSize {
+			return all, nil
+		}
 	}
-	return notes, nil
+	return nil, fmt.Errorf("gitlab import: source has more than %d pages", maxPages)
 }
 
 // getJSON performs one authenticated GET and decodes the JSON body.

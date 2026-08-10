@@ -114,6 +114,18 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 	if len(mr.Approvals) != 1 || mr.Approvals[0].Provenance.Class != api.AttestImported {
 		t.Fatalf("approvals = %+v", mr.Approvals)
 	}
+	// GitLab declares no per-approval timestamp, so none is recorded rather than
+	// the merge request's own being passed off as one (ADR-0029).
+	if !mr.Approvals[0].DeclaredAt.IsZero() || !mr.Approvals[0].Provenance.DeclaredAt.IsZero() {
+		t.Fatalf("approval carries an undeclared timestamp: %+v", mr.Approvals[0])
+	}
+	// Each record's digest covers its own payload, not its parent's.
+	if mr.Approvals[0].Provenance.PayloadDigest == mr.Provenance.PayloadDigest {
+		t.Fatal("approval digest is the merge request's digest")
+	}
+	if mr.Threads[0].Provenance.PayloadDigest == mr.Provenance.PayloadDigest {
+		t.Fatal("thread digest is the merge request's digest")
+	}
 	if len(mr.Threads) != 3 || mr.Threads[0].Comments[0].DeclaredActor != "dave" {
 		t.Fatalf("threads = %+v", mr.Threads)
 	}
@@ -136,12 +148,15 @@ func TestImportHistoryDegradesAnchors(t *testing.T) {
 	}
 	stored, _ := records.ListImport(context.Background(), "import-1")
 	threads := stored[0].Threads
+	// No imported anchor claims a diff position: this import never resolved the
+	// declared positions against the refs it imported, and GitLab echoes a note's
+	// original path even after the file is gone.
 	want := []struct {
 		anchor      string
 		path        string
 		approximate bool
 	}{
-		{api.AnchorDiff, "widget.go", false},
+		{api.AnchorFile, "widget.go", true},
 		{api.AnchorFile, "widget.go", true},
 		{api.AnchorMerge, "", true},
 	}
@@ -193,5 +208,58 @@ func TestParseSource(t *testing.T) {
 		if ok != tc.ok || got.namespace != tc.namespace || got.project != tc.project {
 			t.Errorf("parseSource(%q) = %+v, %v; want %s/%s, %v", tc.raw, got, ok, tc.namespace, tc.project, tc.ok)
 		}
+	}
+}
+
+// A source with more history than one page holds imports whole: an import that
+// stopped at the first page would report partial counts as the full backlog.
+func TestImportHistoryFollowsPages(t *testing.T) {
+	firstPage := make([]mergeRequest, pageSize)
+	for i := range firstPage {
+		firstPage[i] = mergeRequest{
+			IID: int64(i + 1), Title: "MR", State: "opened", Author: glUser{Username: "carol"},
+			SourceBranch: "feature", TargetBranch: "main",
+		}
+	}
+	secondPage := []mergeRequest{{
+		IID: 101, Title: "Last", State: "merged", Author: glUser{Username: "carol"},
+		SourceBranch: "feature", TargetBranch: "main",
+	}}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/merge_requests"):
+			switch r.URL.Query().Get("page") {
+			case "1":
+				_ = json.NewEncoder(w).Encode(firstPage)
+			default:
+				_ = json.NewEncoder(w).Encode(secondPage)
+			}
+		case strings.Contains(r.URL.Path, "/approvals"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"approved_by": []any{}})
+		default:
+			_ = json.NewEncoder(w).Encode([]note{})
+		}
+	}))
+	defer server.Close()
+
+	records := newMemoryRecords()
+	client := New(records, server.Client())
+	client.base = server.URL
+
+	counts, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
+		SourceURL: "https://gitlab.com/group/widgets.git", SourceSystem: "gitlab", SourceInstance: "gitlab.com",
+	})
+	if err != nil {
+		t.Fatalf("ImportHistory: %v", err)
+	}
+	if counts["merge_requests"] != int64(pageSize+1) {
+		t.Fatalf("merge_requests = %d, want %d", counts["merge_requests"], pageSize+1)
+	}
+	stored, _ := records.ListImport(context.Background(), "import-1")
+	if len(stored) != pageSize+1 {
+		t.Fatalf("stored = %d records, want %d", len(stored), pageSize+1)
 	}
 }
