@@ -43,24 +43,14 @@ type (
 	HistoryResult        = app.HistoryResult
 )
 
-// Pacer throttles import work and StorageMeter records what it cost the tenant
-// (SPEC-0011 AC21), aliased so cmd/ can supply either.
-type (
-	Pacer        = app.Pacer
-	StorageMeter = app.StorageMeter
-)
+// Pacer throttles import work (SPEC-0011 AC21), aliased so cmd/ can supply one.
+type Pacer = app.Pacer
 
 // NewImportPacer returns the import throttle: one step of import work per
 // interval. A non-positive interval paces nothing, which is what an environment
 // that has not configured pacing gets.
 func NewImportPacer(interval time.Duration) Pacer {
 	return app.NewIntervalPacer(interval)
-}
-
-// NewImportStorageMeter returns the dev in-memory storage meter that keeps
-// per-tenant imported-byte totals.
-func NewImportStorageMeter() *app.MemoryMeter {
-	return app.NewMemoryMeter()
 }
 
 // New builds the Code Review context on the dev/in-memory store and subscribes it
@@ -126,9 +116,8 @@ func NewSourceHistoryImporter(records api.ImportedRecordStore, httpClient *http.
 // NewImportService builds the import service on the dev in-memory import store.
 // records must be the same store the history importer writes to. history may be
 // nil when the history phase is not wired; the git phase is required.
-func NewImportService(records api.ImportedRecordStore, git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus, pacer Pacer, meter StorageMeter) api.ImportService {
-	return app.NewImportService(app.NewMemoryImportStore(), records, git, history, pdp, events).
-		WithPacing(pacer, meter)
+func NewImportService(records api.ImportedRecordStore, git GitImporter, history HistoryImporter, pdp policyapi.DecisionPoint, events bus.Bus, pacer Pacer) api.ImportService {
+	return app.NewImportService(app.NewMemoryImportStore(), records, git, history, pdp, events).WithPacer(pacer)
 }
 
 // NewImportGRPCServer wraps the in-process import surface in its gRPC adapter.

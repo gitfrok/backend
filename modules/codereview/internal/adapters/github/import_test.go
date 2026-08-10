@@ -294,7 +294,7 @@ func TestImportHistoryPacesFetchesAndReportsBytes(t *testing.T) {
 	if pacer.waits != 4 {
 		t.Fatalf("pacer waits = %d, want one per source fetch (4)", pacer.waits)
 	}
-	if result.SourceBytes <= 0 {
-		t.Fatalf("source bytes = %d, want the bytes actually read", result.SourceBytes)
+	if result.SourceBytesRead <= 0 {
+		t.Fatalf("source bytes read = %d, want the bytes actually read", result.SourceBytesRead)
 	}
 }

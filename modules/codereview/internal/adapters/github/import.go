@@ -130,7 +130,7 @@ func (c *Client) ImportHistory(ctx context.Context, command app.ImportHistoryCom
 	if err := c.records.PutImport(ctx, command.ImportID, records); err != nil {
 		return app.HistoryResult{}, err
 	}
-	return app.HistoryResult{Counts: counts, SourceBytes: st.read}, nil
+	return app.HistoryResult{Counts: counts, SourceBytesRead: st.read}, nil
 }
 
 // buildRecord shapes one pull request plus its reviews into an imported MR.
@@ -344,7 +344,9 @@ func (c *Client) getJSON(ctx context.Context, st *fetchState, path, token string
 	if err != nil {
 		return err
 	}
-	// The bytes an import reads are the tenant's cost, charged by the caller.
+	// What the source's responses weighed on the wire. It is ingress, reported
+	// for observability — the bytes a tenant is charged for are the ones storage
+	// says it wrote (AC21).
 	st.read += int64(len(body))
 	if err := json.Unmarshal(body, into); err != nil {
 		return err

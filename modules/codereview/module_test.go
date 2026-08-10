@@ -46,7 +46,7 @@ func TestImportRevokeTombstonesTheRecordsTheImporterWrote(t *testing.T) {
 	// throttle would only make it slower.
 	service := codereview.NewImportService(
 		records, stubGitImporter{}, stubHistoryImporter{records: records}, allowAllPDP{}, bus.NewInProcess(),
-		codereview.NewImportPacer(0), codereview.NewImportStorageMeter(),
+		codereview.NewImportPacer(0),
 	)
 
 	principal := api.Context{TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", RequestID: "req-1"}
