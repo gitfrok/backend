@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -61,7 +60,7 @@ func TestImportRefsPreservesSourceObjectIdentity(t *testing.T) {
 	mustRunGit(t, source, "checkout", "main")
 
 	// The import's git phase, as ImportRefs runs it: measure, fetch, rescan refs.
-	ctx := context.Background()
+	ctx := t.Context()
 	before, err := refs(ctx, bare)
 	if err != nil {
 		t.Fatalf("refs before: %v", err)
@@ -199,7 +198,7 @@ func TestImportRefusesToOverwriteADivergedBranch(t *testing.T) {
 	mustRunGit(t, source, "commit", "-m", "theirs")
 	mustRunGit(t, source, "branch", "-M", "main")
 
-	if err := fetchFromSource(context.Background(), bare, source, ""); err == nil {
+	if err := fetchFromSource(t.Context(), bare, source, ""); err == nil {
 		t.Fatal("the fetch overwrote a branch this platform already held")
 	}
 	if got := mustGitOutput(t, bare, "rev-parse", "refs/heads/main"); got != held {

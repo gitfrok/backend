@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -78,13 +79,13 @@ type batchObject struct {
 	OID     string `json:"oid"`
 	Size    int64  `json:"size"`
 	Actions *struct {
-		Download *batchAction `json:"download,omitempty"`
-		Upload   *batchAction `json:"upload,omitempty"`
-	} `json:"actions,omitempty"`
+		Download *batchAction `json:"download,omitzero"`
+		Upload   *batchAction `json:"upload,omitzero"`
+	} `json:"actions,omitzero"`
 	Error *struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
-	} `json:"error,omitempty"`
+	} `json:"error,omitzero"`
 }
 
 type batchResponse struct {
@@ -126,7 +127,7 @@ func (h LFS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// The transport a caller asks for is not negotiable to something we do not
 	// serve: only `basic` exists here (SPEC-0023 out of scope).
-	if len(request.Transfers) > 0 && !contains(request.Transfers, "basic") {
+	if len(request.Transfers) > 0 && !slices.Contains(request.Transfers, "basic") {
 		http.Error(w, "no acceptable transfer", http.StatusNotImplemented)
 		return
 	}
@@ -254,8 +255,8 @@ func (h LFS) downloadObject(ctx context.Context, operation *gitv1.OperationConte
 	}
 	out := batchObject{OID: oid, Size: storedSize}
 	out.Actions = &struct {
-		Download *batchAction `json:"download,omitempty"`
-		Upload   *batchAction `json:"upload,omitempty"`
+		Download *batchAction `json:"download,omitzero"`
+		Upload   *batchAction `json:"upload,omitzero"`
 	}{Download: &batchAction{Href: href, ExpiresIn: int(expires.Seconds())}}
 	return out
 }
@@ -267,8 +268,8 @@ func (h LFS) uploadObject(ctx context.Context, operation *gitv1.OperationContext
 	}
 	out := batchObject{OID: oid, Size: size}
 	out.Actions = &struct {
-		Download *batchAction `json:"download,omitempty"`
-		Upload   *batchAction `json:"upload,omitempty"`
+		Download *batchAction `json:"download,omitzero"`
+		Upload   *batchAction `json:"upload,omitzero"`
 	}{Upload: &batchAction{Href: href, ExpiresIn: int(expires.Seconds())}}
 	return out
 }
@@ -315,13 +316,4 @@ func lfsBatchPath(path string) (handle string, ok bool) {
 		return "", false
 	}
 	return parts[0] + "/" + parts[1], true
-}
-
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }

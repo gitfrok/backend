@@ -72,7 +72,7 @@ func TestRequestFieldsCrossTheWire(t *testing.T) {
 	pdp := &stubPDP{decision: api.Decision{Allowed: true}}
 	client := dial(t, pdp)
 
-	if _, err := client.Decide(context.Background(), protoRequest()); err != nil {
+	if _, err := client.Decide(t.Context(), protoRequest()); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestResponseFieldsCrossTheWire(t *testing.T) {
 	}
 	client := dial(t, &stubPDP{decision: want})
 
-	got, err := client.Decide(context.Background(), protoRequest())
+	got, err := client.Decide(t.Context(), protoRequest())
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestResponseFieldsCrossTheWire(t *testing.T) {
 func TestDenialCrossesAsANormalResponse(t *testing.T) {
 	client := dial(t, &stubPDP{decision: api.Decision{Reason: "denied", PolicyRevision: "0.1.0"}})
 
-	got, err := client.Decide(context.Background(), protoRequest())
+	got, err := client.Decide(t.Context(), protoRequest())
 	// A denial is an answer, not a transport failure. Returning an error status would make the
 	// PEP unable to tell "you may not" from "the PDP is down" — and those need different handling:
 	// one is cacheable, the other must be retried or must fail the request.
@@ -139,7 +139,7 @@ func TestDenialCrossesAsANormalResponse(t *testing.T) {
 func TestEvaluatorFailureIsAnErrorStatusNotADenial(t *testing.T) {
 	client := dial(t, &stubPDP{err: errors.New("bundle exploded")})
 
-	got, err := client.Decide(context.Background(), protoRequest())
+	got, err := client.Decide(t.Context(), protoRequest())
 	if err == nil {
 		t.Fatalf("an evaluator failure returned a normal response %+v", got)
 	}
@@ -158,7 +158,7 @@ func TestAbsentMessageFieldsAreNotAPanic(t *testing.T) {
 	pdp := &stubPDP{decision: api.Decision{Reason: "denied"}}
 	client := dial(t, pdp)
 
-	got, err := client.Decide(context.Background(), &policyv1.DecideRequest{Action: "repo.read"})
+	got, err := client.Decide(t.Context(), &policyv1.DecideRequest{Action: "repo.read"})
 	if err != nil {
 		t.Fatalf("a request with no subject or resource errored: %v", err)
 	}

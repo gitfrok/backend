@@ -88,7 +88,7 @@ func TestLFSPointersInRefsWalksHistory(t *testing.T) {
 	mustRunGit(t, work, "add", "big.bin")
 	mustRunGit(t, work, "commit", "-m", "replace with plain content")
 
-	pointers, err := lfsPointersInRefs(context.Background(), work, []string{"refs/heads/main"})
+	pointers, err := lfsPointersInRefs(t.Context(), work, []string{"refs/heads/main"})
 	if err != nil {
 		t.Fatalf("lfsPointersInRefs: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestNoPointersNeedsNoObjectTier(t *testing.T) {
 	mustRunGit(t, work, "add", "README.md")
 	mustRunGit(t, work, "commit", "-m", "initial")
 
-	pointers, err := lfsPointersInRefs(context.Background(), work, []string{"refs/heads/main"})
+	pointers, err := lfsPointersInRefs(t.Context(), work, []string{"refs/heads/main"})
 	if err != nil {
 		t.Fatalf("lfsPointersInRefs: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestImportFetchesReferencedLFSObjects(t *testing.T) {
 	objects := newMemoryObjects()
 	server := &Server{objects: objects, sourceLFS: source.client()}
 
-	stored, err := server.importLFSObjects(context.Background(),
+	stored, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: "tenant-a", repositoryID: "repo-a"},
 		[]string{"refs/heads/main"},
 		source.server.URL+"/acme/widgets.git", "source-token")
@@ -323,7 +323,7 @@ func TestImportFailsWhenAnObjectCannotBeFetched(t *testing.T) {
 	objects := newMemoryObjects()
 	server := &Server{objects: objects, sourceLFS: source.client()}
 
-	if _, err := server.importLFSObjects(context.Background(),
+	if _, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: "tenant-a", repositoryID: "repo-a"},
 		[]string{"refs/heads/main"},
 		source.server.URL+"/acme/widgets.git", ""); err == nil {
@@ -351,7 +351,7 @@ func TestImportRefusesContentThatDoesNotMatchItsOID(t *testing.T) {
 	objects := newMemoryObjects()
 	server := &Server{objects: objects, sourceLFS: source.client()}
 
-	if _, err := server.importLFSObjects(context.Background(),
+	if _, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: "tenant-a", repositoryID: "repo-a"},
 		[]string{"refs/heads/main"},
 		source.server.URL+"/acme/widgets.git", ""); err == nil {
@@ -372,7 +372,7 @@ func TestImportWithPointersAndNoObjectTierFails(t *testing.T) {
 	mustRunGit(t, work, "commit", "-m", "add pointer")
 
 	server := &Server{sourceLFS: newSourceLFSClient()}
-	if _, err := server.importLFSObjects(context.Background(),
+	if _, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: "tenant-a", repositoryID: "repo-a"},
 		[]string{"refs/heads/main"}, "https://source.test/acme/widgets.git", ""); err == nil {
 		t.Fatal("an import carrying pointers succeeded with no object tier")
@@ -395,7 +395,7 @@ func TestResumedImportSkipsStoredObjects(t *testing.T) {
 	objects.stored[lfsObjectKey("tenant-a", oidOf(payload))] = []byte(payload)
 	server := &Server{objects: objects, sourceLFS: source.client()}
 
-	stored, err := server.importLFSObjects(context.Background(),
+	stored, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: "tenant-a", repositoryID: "repo-a"},
 		[]string{"refs/heads/main"}, source.server.URL+"/acme/widgets.git", "")
 	if err != nil {

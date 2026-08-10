@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +95,7 @@ func TestRepositoryBytesMeasuresWhatStorageHolds(t *testing.T) {
 	bare := filepath.Join(root, "repo.git")
 	mustRunGit(t, root, "init", "--bare", bare)
 
-	empty := repositoryBytes(context.Background(), bare)
+	empty := repositoryBytes(t.Context(), bare)
 	if empty != 0 {
 		t.Fatalf("empty repository = %d bytes, want 0", empty)
 	}
@@ -113,7 +112,7 @@ func TestRepositoryBytesMeasuresWhatStorageHolds(t *testing.T) {
 	mustRunGit(t, work, "commit", "-m", "payload")
 	mustRunGit(t, work, "push", bare, "HEAD:refs/heads/main")
 
-	held := repositoryBytes(context.Background(), bare)
+	held := repositoryBytes(t.Context(), bare)
 	if held <= empty {
 		t.Fatalf("repository holding a commit = %d bytes, want more than the empty %d", held, empty)
 	}
@@ -123,7 +122,7 @@ func TestRepositoryBytesMeasuresWhatStorageHolds(t *testing.T) {
 // is called the objects are already durable, and failing an import that landed
 // would be a worse answer than an unrecorded charge.
 func TestRepositoryBytesOfNothingIsZero(t *testing.T) {
-	if got := repositoryBytes(context.Background(), filepath.Join(t.TempDir(), "absent")); got != 0 {
+	if got := repositoryBytes(t.Context(), filepath.Join(t.TempDir(), "absent")); got != 0 {
 		t.Fatalf("absent repository = %d bytes, want 0", got)
 	}
 }

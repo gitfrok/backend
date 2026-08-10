@@ -139,7 +139,7 @@ func TestCanonicalFormIsStableAcrossMapOrder(t *testing.T) {
 	b := fields(1, "x")
 	b.Detail = map[string]string{"policy": "tenant_isolation", "sqlstate": "42501"} // inserted in the other order
 
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		if Hash("", a) != Hash("", b) {
 			t.Fatal("hash depends on map iteration order — verification would fail at random")
 		}

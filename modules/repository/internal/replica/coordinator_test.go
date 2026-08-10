@@ -32,7 +32,7 @@ func TestQuorumRequiresPrimaryAndSyncAck(t *testing.T) {
 	c := NewInMemoryCoordinator("", nil)
 	seedTwoNode(t, c)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	lease, err := c.BindLease(ctx, tenantID, repositoryID, "op-1", "node-a", term1)
 	if err != nil || !lease.Granted {
 		t.Fatalf("BindLease = %+v err=%v, want granted", lease, err)
@@ -71,7 +71,7 @@ func TestQuorumRequiresPrimaryAndSyncAck(t *testing.T) {
 // so one ack satisfies the quorum.
 func TestSingleNodeAutoSeedSatisfiesQuorum(t *testing.T) {
 	c := NewInMemoryCoordinator("node-a", nil)
-	ctx := context.Background()
+	ctx := t.Context()
 	// GetShard auto-seeds: primary==sync=="node-a".
 	rec, err := c.GetShard(ctx, tenantID, repositoryID, 0)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestSingleNodeAutoSeedSatisfiesQuorum(t *testing.T) {
 func TestStaleTermAndStalePrimaryAreDeniedWithoutChangingRecord(t *testing.T) {
 	c := NewInMemoryCoordinator("", nil)
 	seedTwoNode(t, c)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// BindLease with a stale (too-high) term: denied, returns current term.
 	lease, err := c.BindLease(ctx, tenantID, repositoryID, "op", "node-a", 99)
@@ -125,7 +125,7 @@ func TestStaleTermAndStalePrimaryAreDeniedWithoutChangingRecord(t *testing.T) {
 // AC2: an unknown shard is denied.
 func TestUnknownShardDenied(t *testing.T) {
 	c := NewInMemoryCoordinator("", nil)
-	ctx := context.Background()
+	ctx := t.Context()
 	if _, err := c.BindLease(ctx, tenantID, repositoryID, "op", "node-a", term1); !errors.Is(err, ErrShardNotFound) {
 		t.Fatalf("BindLease unknown shard = %v, want ErrShardNotFound", err)
 	}
@@ -136,7 +136,7 @@ func TestUnknownShardDenied(t *testing.T) {
 func TestAutoPromoteCASAndFence(t *testing.T) {
 	c := NewInMemoryCoordinator("", nil)
 	seedTwoNode(t, c)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	res, err := c.PromoteReplica(ctx, tenantID, repositoryID)
 	if err != nil || !res.Promoted || res.Term != 2 || res.WriteReady {
@@ -187,7 +187,7 @@ func TestAutoPromoteCASAndFence(t *testing.T) {
 func TestPromoteRefusedWhenNotHealthy(t *testing.T) {
 	c := NewInMemoryCoordinator("", nil)
 	seedTwoNode(t, c)
-	ctx := context.Background()
+	ctx := t.Context()
 	// Second promotion would race / find a non-healthy shard.
 	if _, err := c.PromoteReplica(ctx, tenantID, repositoryID); err != nil {
 		t.Fatalf("first PromoteReplica: %v", err)
@@ -207,7 +207,7 @@ func TestPromoteRefusedWhenNotHealthy(t *testing.T) {
 func TestDualLossFailsReadOnly(t *testing.T) {
 	c := NewInMemoryCoordinator("", nil)
 	seedTwoNode(t, c)
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := c.MarkDegraded(ctx, tenantID, repositoryID); err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestForcePromoteFromDegradedReadOnlyAudited(t *testing.T) {
 	})
 	c := NewInMemoryCoordinator("", b)
 	seedTwoNode(t, c)
-	ctx := context.Background()
+	ctx := t.Context()
 	// Give the sync replica a recorded ack so the RPO estimate is real, then declare dual loss.
 	if _, err := c.BindLease(ctx, tenantID, repositoryID, "op", "node-a", term1); err != nil {
 		t.Fatalf("BindLease: %v", err)
@@ -293,7 +293,7 @@ func TestForcePromoteRefusedWhenNotDegraded(t *testing.T) {
 	})
 	c := NewInMemoryCoordinator("", b)
 	seedTwoNode(t, c)
-	ctx := context.Background()
+	ctx := t.Context()
 	// Healthy shard is the wrong state for an operator override.
 	res, err := c.ForcePromote(ctx, api.ForcePromoteRequest{
 		TenantID: tenantID, RepositoryID: repositoryID, TargetNode: "node-c",
@@ -310,7 +310,7 @@ func TestForcePromoteRefusedWhenNotDegraded(t *testing.T) {
 // AC4/AC5: an unknown shard cannot be force-promoted.
 func TestForcePromoteUnknownShard(t *testing.T) {
 	c := NewInMemoryCoordinator("", nil)
-	_, err := c.ForcePromote(context.Background(), api.ForcePromoteRequest{
+	_, err := c.ForcePromote(t.Context(), api.ForcePromoteRequest{
 		TenantID: tenantID, RepositoryID: repositoryID, TargetNode: "node-c",
 	})
 	if !errors.Is(err, ErrShardNotFound) {
@@ -322,7 +322,7 @@ func TestForcePromoteUnknownShard(t *testing.T) {
 func TestTermChangeMidPushWithholdsAck(t *testing.T) {
 	c := NewInMemoryCoordinator("", nil)
 	seedTwoNode(t, c)
-	ctx := context.Background()
+	ctx := t.Context()
 	// Primary leases and acks under term 1.
 	if _, err := c.BindLease(ctx, tenantID, repositoryID, "op", "node-a", term1); err != nil {
 		t.Fatal(err)

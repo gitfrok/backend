@@ -121,7 +121,7 @@ func newTestDispatcher(t *testing.T, launcher Launcher, opts ...Option) (*Dispat
 func TestDispatchOneLaunchesSandboxAndReachesTerminal(t *testing.T) {
 	launcher := &fakeLauncher{}
 	d, store, _ := newTestDispatcher(t, launcher)
-	if err := d.DispatchOne(context.Background(), "job-1"); err != nil {
+	if err := d.DispatchOne(t.Context(), "job-1"); err != nil {
 		t.Fatalf("DispatchOne: %v", err)
 	}
 	if len(launcher.launched) != 1 {
@@ -142,7 +142,7 @@ func TestDispatchOneLaunchesSandboxAndReachesTerminal(t *testing.T) {
 func TestDispatchOneLaunchFailureIsTerminalFailed(t *testing.T) {
 	launcher := &fakeLauncher{fail: true}
 	d, store, _ := newTestDispatcher(t, launcher)
-	if err := d.DispatchOne(context.Background(), "job-1"); err != nil {
+	if err := d.DispatchOne(t.Context(), "job-1"); err != nil {
 		t.Fatalf("DispatchOne: %v", err)
 	}
 	job := store.jobs["job-1"]
@@ -155,7 +155,7 @@ func TestDispatchOneOnlyRunsQueuedJobs(t *testing.T) {
 	launcher := &fakeLauncher{}
 	d, store, _ := newTestDispatcher(t, launcher)
 	store.jobs["job-2"] = api.Job{ID: "job-2", TenantID: "tenant-a", State: api.JobRunning}
-	if err := d.DispatchOne(context.Background(), "job-2"); err == nil {
+	if err := d.DispatchOne(t.Context(), "job-2"); err == nil {
 		t.Fatal("expected error for non-queued job")
 	}
 }
@@ -166,7 +166,7 @@ func TestDispatchOneOnlyRunsQueuedJobs(t *testing.T) {
 func TestLaunchUsesTheEnvironmentResolvedRunnerConfiguration(t *testing.T) {
 	launcher := &fakeLauncher{}
 	d, _, _ := newTestDispatcher(t, launcher)
-	if err := d.DispatchOne(context.Background(), "job-1"); err != nil {
+	if err := d.DispatchOne(t.Context(), "job-1"); err != nil {
 		t.Fatalf("DispatchOne: %v", err)
 	}
 	got := launcher.launched[0]
@@ -186,12 +186,12 @@ func TestTickPublishesQueueDepthAndClaimsOneJob(t *testing.T) {
 	d, store, queue := newTestDispatcher(t, launcher, WithGauge(gauge))
 	store.jobs["job-2"] = api.Job{ID: "job-2", TenantID: "tenant-a", RepositoryID: "repo-a", ActorID: "actor-a", Ref: "refs/heads/main", CommitSHA: "sha-b", ConfigurationDigest: "config-b", State: api.JobQueued, QueuedAt: time.Now()}
 	for _, id := range []string{"job-1", "job-2"} {
-		if err := queue.Enqueue(context.Background(), id); err != nil {
+		if err := queue.Enqueue(t.Context(), id); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 	}
 
-	if err := d.Tick(context.Background()); err != nil {
+	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
 	if len(launcher.launched) != 1 {
@@ -201,7 +201,7 @@ func TestTickPublishesQueueDepthAndClaimsOneJob(t *testing.T) {
 		t.Fatalf("gauge = %v, want the queue depth [2] observed before the claim", gauge.values)
 	}
 
-	if err := d.Tick(context.Background()); err != nil {
+	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
 	if len(launcher.launched) != 2 {
@@ -212,7 +212,7 @@ func TestTickPublishesQueueDepthAndClaimsOneJob(t *testing.T) {
 	}
 
 	// An empty queue is not an error and launches nothing.
-	if err := d.Tick(context.Background()); err != nil {
+	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick on an empty queue: %v", err)
 	}
 	if len(launcher.launched) != 2 {
@@ -225,13 +225,13 @@ func TestTickPublishesQueueDepthAndClaimsOneJob(t *testing.T) {
 func TestClaimedJobIsNotClaimedTwice(t *testing.T) {
 	launcher := &fakeLauncher{}
 	d, _, queue := newTestDispatcher(t, launcher)
-	if err := queue.Enqueue(context.Background(), "job-1"); err != nil {
+	if err := queue.Enqueue(t.Context(), "job-1"); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	if err := d.Tick(context.Background()); err != nil {
+	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
-	if err := d.Tick(context.Background()); err != nil {
+	if err := d.Tick(t.Context()); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
 	if len(launcher.launched) != 1 {

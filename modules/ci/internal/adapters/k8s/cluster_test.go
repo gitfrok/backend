@@ -34,10 +34,10 @@ func TestCreateRefusesASecondJobForTheSameAttempt(t *testing.T) {
 	client, _ := clusterClient(t)
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "ci-attempt-1", Namespace: "gitfrok-ci"}}
 
-	if err := client.Create(context.Background(), job); err != nil {
+	if err := client.Create(t.Context(), job); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := client.Create(context.Background(), job); err == nil {
+	if err := client.Create(t.Context(), job); err == nil {
 		t.Fatal("a second create for the same attempt was accepted")
 	}
 }
@@ -48,10 +48,10 @@ func TestCreateRefusesAJobForAnotherNamespace(t *testing.T) {
 	client, clientset := clusterClient(t)
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "ci-attempt-1", Namespace: "kube-system"}}
 
-	if err := client.Create(context.Background(), job); err == nil {
+	if err := client.Create(t.Context(), job); err == nil {
 		t.Fatal("a job for another namespace was accepted")
 	}
-	jobs, err := clientset.BatchV1().Jobs("kube-system").List(context.Background(), metav1.ListOptions{})
+	jobs, err := clientset.BatchV1().Jobs("kube-system").List(t.Context(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestCreateRefusesAJobForAnotherNamespace(t *testing.T) {
 func TestAwaitTerminalReportsCompletion(t *testing.T) {
 	client, clientset := clusterClient(t)
 	watcher := clientset.BatchV1().Jobs("gitfrok-ci")
-	if _, err := watcher.Create(context.Background(), complete("ci-attempt-1", "", ""), metav1.CreateOptions{}); err != nil {
+	if _, err := watcher.Create(t.Context(), complete("ci-attempt-1", "", ""), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seeding the job: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestAwaitTerminalReportsCompletion(t *testing.T) {
 func TestAwaitTerminalReportsFailureWithItsReason(t *testing.T) {
 	client, clientset := clusterClient(t)
 	watcher := clientset.BatchV1().Jobs("gitfrok-ci")
-	if _, err := watcher.Create(context.Background(), complete("ci-attempt-1", "", ""), metav1.CreateOptions{}); err != nil {
+	if _, err := watcher.Create(t.Context(), complete("ci-attempt-1", "", ""), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seeding the job: %v", err)
 	}
 
@@ -116,7 +116,7 @@ func TestAwaitTerminalReportsFailureWithItsReason(t *testing.T) {
 func TestAwaitTerminalTreatsDeletionAsFailure(t *testing.T) {
 	client, clientset := clusterClient(t)
 	watcher := clientset.BatchV1().Jobs("gitfrok-ci")
-	if _, err := watcher.Create(context.Background(), complete("ci-attempt-1", "", ""), metav1.CreateOptions{}); err != nil {
+	if _, err := watcher.Create(t.Context(), complete("ci-attempt-1", "", ""), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seeding the job: %v", err)
 	}
 
@@ -140,11 +140,11 @@ func TestAwaitTerminalTreatsDeletionAsFailure(t *testing.T) {
 // than a clean outcome it never observed.
 func TestAwaitTerminalFailsWhenTheContextEnds(t *testing.T) {
 	client, clientset := clusterClient(t)
-	if _, err := clientset.BatchV1().Jobs("gitfrok-ci").Create(context.Background(), complete("ci-attempt-1", "", ""), metav1.CreateOptions{}); err != nil {
+	if _, err := clientset.BatchV1().Jobs("gitfrok-ci").Create(t.Context(), complete("ci-attempt-1", "", ""), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("seeding the job: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, _, err := client.AwaitTerminal(ctx, "ci-attempt-1"); err == nil {
 		t.Fatal("a cancelled wait reported a terminal state it never observed")
@@ -154,13 +154,13 @@ func TestAwaitTerminalFailsWhenTheContextEnds(t *testing.T) {
 func TestDeleteRemovesTheJob(t *testing.T) {
 	client, clientset := clusterClient(t)
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "ci-attempt-1", Namespace: "gitfrok-ci"}}
-	if err := client.Create(context.Background(), job); err != nil {
+	if err := client.Create(t.Context(), job); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := client.Delete(context.Background(), "ci-attempt-1"); err != nil {
+	if err := client.Delete(t.Context(), "ci-attempt-1"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	remaining, err := clientset.BatchV1().Jobs("gitfrok-ci").List(context.Background(), metav1.ListOptions{})
+	remaining, err := clientset.BatchV1().Jobs("gitfrok-ci").List(t.Context(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestDeleteRemovesTheJob(t *testing.T) {
 // An unconfirmed deletion must surface as an error so the attempt can fail.
 func TestDeleteOfAnUnknownJobIsAnError(t *testing.T) {
 	client, _ := clusterClient(t)
-	if err := client.Delete(context.Background(), "ci-attempt-missing"); err == nil {
+	if err := client.Delete(t.Context(), "ci-attempt-missing"); err == nil {
 		t.Fatal("deleting a job that is not there was reported as confirmed cleanup")
 	}
 }
@@ -182,11 +182,11 @@ func TestLauncherRunsAnAttemptThroughTheClusterClient(t *testing.T) {
 	client, clientset := clusterClient(t)
 	launcher := NewLauncher(client, "gitfrok-ci")
 
-	attempt, err := launcher.Launch(context.Background(), testJob(), testRunnerConfig())
+	attempt, err := launcher.Launch(t.Context(), testJob(), testRunnerConfig())
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	created, err := clientset.BatchV1().Jobs("gitfrok-ci").List(context.Background(), metav1.ListOptions{})
+	created, err := clientset.BatchV1().Jobs("gitfrok-ci").List(t.Context(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestLauncherRunsAnAttemptThroughTheClusterClient(t *testing.T) {
 	if state != api.JobSucceeded {
 		t.Fatalf("state = %s, want SUCCEEDED", state)
 	}
-	remaining, err := clientset.BatchV1().Jobs("gitfrok-ci").List(context.Background(), metav1.ListOptions{})
+	remaining, err := clientset.BatchV1().Jobs("gitfrok-ci").List(t.Context(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

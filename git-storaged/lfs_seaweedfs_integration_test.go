@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"os"
@@ -76,7 +75,7 @@ func TestLiveImportStoresLFSObjectsOnSeaweedFS(t *testing.T) {
 	server := &Server{objects: store, sourceLFS: source.client()}
 
 	tenantID := "tenant-live-" + time.Now().UTC().Format("20060102150405")
-	stored, err := server.importLFSObjects(context.Background(),
+	stored, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: tenantID, repositoryID: "repo-a"},
 		[]string{"refs/heads/main"},
 		source.server.URL+"/acme/widgets.git", "source-token")
@@ -90,7 +89,7 @@ func TestLiveImportStoresLFSObjectsOnSeaweedFS(t *testing.T) {
 	// Fetchable afterwards — the actual acceptance criterion, read back through the
 	// gateway rather than from the importer's own bookkeeping.
 	key := lfsObjectKey(tenantID, oidOf(payload))
-	body, size, err := store.Get(context.Background(), key)
+	body, size, err := store.Get(t.Context(), key)
 	if err != nil {
 		t.Fatalf("the imported object is not fetchable: %v", err)
 	}
@@ -123,7 +122,7 @@ func TestLiveImportedObjectIsFetchableWithAPresignedURL(t *testing.T) {
 	server := &Server{objects: store, sourceLFS: source.client()}
 	tenantID := "tenant-presign-" + time.Now().UTC().Format("20060102150405")
 
-	if _, err := server.importLFSObjects(context.Background(),
+	if _, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: tenantID, repositoryID: "repo-a"},
 		[]string{"refs/heads/main"},
 		source.server.URL+"/acme/widgets.git", ""); err != nil {
@@ -167,7 +166,7 @@ func TestLiveSameOIDInTwoTenantsIsTwoObjects(t *testing.T) {
 	server := &Server{objects: store, sourceLFS: source.client()}
 
 	first := "tenant-a-" + stamp
-	if _, err := server.importLFSObjects(context.Background(),
+	if _, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: first, repositoryID: "repo-a"},
 		[]string{"refs/heads/main"}, source.server.URL+"/acme/widgets.git", ""); err != nil {
 		t.Fatalf("first tenant: %v", err)
@@ -176,17 +175,17 @@ func TestLiveSameOIDInTwoTenantsIsTwoObjects(t *testing.T) {
 	// The second tenant's object is absent until it imports for itself: one tenant
 	// storing an OID must not make it readable in another.
 	second := "tenant-b-" + stamp
-	if _, err := store.Stat(context.Background(), lfsObjectKey(second, oidOf(payload))); err == nil {
+	if _, err := store.Stat(t.Context(), lfsObjectKey(second, oidOf(payload))); err == nil {
 		t.Fatal("tenant B could read an object only tenant A imported")
 	}
 
-	if _, err := server.importLFSObjects(context.Background(),
+	if _, err := server.importLFSObjects(t.Context(),
 		repositoryOperation{path: work, tenantID: second, repositoryID: "repo-b"},
 		[]string{"refs/heads/main"}, source.server.URL+"/acme/widgets.git", ""); err != nil {
 		t.Fatalf("second tenant: %v", err)
 	}
 	for _, tenant := range []string{first, second} {
-		if _, err := store.Stat(context.Background(), lfsObjectKey(tenant, oidOf(payload))); err != nil {
+		if _, err := store.Stat(t.Context(), lfsObjectKey(tenant, oidOf(payload))); err != nil {
 			t.Fatalf("%s does not hold its own copy: %v", tenant, err)
 		}
 	}
@@ -211,13 +210,13 @@ func TestLiveResumedImportSkipsWhatSeaweedFSAlreadyHolds(t *testing.T) {
 	tenantID := "tenant-resume-" + time.Now().UTC().Format("20060102150405")
 	operation := repositoryOperation{path: work, tenantID: tenantID, repositoryID: "repo-a"}
 
-	if _, err := server.importLFSObjects(context.Background(), operation,
+	if _, err := server.importLFSObjects(t.Context(), operation,
 		[]string{"refs/heads/main"}, source.server.URL+"/acme/widgets.git", ""); err != nil {
 		t.Fatalf("first import: %v", err)
 	}
 	callsAfterFirst := source.batchCalls
 
-	stored, err := server.importLFSObjects(context.Background(), operation,
+	stored, err := server.importLFSObjects(t.Context(), operation,
 		[]string{"refs/heads/main"}, source.server.URL+"/acme/widgets.git", "")
 	if err != nil {
 		t.Fatalf("resumed import: %v", err)

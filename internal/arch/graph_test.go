@@ -3,6 +3,7 @@ package arch_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -232,7 +233,7 @@ func TestAPIPurityIgnoresInfraBehindTheModuleBoundary(t *testing.T) {
 func TestFanCountsDescribeTheRealTree(t *testing.T) {
 	g := realGraph(t)
 	edges := g.ModuleEdges()
-	if !contains(edges["codesearch"], "repository") {
+	if !slices.Contains(edges["codesearch"], "repository") {
 		t.Errorf("codesearch depends on repository; edges say %v", edges["codesearch"])
 	}
 	if got := g.FanOut()["repository"]; got != 0 {
@@ -257,13 +258,4 @@ func TestGraphExcludesTestFiles(t *testing.T) {
 			t.Errorf("test-only import %q leaked into the graph", imp)
 		}
 	}
-}
-
-func contains(hay []string, needle string) bool {
-	for _, h := range hay {
-		if h == needle {
-			return true
-		}
-	}
-	return false
 }

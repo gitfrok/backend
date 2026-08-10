@@ -95,7 +95,7 @@ func (f *mergeFixture) ref(t *testing.T, name string) string {
 func TestMergeRefMovesTheTargetRefAndAnnouncesIt(t *testing.T) {
 	fixture := newMergeFixture(t, allowPDP{})
 
-	response, err := fixture.client.MergeRef(context.Background(), fixture.request("refs/heads/main", fixture.head, fixture.base))
+	response, err := fixture.client.MergeRef(t.Context(), fixture.request("refs/heads/main", fixture.head, fixture.base))
 	if err != nil {
 		t.Fatalf("MergeRef: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestMergeRefAsksThePDPWithAServerDerivedOperation(t *testing.T) {
 	pdp := &recordingPDP{decision: policyapi.Decision{Allowed: true}}
 	fixture := newMergeFixture(t, pdp)
 
-	if _, err := fixture.client.MergeRef(context.Background(), fixture.request("refs/heads/main", fixture.head, fixture.base)); err != nil {
+	if _, err := fixture.client.MergeRef(t.Context(), fixture.request("refs/heads/main", fixture.head, fixture.base)); err != nil {
 		t.Fatalf("MergeRef: %v", err)
 	}
 	if pdp.request.Action != "repo.write" {
@@ -142,7 +142,7 @@ func TestMergeRefDeniedByThePDPMovesNothing(t *testing.T) {
 	pdp := &recordingPDP{decision: policyapi.Decision{Allowed: false}}
 	fixture := newMergeFixture(t, pdp)
 
-	if _, err := fixture.client.MergeRef(context.Background(), fixture.request("refs/heads/main", fixture.head, fixture.base)); err == nil {
+	if _, err := fixture.client.MergeRef(t.Context(), fixture.request("refs/heads/main", fixture.head, fixture.base)); err == nil {
 		t.Fatal("a PDP denial still moved the ref")
 	}
 	if got := fixture.ref(t, "refs/heads/main"); got != fixture.base {
@@ -158,7 +158,7 @@ func TestMergeRefDeniedByThePDPMovesNothing(t *testing.T) {
 func TestMergeRefRefusesAStaleExpectedRevision(t *testing.T) {
 	fixture := newMergeFixture(t, allowPDP{})
 
-	if _, err := fixture.client.MergeRef(context.Background(), fixture.request("refs/heads/main", fixture.head, fixture.head)); err == nil {
+	if _, err := fixture.client.MergeRef(t.Context(), fixture.request("refs/heads/main", fixture.head, fixture.head)); err == nil {
 		t.Fatal("a merge against a revision the ref was never at was applied")
 	}
 	if got := fixture.ref(t, "refs/heads/main"); got != fixture.base {
@@ -171,7 +171,7 @@ func TestMergeRefRefusesAStaleExpectedRevision(t *testing.T) {
 func TestMergeRefRefusesAnExistingRefWhenNoneWasExpected(t *testing.T) {
 	fixture := newMergeFixture(t, allowPDP{})
 
-	if _, err := fixture.client.MergeRef(context.Background(), fixture.request("refs/heads/main", fixture.head, "")); err == nil {
+	if _, err := fixture.client.MergeRef(t.Context(), fixture.request("refs/heads/main", fixture.head, "")); err == nil {
 		t.Fatal("a merge expecting no ref overwrote an existing one")
 	}
 	if got := fixture.ref(t, "refs/heads/main"); got != fixture.base {
@@ -185,7 +185,7 @@ func TestMergeRefRefusesAnUnknownRevision(t *testing.T) {
 	fixture := newMergeFixture(t, allowPDP{})
 	absent := strings.Repeat("a", 40)
 
-	if _, err := fixture.client.MergeRef(context.Background(), fixture.request("refs/heads/main", absent, fixture.base)); err == nil {
+	if _, err := fixture.client.MergeRef(t.Context(), fixture.request("refs/heads/main", absent, fixture.base)); err == nil {
 		t.Fatal("a merge to a revision this repository does not have was applied")
 	}
 	if got := fixture.ref(t, "refs/heads/main"); got != fixture.base {
@@ -202,7 +202,7 @@ func TestMergeRefRefusesAnythingButAnExactBranchRef(t *testing.T) {
 		"refs/heads/*", "refs/heads/", "refs/heads/../../etc", "refs/heads/a//b",
 		"refs/tags/v1", "refs/heads/-delete", "HEAD", "main", "refs/heads/main.lock",
 	} {
-		if _, err := fixture.client.MergeRef(context.Background(), fixture.request(ref, fixture.head, fixture.base)); err == nil {
+		if _, err := fixture.client.MergeRef(t.Context(), fixture.request(ref, fixture.head, fixture.base)); err == nil {
 			t.Errorf("MergeRef accepted %q", ref)
 		}
 	}
@@ -217,7 +217,7 @@ func TestMergeRefRefusesARevisionExpression(t *testing.T) {
 	fixture := newMergeFixture(t, allowPDP{})
 
 	for _, revision := range []string{"HEAD", "refs/heads/feature", fixture.head[:8], fixture.head + "^", ""} {
-		if _, err := fixture.client.MergeRef(context.Background(), fixture.request("refs/heads/main", revision, fixture.base)); err == nil {
+		if _, err := fixture.client.MergeRef(t.Context(), fixture.request("refs/heads/main", revision, fixture.base)); err == nil {
 			t.Errorf("MergeRef accepted the revision expression %q", revision)
 		}
 	}
@@ -230,7 +230,7 @@ func TestMergeRefIsTenantScoped(t *testing.T) {
 	request := fixture.request("refs/heads/main", fixture.head, fixture.base)
 	request.Context.TenantId = "tenant-b"
 
-	if _, err := fixture.client.MergeRef(context.Background(), request); err == nil {
+	if _, err := fixture.client.MergeRef(t.Context(), request); err == nil {
 		t.Fatal("a merge from another tenant was applied")
 	}
 	if got := fixture.ref(t, "refs/heads/main"); got != fixture.base {

@@ -140,7 +140,7 @@ func principal(tenant, actor, request string, roles ...string) api.Context {
 // route by which this context learns a revision.
 func announceTarget(t *testing.T, events bus.Bus, ref, revision string) {
 	t.Helper()
-	if err := events.Publish(context.Background(), repoapi.RefUpdated{
+	if err := events.Publish(t.Context(), repoapi.RefUpdated{
 		EventID: "event-" + revision, TenantID: "tenant-a", RepoID: "repo-a", Ref: ref,
 		NewSha: revision, ActorID: "actor-z", OccurredAt: time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC),
 	}); err != nil {
@@ -150,7 +150,7 @@ func announceTarget(t *testing.T, events bus.Bus, ref, revision string) {
 
 func openOne(t *testing.T, s *Service, requestID string) api.MergeRequest {
 	t.Helper()
-	mr, err := s.Open(context.Background(), api.OpenRequest{
+	mr, err := s.Open(t.Context(), api.OpenRequest{
 		Context:   principal("tenant-a", "actor-a", requestID, "member"),
 		SourceRef: "refs/heads/feature", TargetRef: "refs/heads/main",
 		Title: "Add a thing",
@@ -165,7 +165,7 @@ func openOne(t *testing.T, s *Service, requestID string) api.MergeRequest {
 // request ID is idempotent and a stale version changes nothing.
 func TestOpenReviewMergeAtTheExpectedVersion(t *testing.T) {
 	service, _, refs, got := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	mr := openOne(t, service, "request-open")
 	if mr.State != api.StateOpen || mr.Version != 1 {
@@ -228,7 +228,7 @@ func TestOpenIsIdempotentOnTheRequestID(t *testing.T) {
 
 func TestStaleVersionChangesNoState(t *testing.T) {
 	service, _, _, _ := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	mr := openOne(t, service, "request-open")
 
 	if _, err := service.Review(ctx, api.ReviewRequest{
@@ -252,7 +252,7 @@ func TestStaleVersionChangesNoState(t *testing.T) {
 // same coarse one a missing merge request produces.
 func TestAnotherTenantSeesNothing(t *testing.T) {
 	service, _, refs, _ := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	mr := openOne(t, service, "request-open")
 
 	intruder := principal("tenant-b", "actor-x", "request-x", "owner")
@@ -286,7 +286,7 @@ func TestAnotherTenantSeesNothing(t *testing.T) {
 // own projection; see the repository projection tests.)
 func TestProtectedRefIsMergedOnlyWithTheRequiredApprovals(t *testing.T) {
 	service, pdp, refs, _ := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if _, err := service.SetProtection(ctx, api.ProtectionRequest{
 		Context:   principal("tenant-a", "admin-a", "request-protect", "owner"),
@@ -336,7 +336,7 @@ func TestProtectedRefIsMergedOnlyWithTheRequiredApprovals(t *testing.T) {
 // head invalidates it.
 func TestApprovalFromAnotherHeadRevisionDoesNotCount(t *testing.T) {
 	service, pdp, _, _ := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	mr := openOne(t, service, "request-open")
 
 	reviewed, err := service.Review(ctx, api.ReviewRequest{
@@ -361,7 +361,7 @@ func TestApprovalFromAnotherHeadRevisionDoesNotCount(t *testing.T) {
 
 func TestALaterReviewSupersedesTheSameActorsEarlierOne(t *testing.T) {
 	service, pdp, _, _ := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	mr := openOne(t, service, "request-open")
 
 	reviewed, err := service.Review(ctx, api.ReviewRequest{
@@ -397,7 +397,7 @@ func TestALaterReviewSupersedesTheSameActorsEarlierOne(t *testing.T) {
 // the verified context rather than from anything the caller could assert.
 func TestEveryMutationAsksThePDP(t *testing.T) {
 	service, pdp, _, _ := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	mr := openOne(t, service, "request-open")
 	if _, err := service.Review(ctx, api.ReviewRequest{
@@ -439,7 +439,7 @@ func TestEveryMutationAsksThePDP(t *testing.T) {
 
 func TestADeniedCommandChangesNoState(t *testing.T) {
 	service, pdp, refs, got := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	pdp.deny["merge_request.open"] = true
 
 	if _, err := service.Open(ctx, api.OpenRequest{
@@ -457,7 +457,7 @@ func TestADeniedCommandChangesNoState(t *testing.T) {
 // immutable audit record, correlated to the PDP decision.
 func TestAcceptedApprovalAndMergeAreEachAuditedOnce(t *testing.T) {
 	service, _, _, got := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	mr := openOne(t, service, "request-open")
 
 	reviewed, err := service.Review(ctx, api.ReviewRequest{
@@ -498,7 +498,7 @@ func TestAcceptedApprovalAndMergeAreEachAuditedOnce(t *testing.T) {
 func TestACommentIsNotAuditedAsAnApproval(t *testing.T) {
 	service, _, _, got := newService(t)
 	mr := openOne(t, service, "request-open")
-	if _, err := service.Review(context.Background(), api.ReviewRequest{
+	if _, err := service.Review(t.Context(), api.ReviewRequest{
 		Context:        principal("tenant-a", "actor-b", "request-review", "member"),
 		MergeRequestID: mr.ID, Disposition: api.DispositionComment,
 		HeadRevision: "sha-head", ExpectedVersion: mr.Version,
@@ -516,7 +516,7 @@ func TestACommentIsNotAuditedAsAnApproval(t *testing.T) {
 // A merged request is terminal: it cannot be reviewed afterwards.
 func TestAMergedRequestCannotBeReviewed(t *testing.T) {
 	service, _, _, _ := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	mr := openOne(t, service, "request-open")
 	merged, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
@@ -536,7 +536,7 @@ func TestAMergedRequestCannotBeReviewed(t *testing.T) {
 
 func TestProtectionIsAnExactRefRuleAndIsAnnounced(t *testing.T) {
 	service, _, _, got := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if _, err := service.SetProtection(ctx, api.ProtectionRequest{
 		Context:   principal("tenant-a", "admin-a", "request-wildcard", "owner"),
@@ -571,7 +571,7 @@ func TestProtectionIsAnExactRefRuleAndIsAnnounced(t *testing.T) {
 // refused against, while an authorized merge still passes.
 func TestZeroApprovalsStillMarksTheRefProtected(t *testing.T) {
 	service, pdp, _, _ := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	if _, err := service.SetProtection(ctx, api.ProtectionRequest{
 		Context:   principal("tenant-a", "admin-a", "request-protect", "owner"),
 		TargetRef: "refs/heads/main", RequiredApprovals: 0,
@@ -595,7 +595,7 @@ func TestZeroApprovalsStillMarksTheRefProtected(t *testing.T) {
 // that did not happen.
 func TestAFailedRefMoveDoesNotMergeTheRequest(t *testing.T) {
 	service, _, refs, got := newService(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	refs.err = errors.New("git-storaged unavailable")
 
 	mr := openOne(t, service, "request-open")
@@ -622,7 +622,7 @@ func TestAFailedRefMoveDoesNotMergeTheRequest(t *testing.T) {
 func TestMergeNamesTheTargetRevisionItWasDecidedAgainst(t *testing.T) {
 	service, _, refs, _ := newService(t)
 	refs.current = map[string]string{"tenant-a/repo-a/refs/heads/main": "sha-target"}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	mr := openOne(t, service, "request-open")
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
@@ -650,7 +650,7 @@ func TestRefUpdatedRefreshesTheTargetRevision(t *testing.T) {
 	service, _, refs, got := newService(t)
 	events := got.events
 	refs.current = map[string]string{"tenant-a/repo-a/refs/heads/main": "sha-moved"}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	mr := openOne(t, service, "request-open")
 	if err := events.Publish(ctx, repoapi.RefUpdated{
@@ -683,7 +683,7 @@ func TestRefUpdatedRefreshesTheTargetRevision(t *testing.T) {
 func TestRefUpdatedIsScopedToTheMergeRequestsOwnTarget(t *testing.T) {
 	service, _, _, got := newService(t)
 	events := got.events
-	ctx := context.Background()
+	ctx := t.Context()
 	mr := openOne(t, service, "request-open")
 
 	for _, event := range []repoapi.RefUpdated{
@@ -710,7 +710,7 @@ func TestRefUpdatedIsScopedToTheMergeRequestsOwnTarget(t *testing.T) {
 func TestAMergeAgainstAMovedRefIsRefusedAndLeavesTheRequestOpen(t *testing.T) {
 	service, _, refs, got := newService(t)
 	refs.current = map[string]string{"tenant-a/repo-a/refs/heads/main": "sha-someone-else"}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	mr := openOne(t, service, "request-open")
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
@@ -744,7 +744,7 @@ func TestTargetRevisionComesFromRepositoryGitNotTheCaller(t *testing.T) {
 
 	// Nothing on the open surface can express a different one.
 	announceTarget(t, got.events, "refs/heads/release", "sha-release")
-	other, err := service.Open(context.Background(), api.OpenRequest{
+	other, err := service.Open(t.Context(), api.OpenRequest{
 		Context:   principal("tenant-a", "actor-a", "request-other", "member"),
 		SourceRef: "refs/heads/feature", TargetRef: "refs/heads/release",
 	})

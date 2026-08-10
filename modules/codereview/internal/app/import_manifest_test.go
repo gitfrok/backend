@@ -22,7 +22,7 @@ func importWithRecords(t *testing.T, records []api.ImportedMergeRequest) (*Impor
 	svc.newID = func() string { return "import-1" }
 	svc.now = func() time.Time { return time.Unix(1780000000, 0).UTC() }
 
-	imp, err := svc.Create(context.Background(), importRequest())
+	imp, err := svc.Create(t.Context(), importRequest())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestManifestVerifiesAgainstTheImportedSet(t *testing.T) {
 	if imp.ManifestDigest == "" {
 		t.Fatal("a completed import recorded no manifest digest")
 	}
-	ok, err := svc.VerifyImport(context.Background(), importRequest().Context, imp.ID)
+	ok, err := svc.VerifyImport(t.Context(), importRequest().Context, imp.ID)
 	if err != nil {
 		t.Fatalf("VerifyImport: %v", err)
 	}
@@ -118,16 +118,16 @@ func TestMutatingAnImportedRecordFailsVerification(t *testing.T) {
 			// Mutate the stored set behind the service's back — the shape a
 			// tamper takes when it does not go through an API surface (AC18
 			// guarantees none exists).
-			stored, err := recordStore.ListImport(context.Background(), imp.ID)
+			stored, err := recordStore.ListImport(t.Context(), imp.ID)
 			if err != nil {
 				t.Fatalf("ListImport: %v", err)
 			}
 			mutate(stored)
-			if err := recordStore.PutImport(context.Background(), imp.ID, stored); err != nil {
+			if err := recordStore.PutImport(t.Context(), imp.ID, stored); err != nil {
 				t.Fatalf("PutImport: %v", err)
 			}
 
-			ok, err := svc.VerifyImport(context.Background(), importRequest().Context, imp.ID)
+			ok, err := svc.VerifyImport(t.Context(), importRequest().Context, imp.ID)
 			if err != nil {
 				t.Fatalf("VerifyImport: %v", err)
 			}
@@ -142,17 +142,17 @@ func TestMutatingAnImportedRecordFailsVerification(t *testing.T) {
 // covers what was imported, not merely what each record says.
 func TestAddingARecordFailsVerification(t *testing.T) {
 	svc, imp, recordStore := importWithRecords(t, importedFixture())
-	stored, err := recordStore.ListImport(context.Background(), imp.ID)
+	stored, err := recordStore.ListImport(t.Context(), imp.ID)
 	if err != nil {
 		t.Fatalf("ListImport: %v", err)
 	}
 	extra := importedFixture()[0]
 	extra.MergeRequestID = "imported-8"
-	if err := recordStore.PutImport(context.Background(), imp.ID, append(stored, extra)); err != nil {
+	if err := recordStore.PutImport(t.Context(), imp.ID, append(stored, extra)); err != nil {
 		t.Fatalf("PutImport: %v", err)
 	}
 
-	ok, err := svc.VerifyImport(context.Background(), importRequest().Context, imp.ID)
+	ok, err := svc.VerifyImport(t.Context(), importRequest().Context, imp.ID)
 	if err != nil {
 		t.Fatalf("VerifyImport: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestFieldBoundariesCannotBeShifted(t *testing.T) {
 func TestVerifyImportDeniesAnotherTenant(t *testing.T) {
 	svc, imp, _ := importWithRecords(t, importedFixture())
 	other := api.Context{TenantID: "tenant-b", RepositoryID: "repo-a", ActorID: "actor-b", RequestID: "req-2"}
-	if _, err := svc.VerifyImport(context.Background(), other, imp.ID); err == nil {
+	if _, err := svc.VerifyImport(t.Context(), other, imp.ID); err == nil {
 		t.Fatal("another tenant verified this import")
 	}
 }

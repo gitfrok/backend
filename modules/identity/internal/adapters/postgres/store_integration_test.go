@@ -24,7 +24,7 @@ func TestPostgresPATRevocationDeniesNextResolverLookup(t *testing.T) {
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL not set — integration test needs T-0013 identity migration")
 	}
-	pool, err := db.Open(context.Background(), dsn)
+	pool, err := db.Open(t.Context(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestPostgresPATRevocationDeniesNextResolverLookup(t *testing.T) {
 	stamp := time.Now().UTC().UnixNano()
 	tenantID := fmt.Sprintf("identity-test-%d", stamp)
 	actorID := fmt.Sprintf("actor-%d", stamp)
-	ctx := tenancy.WithTenant(context.Background(), tenancy.ID(tenantID))
+	ctx := tenancy.WithTenant(t.Context(), tenancy.ID(tenantID))
 	if err := pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO identity.principals (tenant_id, actor_id) VALUES ($1, $2)`, tenantID, actorID); err != nil {
@@ -52,14 +52,14 @@ func TestPostgresPATRevocationDeniesNextResolverLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	principal, ok := auth.AuthenticatePAT(context.Background(), token)
+	principal, ok := auth.AuthenticatePAT(t.Context(), token)
 	if !ok || principal.TenantID != tenantID || principal.ActorID != actorID || !reflect.DeepEqual(principal.Roles, []string{"member"}) {
 		t.Fatalf("resolved principal=%+v ok=%v", principal, ok)
 	}
 	if _, err := auth.RevokePAT(lifecycleCtx, tenantID, actorID, pat.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := auth.AuthenticatePAT(context.Background(), token); ok {
+	if _, ok := auth.AuthenticatePAT(t.Context(), token); ok {
 		t.Fatal("revoked PAT authenticated through resolver")
 	}
 }

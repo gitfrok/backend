@@ -1,7 +1,6 @@
 package protection
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -25,7 +24,7 @@ func TestProtectionArrivesOnlyFromTheEvent(t *testing.T) {
 	if projection.Protected("tenant-a", "repo-a", "refs/heads/main") {
 		t.Fatal("a ref was protected before any event arrived")
 	}
-	if err := events.Publish(context.Background(), changed("tenant-a", "repo-a", "refs/heads/main", 1)); err != nil {
+	if err := events.Publish(t.Context(), changed("tenant-a", "repo-a", "refs/heads/main", 1)); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	if !projection.Protected("tenant-a", "repo-a", "refs/heads/main") {
@@ -39,7 +38,7 @@ func TestProtectionIsScopedToItsTenantRepositoryAndRef(t *testing.T) {
 	events := bus.NewInProcess()
 	projection := New()
 	projection.Subscribe(events)
-	if err := events.Publish(context.Background(), changed("tenant-a", "repo-a", "refs/heads/main", 1)); err != nil {
+	if err := events.Publish(t.Context(), changed("tenant-a", "repo-a", "refs/heads/main", 1)); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 
@@ -60,7 +59,7 @@ func TestZeroRequiredApprovalsStillProtectsTheRef(t *testing.T) {
 	events := bus.NewInProcess()
 	projection := New()
 	projection.Subscribe(events)
-	if err := events.Publish(context.Background(), changed("tenant-a", "repo-a", "refs/heads/main", 0)); err != nil {
+	if err := events.Publish(t.Context(), changed("tenant-a", "repo-a", "refs/heads/main", 0)); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	if !projection.Protected("tenant-a", "repo-a", "refs/heads/main") {

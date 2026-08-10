@@ -37,10 +37,10 @@ func TestULIDIsCanonical(t *testing.T) {
 func TestULIDsAreUnique(t *testing.T) {
 	const n = 10_000
 	seen := make(map[string]struct{}, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		id := ids.NewULID()
 		if _, dup := seen[id]; dup {
-			t.Fatalf("duplicate ULID after %d draws: %q", i, id)
+			t.Fatalf("duplicate ULID after %d draws: %q", len(seen), id)
 		}
 		seen[id] = struct{}{}
 	}
@@ -80,10 +80,8 @@ func TestConcurrentGenerationIsSafe(t *testing.T) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	seen := make(map[string]struct{}, workers*each)
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			local := make([]string, each)
 			for i := range local {
 				local[i] = ids.NewULID()
@@ -96,7 +94,7 @@ func TestConcurrentGenerationIsSafe(t *testing.T) {
 				}
 				seen[id] = struct{}{}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

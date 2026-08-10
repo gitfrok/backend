@@ -40,7 +40,7 @@ func (allowAllPDP) Decide(context.Context, policyapi.Request) (policyapi.Decisio
 // That only holds if the composition root hands one record store to both the
 // history importer and the import service (SPEC-0011 AC17).
 func TestImportRevokeTombstonesTheRecordsTheImporterWrote(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	records := codereview.NewImportRecordStore()
 	// Pacing is off in this test: it is about what a revoke leaves readable, and a
 	// throttle would only make it slower.
@@ -78,7 +78,7 @@ func TestImportRevokeTombstonesTheRecordsTheImporterWrote(t *testing.T) {
 // the import to the wrong API client.
 func TestSourceHistoryImporterRefusesUnknownSystem(t *testing.T) {
 	importer := codereview.NewSourceHistoryImporter(codereview.NewImportRecordStore(), nil, codereview.NewImportPacer(0))
-	if _, err := importer.ImportHistory(context.Background(), codereview.ImportHistoryCommand{
+	if _, err := importer.ImportHistory(t.Context(), codereview.ImportHistoryCommand{
 		TenantID: "tenant-a", RepositoryID: "repo-a", ImportID: "import-1",
 		SourceURL: "https://example.com/acme/widgets.git", SourceSystem: "bitbucket",
 	}); err == nil {

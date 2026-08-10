@@ -1,7 +1,6 @@
 package objectstore
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -90,7 +89,7 @@ func TestPutStatGetRoundTrip(t *testing.T) {
 	payload := "a large object"
 	digest := sha256Hex(payload)
 
-	written, err := store.Put(context.Background(), "lfs/tenant-a/ab/"+digest, int64(len(payload)), digest, strings.NewReader(payload))
+	written, err := store.Put(t.Context(), "lfs/tenant-a/ab/"+digest, int64(len(payload)), digest, strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -98,7 +97,7 @@ func TestPutStatGetRoundTrip(t *testing.T) {
 		t.Fatalf("wrote %d bytes, want %d", written, len(payload))
 	}
 
-	size, err := store.Stat(context.Background(), "lfs/tenant-a/ab/"+digest)
+	size, err := store.Stat(t.Context(), "lfs/tenant-a/ab/"+digest)
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -106,7 +105,7 @@ func TestPutStatGetRoundTrip(t *testing.T) {
 		t.Fatalf("stat size = %d", size)
 	}
 
-	body, _, err := store.Get(context.Background(), "lfs/tenant-a/ab/"+digest)
+	body, _, err := store.Get(t.Context(), "lfs/tenant-a/ab/"+digest)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -137,7 +136,7 @@ func TestPutRejectsContentThatDoesNotMatchItsDigest(t *testing.T) {
 	payload := "the actual bytes"
 	promised := sha256Hex("something else")
 
-	_, err := store.Put(context.Background(), "lfs/tenant-a/aa/"+promised, int64(len(payload)), promised, strings.NewReader(payload))
+	_, err := store.Put(t.Context(), "lfs/tenant-a/aa/"+promised, int64(len(payload)), promised, strings.NewReader(payload))
 	if !errors.Is(err, ErrDigestMismatch) {
 		t.Fatalf("Put = %v, want ErrDigestMismatch", err)
 	}
@@ -148,10 +147,10 @@ func TestPutRejectsContentThatDoesNotMatchItsDigest(t *testing.T) {
 func TestStatAndGetOfAbsentObject(t *testing.T) {
 	tier := newFakeTier(t)
 	store := testStore(t, tier)
-	if _, err := store.Stat(context.Background(), "lfs/tenant-a/zz/missing"); !errors.Is(err, ErrNotFound) {
+	if _, err := store.Stat(t.Context(), "lfs/tenant-a/zz/missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Stat = %v, want ErrNotFound", err)
 	}
-	if _, _, err := store.Get(context.Background(), "lfs/tenant-a/zz/missing"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := store.Get(t.Context(), "lfs/tenant-a/zz/missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get = %v, want ErrNotFound", err)
 	}
 }

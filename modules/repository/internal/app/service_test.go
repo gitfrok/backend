@@ -36,7 +36,7 @@ func TestCreatePublishesRepositoryCreated(t *testing.T) {
 	rec := &recorder{}
 	svc := newService(t, rec)
 
-	view, err := svc.Create(context.Background(), "t-1", "repo-1", "infra", "user-9")
+	view, err := svc.Create(t.Context(), "t-1", "repo-1", "infra", "user-9")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestCreateRejectsAMissingTenant(t *testing.T) {
 	rec := &recorder{}
 	svc := newService(t, rec)
 
-	if _, err := svc.Create(context.Background(), "", "repo-1", "infra", "user-9"); err == nil {
+	if _, err := svc.Create(t.Context(), "", "repo-1", "infra", "user-9"); err == nil {
 		t.Fatal("want an error creating without a tenant")
 	}
 	if len(rec.events) != 0 {
@@ -82,7 +82,7 @@ func TestCreateDoesNotPublishWhenTheWriteFails(t *testing.T) {
 	rec := &recorder{}
 	svc := app.New(failingStore{}, rec)
 
-	if _, err := svc.Create(context.Background(), "t-1", "repo-1", "infra", "user-9"); err == nil {
+	if _, err := svc.Create(t.Context(), "t-1", "repo-1", "infra", "user-9"); err == nil {
 		t.Fatal("want the store error surfaced")
 	}
 	if len(rec.events) != 0 {
@@ -93,11 +93,11 @@ func TestCreateDoesNotPublishWhenTheWriteFails(t *testing.T) {
 // TestCreateIsReadableAfterwards ties the write path to the read port other modules use.
 func TestCreateIsReadableAfterwards(t *testing.T) {
 	svc := newService(t, bus.NewInProcess())
-	if _, err := svc.Create(context.Background(), "t-1", "repo-1", "infra", "user-9"); err != nil {
+	if _, err := svc.Create(t.Context(), "t-1", "repo-1", "infra", "user-9"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	got, err := svc.Get(context.Background(), "t-1", "repo-1")
+	got, err := svc.Get(t.Context(), "t-1", "repo-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -110,11 +110,11 @@ func TestCreateIsReadableAfterwards(t *testing.T) {
 // and the error must not distinguish "wrong tenant" from "absent".
 func TestGetIsTenantScoped(t *testing.T) {
 	svc := newService(t, bus.NewInProcess())
-	if _, err := svc.Create(context.Background(), "t-1", "repo-1", "infra", "user-9"); err != nil {
+	if _, err := svc.Create(t.Context(), "t-1", "repo-1", "infra", "user-9"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if _, err := svc.Get(context.Background(), "t-2", "repo-1"); err == nil {
+	if _, err := svc.Get(t.Context(), "t-2", "repo-1"); err == nil {
 		t.Error("want a cross-tenant read denied")
 	}
 }
@@ -123,7 +123,7 @@ func TestGetIsTenantScoped(t *testing.T) {
 // cannot be silently skipped.
 func TestPublishFailureFailsTheCall(t *testing.T) {
 	svc := app.New(memstore.New(), failingBus{})
-	if _, err := svc.Create(context.Background(), "t-1", "repo-1", "infra", "user-9"); err == nil {
+	if _, err := svc.Create(t.Context(), "t-1", "repo-1", "infra", "user-9"); err == nil {
 		t.Error("want the publish error surfaced")
 	}
 }

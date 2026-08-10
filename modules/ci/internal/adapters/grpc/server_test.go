@@ -42,7 +42,7 @@ func validContext() *civ1.JobContext {
 
 func TestEnqueueJobAcceptsValidRequest(t *testing.T) {
 	s, fj := newTestServer(t)
-	resp, err := s.EnqueueJob(context.Background(), &civ1.EnqueueJobRequest{
+	resp, err := s.EnqueueJob(t.Context(), &civ1.EnqueueJobRequest{
 		Context:     validContext(),
 		Ref:         "refs/heads/main",
 		CommitSha:   "sha-a",
@@ -61,7 +61,7 @@ func TestEnqueueJobAcceptsValidRequest(t *testing.T) {
 
 func TestEnqueueJobDeniesMissingContext(t *testing.T) {
 	s, _ := newTestServer(t)
-	_, err := s.EnqueueJob(context.Background(), &civ1.EnqueueJobRequest{Ref: "refs/heads/main"})
+	_, err := s.EnqueueJob(t.Context(), &civ1.EnqueueJobRequest{Ref: "refs/heads/main"})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("missing context error = %v, want denied", err)
 	}
@@ -69,7 +69,7 @@ func TestEnqueueJobDeniesMissingContext(t *testing.T) {
 
 func TestCancelJobCrossTenantIsDenied(t *testing.T) {
 	s, _ := newTestServer(t)
-	_, err := s.CancelJob(context.Background(), &civ1.CancelJobRequest{
+	_, err := s.CancelJob(t.Context(), &civ1.CancelJobRequest{
 		Context: &civ1.JobContext{TenantId: "tenant-b", RepositoryId: "repo-a", ActorId: "actor-b", RequestId: "req-1"},
 		JobId:   "job-1",
 	})

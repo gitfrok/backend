@@ -70,7 +70,7 @@ func TestListImportedHistoryCarriesProvenanceAndPaging(t *testing.T) {
 	}}
 	server := NewImportServer(imports)
 
-	response, err := server.ListImportedHistory(context.Background(), historyRequest())
+	response, err := server.ListImportedHistory(t.Context(), historyRequest())
 	if err != nil {
 		t.Fatalf("ListImportedHistory: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestListImportedHistoryDenialIsCoarse(t *testing.T) {
 	imports := &stubImports{err: errors.New("import unavailable")}
 	server := NewImportServer(imports)
 
-	withService, err := server.ListImportedHistory(context.Background(), historyRequest())
+	withService, err := server.ListImportedHistory(t.Context(), historyRequest())
 	if err == nil {
 		t.Fatal("a failing read returned a response")
 	}
@@ -169,7 +169,7 @@ func TestListImportedHistoryDenialIsCoarse(t *testing.T) {
 	malformed := historyRequest()
 	malformed.Context = nil
 	unauthenticated := &stubImports{}
-	if _, err := NewImportServer(unauthenticated).ListImportedHistory(context.Background(), malformed); err == nil {
+	if _, err := NewImportServer(unauthenticated).ListImportedHistory(t.Context(), malformed); err == nil {
 		t.Fatal("a request with no verified context was served")
 	}
 	if unauthenticated.got.ImportID != "" {

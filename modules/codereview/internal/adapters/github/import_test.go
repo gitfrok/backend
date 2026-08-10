@@ -84,7 +84,7 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
 	})
@@ -95,7 +95,7 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 		t.Fatalf("counts = %v", result.Counts)
 	}
 
-	stored, err := records.ListImport(context.Background(), "import-1")
+	stored, err := records.ListImport(t.Context(), "import-1")
 	if err != nil || len(stored) != 1 {
 		t.Fatalf("stored = %v err = %v", stored, err)
 	}
@@ -132,7 +132,7 @@ func TestImportHistoryDegradesAnchors(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
 	})
@@ -142,7 +142,7 @@ func TestImportHistoryDegradesAnchors(t *testing.T) {
 	if result.Counts["comments"] != 3 {
 		t.Fatalf("comments = %d, want 3 (one review summary + two line comments)", result.Counts["comments"])
 	}
-	stored, _ := records.ListImport(context.Background(), "import-1")
+	stored, _ := records.ListImport(t.Context(), "import-1")
 	threads := stored[0].Threads
 	// Nothing claims a diff position: resolving a declared position against the
 	// imported refs is not something this import does yet, so every imported
@@ -176,7 +176,7 @@ func TestImportHistoryRateLimitStalls(t *testing.T) {
 	client := New(newMemoryRecords(), server.Client())
 	client.base = server.URL
 
-	_, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	_, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
 	})
@@ -212,10 +212,10 @@ func TestParseSource(t *testing.T) {
 // A revoked import refuses further writes (AC17).
 func TestRevokedImportRefusesWrites(t *testing.T) {
 	records := newMemoryRecords()
-	if err := records.Tombstone(context.Background(), "import-1"); err != nil {
+	if err := records.Tombstone(t.Context(), "import-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := records.PutImport(context.Background(), "import-1", nil); err == nil {
+	if err := records.PutImport(t.Context(), "import-1", nil); err == nil {
 		t.Fatal("a revoked import accepted a write")
 	}
 }
@@ -254,7 +254,7 @@ func TestImportHistoryFollowsPages(t *testing.T) {
 	client := New(records, server.Client())
 	client.base = server.URL
 
-	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
 	})
@@ -283,7 +283,7 @@ func TestImportHistoryPacesFetchesAndReportsBytes(t *testing.T) {
 	client := New(newMemoryRecords(), server.Client()).WithPacer(pacer)
 	client.base = server.URL
 
-	result, err := client.ImportHistory(context.Background(), app.ImportHistoryCommand{
+	result, err := client.ImportHistory(t.Context(), app.ImportHistoryCommand{
 		TenantID: "t", RepositoryID: "r", ImportID: "import-1",
 		SourceURL: "https://github.com/acme/widgets.git", SourceSystem: "github", SourceInstance: "github.com",
 	})

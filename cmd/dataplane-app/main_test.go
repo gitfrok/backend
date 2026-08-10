@@ -26,7 +26,7 @@ func (denyAll) Decide(context.Context, policyapi.Request) (policyapi.Decision, e
 // the Code Search projection, with no module knowing the other was wired in.
 func TestWiringConnectsTheModules(t *testing.T) {
 	dp := newDataplane(denyAll{}, ci.RunnerConfig{}, nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if _, err := dp.repositories.Create(ctx, "t-1", "repo-1", "infra", "user-9"); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -44,7 +44,7 @@ func TestWiringConnectsTheModules(t *testing.T) {
 // TestWiringKeepsTenantsApart: the composed plane must not leak across tenants at either end.
 func TestWiringKeepsTenantsApart(t *testing.T) {
 	dp := newDataplane(denyAll{}, ci.RunnerConfig{}, nil)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if _, err := dp.repositories.Create(ctx, "t-1", "repo-1", "infra", "user-9"); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -85,7 +85,7 @@ func TestPlaneRefusesToBuildWithoutAPDP(t *testing.T) {
 func TestPlaneHoldsThePDPAsAPort(t *testing.T) {
 	dp := newDataplane(denyAll{}, ci.RunnerConfig{}, nil)
 
-	got, err := dp.policy.Decide(context.Background(), policyapi.Request{TenantID: "t-1", Action: "repo.read"})
+	got, err := dp.policy.Decide(t.Context(), policyapi.Request{TenantID: "t-1", Action: "repo.read"})
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}

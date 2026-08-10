@@ -1,7 +1,6 @@
 package opa
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -39,7 +38,7 @@ func newPDP(t *testing.T) *PDP {
 // and only one of them means "the PDP is broken".
 func TestZeroRequestIsDenied(t *testing.T) {
 	p := newPDP(t)
-	got, err := p.Decide(context.Background(), api.Request{})
+	got, err := p.Decide(t.Context(), api.Request{})
 	if err != nil {
 		t.Fatalf("Decide: unexpected error %v", err)
 	}
@@ -55,7 +54,7 @@ func TestUnknownActionIsDenied(t *testing.T) {
 	p := newPDP(t)
 	req := request()
 	req.Action = "repo.exfiltrate"
-	got, err := p.Decide(context.Background(), req)
+	got, err := p.Decide(t.Context(), req)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -66,7 +65,7 @@ func TestUnknownActionIsDenied(t *testing.T) {
 
 func TestGrantedActionIsAllowed(t *testing.T) {
 	p := newPDP(t)
-	got, err := p.Decide(context.Background(), request())
+	got, err := p.Decide(t.Context(), request())
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -97,7 +96,7 @@ func TestRequestFieldsReachThePolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := request()
 			tc.mutate(&req)
-			got, err := p.Decide(context.Background(), req)
+			got, err := p.Decide(t.Context(), req)
 			if err != nil {
 				t.Fatalf("Decide: %v", err)
 			}
@@ -113,7 +112,7 @@ func TestNilContextIsUsable(t *testing.T) {
 	p := newPDP(t)
 	req := request()
 	req.Context = nil
-	if _, err := p.Decide(context.Background(), req); err != nil {
+	if _, err := p.Decide(t.Context(), req); err != nil {
 		t.Fatalf("a nil Context should be a usable request, got %v", err)
 	}
 }
@@ -122,7 +121,7 @@ func TestNilContextIsUsable(t *testing.T) {
 
 func TestDecisionCarriesBundleRevision(t *testing.T) {
 	p := newPDP(t)
-	got, err := p.Decide(context.Background(), request())
+	got, err := p.Decide(t.Context(), request())
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -177,8 +176,8 @@ func TestBundleExcludesTestFiles(t *testing.T) {
 func TestDecisionIDIsUniquePerDecision(t *testing.T) {
 	p := newPDP(t)
 	seen := make(map[string]bool)
-	for i := 0; i < 100; i++ {
-		got, err := p.Decide(context.Background(), request())
+	for range 100 {
+		got, err := p.Decide(t.Context(), request())
 		if err != nil {
 			t.Fatalf("Decide: %v", err)
 		}
@@ -219,7 +218,7 @@ func TestEvaluationFailureReturnsZeroDecision(t *testing.T) {
 				t.Fatalf("New(%s): %v", tc.bundle, err)
 			}
 
-			got, err := p.Decide(context.Background(), request())
+			got, err := p.Decide(t.Context(), request())
 			if err == nil {
 				t.Fatal("no error from a policy that cannot produce a decision")
 			}
@@ -258,7 +257,7 @@ func TestRealGovernanceBundleLoads(t *testing.T) {
 	}
 
 	// And it denies by default, which is the one property this adapter is entitled to assume.
-	got, err := p.Decide(context.Background(), api.Request{})
+	got, err := p.Decide(t.Context(), api.Request{})
 	if err != nil {
 		t.Fatalf("Decide against the real bundle: %v", err)
 	}

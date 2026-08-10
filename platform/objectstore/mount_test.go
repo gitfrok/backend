@@ -38,7 +38,7 @@ func TestMountRoundTrip(t *testing.T) {
 	payload := []byte("an object on the mount")
 	key, digest := keyFor("tenant-a", payload)
 
-	written, err := mount.Put(context.Background(), key, int64(len(payload)), digest, bytes.NewReader(payload))
+	written, err := mount.Put(t.Context(), key, int64(len(payload)), digest, bytes.NewReader(payload))
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -46,12 +46,12 @@ func TestMountRoundTrip(t *testing.T) {
 		t.Fatalf("wrote %d, want %d", written, len(payload))
 	}
 
-	size, err := mount.Stat(context.Background(), key)
+	size, err := mount.Stat(t.Context(), key)
 	if err != nil || size != int64(len(payload)) {
 		t.Fatalf("Stat = %d, %v", size, err)
 	}
 
-	body, size, err := mount.Get(context.Background(), key)
+	body, size, err := mount.Get(t.Context(), key)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -71,10 +71,10 @@ func TestMountFailedWriteLeavesNoObject(t *testing.T) {
 
 	// A reader that fails halfway is the crash this simulates.
 	failing := io.MultiReader(bytes.NewReader(payload[:5]), errorReader{})
-	if _, err := mount.Put(context.Background(), key, int64(len(payload)), digest, failing); err == nil {
+	if _, err := mount.Put(t.Context(), key, int64(len(payload)), digest, failing); err == nil {
 		t.Fatal("a truncated write reported success")
 	}
-	if _, err := mount.Stat(context.Background(), key); !errors.Is(err, objectstore.ErrNotFound) {
+	if _, err := mount.Stat(t.Context(), key); !errors.Is(err, objectstore.ErrNotFound) {
 		t.Fatalf("Stat after a failed write = %v, want ErrNotFound", err)
 	}
 	// And no staging debris is left behind.
@@ -90,11 +90,11 @@ func TestMountRejectsContentThatDoesNotMatchItsDigest(t *testing.T) {
 	_, digest := keyFor("tenant-a", []byte("what was promised"))
 	key := "lfs/tenant-a/" + digest[:2] + "/" + digest
 
-	_, err := mount.Put(context.Background(), key, 4, digest, strings.NewReader("what was actually sent"))
+	_, err := mount.Put(t.Context(), key, 4, digest, strings.NewReader("what was actually sent"))
 	if !errors.Is(err, objectstore.ErrDigestMismatch) {
 		t.Fatalf("Put = %v, want ErrDigestMismatch", err)
 	}
-	if _, err := mount.Stat(context.Background(), key); !errors.Is(err, objectstore.ErrNotFound) {
+	if _, err := mount.Stat(t.Context(), key); !errors.Is(err, objectstore.ErrNotFound) {
 		t.Fatal("a digest mismatch still produced an object")
 	}
 	if leftovers := stagingFiles(t, root); len(leftovers) != 0 {
@@ -110,7 +110,7 @@ func TestMountRefusesToServeAnObjectThatFailsVerification(t *testing.T) {
 	mount, root := mountFor(t)
 	payload := []byte("the object as written")
 	key, digest := keyFor("tenant-a", payload)
-	if _, err := mount.Put(context.Background(), key, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
+	if _, err := mount.Put(t.Context(), key, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestMountRefusesToServeAnObjectThatFailsVerification(t *testing.T) {
 		t.Fatalf("simulate a torn object: %v", err)
 	}
 
-	if _, _, err := mount.Get(context.Background(), key); !errors.Is(err, objectstore.ErrNotFound) {
+	if _, _, err := mount.Get(t.Context(), key); !errors.Is(err, objectstore.ErrNotFound) {
 		t.Fatalf("Get on a torn object = %v, want it treated as absent", err)
 	}
 	// And it is not repaired in place or deleted behind the caller's back: the
@@ -136,7 +136,7 @@ func TestMountAcknowledgesOnlyWhatReadsBack(t *testing.T) {
 	mount, root := mountFor(t)
 	payload := []byte("acknowledged only when present")
 	key, digest := keyFor("tenant-a", payload)
-	if _, err := mount.Put(context.Background(), key, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
+	if _, err := mount.Put(t.Context(), key, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	info, err := os.Stat(filepath.Join(root, key))
@@ -156,13 +156,13 @@ func TestMountKeysAreTenantScopedAndCannotEscape(t *testing.T) {
 	keyA, digest := keyFor("tenant-a", payload)
 	keyB, _ := keyFor("tenant-b", payload)
 
-	if _, err := mount.Put(context.Background(), keyA, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
+	if _, err := mount.Put(t.Context(), keyA, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
 		t.Fatalf("Put A: %v", err)
 	}
-	if _, err := mount.Stat(context.Background(), keyB); !errors.Is(err, objectstore.ErrNotFound) {
+	if _, err := mount.Stat(t.Context(), keyB); !errors.Is(err, objectstore.ErrNotFound) {
 		t.Fatal("tenant B saw an object only tenant A stored")
 	}
-	if _, err := mount.Put(context.Background(), keyB, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
+	if _, err := mount.Put(t.Context(), keyB, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
 		t.Fatalf("Put B: %v", err)
 	}
 	for _, key := range []string{keyA, keyB} {
@@ -175,10 +175,10 @@ func TestMountKeysAreTenantScopedAndCannotEscape(t *testing.T) {
 	for _, key := range []string{
 		"../escaped", "lfs/../../escaped", "/etc/passwd", "", "lfs//double", "lfs/./here",
 	} {
-		if _, err := mount.Put(context.Background(), key, 1, digest, strings.NewReader("x")); err == nil {
+		if _, err := mount.Put(t.Context(), key, 1, digest, strings.NewReader("x")); err == nil {
 			t.Errorf("Put accepted the key %q", key)
 		}
-		if _, err := mount.Stat(context.Background(), key); err == nil {
+		if _, err := mount.Stat(t.Context(), key); err == nil {
 			t.Errorf("Stat accepted the key %q", key)
 		}
 	}
@@ -197,7 +197,7 @@ func TestMountRefusesAKeyWithNoDigest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "lfs/tenant-a/not-a-digest"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, _, err := mount.Get(context.Background(), "lfs/tenant-a/not-a-digest"); err == nil {
+	if _, _, err := mount.Get(t.Context(), "lfs/tenant-a/not-a-digest"); err == nil {
 		t.Fatal("an unverifiable object was served")
 	}
 }

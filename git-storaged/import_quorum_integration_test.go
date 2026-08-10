@@ -222,7 +222,7 @@ func TestImportRefsOverHTTPSWithASyncReplica(t *testing.T) {
 
 	replica := newAckingReplica(coordinator, syncNode)
 	defer replica.close()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	replica.ackWhenLeased(ctx, tenantID, repoID, requestID, 1)
 
@@ -341,7 +341,7 @@ func TestImportRefsWithoutAReplicaAckAnnouncesNothing(t *testing.T) {
 	})
 	defer closeClient()
 
-	if _, err := client.ImportRefs(context.Background(), &gitv1.ImportRefsRequest{
+	if _, err := client.ImportRefs(t.Context(), &gitv1.ImportRefsRequest{
 		Context: &gitv1.OperationContext{
 			TenantId: tenantID, RepositoryId: repoID,
 			ActorId: "operator-1", RequestId: "request-no-ack", ActorRoles: []string{"owner"},
