@@ -25,7 +25,34 @@ type GitImporter interface {
 	// ImportRefs fetches the source repository's refs and tags into the storage
 	// node and returns the refs that moved. The source URL and token are
 	// request-only secrets.
-	ImportRefs(ctx context.Context, command ImportRefsCommand) ([]RefUpdate, error)
+	ImportRefs(ctx context.Context, command ImportRefsCommand) (GitResult, error)
+}
+
+// GitResult is what one git phase produced: the refs that moved, and the bytes
+// the storage tier actually wrote while writing them.
+//
+// ImportedBytes is measured by the tier that did the writing, not counted off
+// the wire. The wire number is a different quantity — it includes protocol
+// framing and excludes what repacking costs — and charging it to a tenant would
+// bill them for something other than what they now store (SPEC-0011 AC21).
+type GitResult struct {
+	Refs          []RefUpdate
+	ImportedBytes int64
+}
+
+// StorageMeter records imported bytes against the tenant's fair-use storage
+// dimension (SPEC-0011 AC9/AC21, PRD PR-23).
+//
+// It is a port, and a build with no meter wired passes nil: fair-use metering
+// itself is unbuilt (PRD §12 lists PR-23 as needing its own spec and task), and
+// this module must not invent an accounting subsystem to fill the gap. What it
+// owes AC9 is the honest number, measured where it can be measured, handed to
+// whoever will charge it.
+type StorageMeter interface {
+	// RecordImportedBytes attributes bytes an import wrote to a tenant's
+	// repository. It is called once per completed git phase, after the write is
+	// durable — never for a fetch that failed or was refused.
+	RecordImportedBytes(ctx context.Context, tenantID, repositoryID, importID string, bytes int64) error
 }
 
 // ImportRefsCommand is the verified principal plus the source identity for one
@@ -101,6 +128,7 @@ type ImportService struct {
 	pdp     policyapi.DecisionPoint
 	bus     bus.Bus
 	pacer   Pacer
+	meter   StorageMeter
 	newID   func() string
 	now     func() time.Time
 }
@@ -128,6 +156,17 @@ func NewImportService(store ImportStore, records api.ImportedRecordStore, git Gi
 func (s *ImportService) WithPacer(pacer Pacer) *ImportService {
 	if pacer != nil {
 		s.pacer = pacer
+	}
+	return s
+}
+
+// WithStorageMeter sets where imported bytes are attributed. A nil meter leaves
+// the current one in place; a service with no meter still imports, and the
+// number it would have charged is simply not recorded anywhere — which is the
+// truth about this build, and better than a plausible number nobody measured.
+func (s *ImportService) WithStorageMeter(meter StorageMeter) *ImportService {
+	if meter != nil {
+		s.meter = meter
 	}
 	return s
 }
@@ -268,7 +307,7 @@ func (s *ImportService) runGitPhase(ctx context.Context, req api.CreateImportReq
 	if s.git == nil {
 		return fmt.Errorf("import: no git importer configured")
 	}
-	moved, err := s.git.ImportRefs(ctx, ImportRefsCommand{
+	result, err := s.git.ImportRefs(ctx, ImportRefsCommand{
 		TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID,
 		RequestID: req.RequestID, ActorRoles: append([]string(nil), req.ActorRoles...),
 		SourceURL: req.SourceURL, SourceToken: req.SourceToken,
@@ -276,8 +315,19 @@ func (s *ImportService) runGitPhase(ctx context.Context, req api.CreateImportReq
 	if err != nil {
 		return err
 	}
-	_ = moved
 	imp.GitPhaseComplete = true
+
+	// Metering happens only after the fetch succeeded: a refused or failed
+	// import writes nothing durable, and charging a tenant for it would bill
+	// them for storage they do not hold (SPEC-0011 AC7/AC9).
+	//
+	// A meter failure does not fail the import. The bytes are already written
+	// and already durable; refusing the import at this point would leave the
+	// data in place and report otherwise, which is a worse lie than an
+	// unrecorded charge.
+	if s.meter != nil && result.ImportedBytes > 0 {
+		_ = s.meter.RecordImportedBytes(ctx, imp.TenantID, imp.RepositoryID, imp.ID, result.ImportedBytes)
+	}
 	return nil
 }
 

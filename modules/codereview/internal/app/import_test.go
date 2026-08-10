@@ -85,15 +85,17 @@ func (s *stubImportStore) TombstoneImport(_ context.Context, id string) (api.Imp
 
 type stubGitImporter struct {
 	moved []RefUpdate
+	// bytes is what the storage tier reports it wrote (SPEC-0011 AC9).
+	bytes int64
 	err   error
 	// calls counts fetches, so a test can tell a resumed import from a repeated
 	// one.
 	calls int
 }
 
-func (s *stubGitImporter) ImportRefs(_ context.Context, command ImportRefsCommand) ([]RefUpdate, error) {
+func (s *stubGitImporter) ImportRefs(_ context.Context, command ImportRefsCommand) (GitResult, error) {
 	s.calls++
-	return s.moved, s.err
+	return GitResult{Refs: s.moved, ImportedBytes: s.bytes}, s.err
 }
 
 type stubHistoryImporter struct {

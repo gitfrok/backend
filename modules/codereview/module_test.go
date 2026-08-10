@@ -14,8 +14,8 @@ import (
 // is not what this test is about.
 type stubGitImporter struct{}
 
-func (stubGitImporter) ImportRefs(context.Context, codereview.ImportRefsCommand) ([]codereview.RefUpdate, error) {
-	return []codereview.RefUpdate{{Ref: "refs/heads/main", Revision: "a1"}}, nil
+func (stubGitImporter) ImportRefs(context.Context, codereview.ImportRefsCommand) (codereview.GitResult, error) {
+	return codereview.GitResult{Refs: []codereview.RefUpdate{{Ref: "refs/heads/main", Revision: "a1"}}}, nil
 }
 
 // stubHistoryImporter writes one imported record into the store it is given,

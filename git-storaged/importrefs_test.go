@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +85,45 @@ func TestRefDeltasEmptyForUnchanged(t *testing.T) {
 	same := map[string]string{"refs/heads/main": "aaa"}
 	if got := refDeltas(same, map[string]string{"refs/heads/main": "aaa"}); len(got) != 0 {
 		t.Errorf("deltas = %+v, want none", got)
+	}
+}
+
+// The imported byte count is what the storage tier holds, measured by git
+// itself: an empty repository weighs nothing, and one holding objects weighs
+// more than one that does not (SPEC-0011 AC9/AC21).
+func TestRepositoryBytesMeasuresWhatStorageHolds(t *testing.T) {
+	root := t.TempDir()
+	bare := filepath.Join(root, "repo.git")
+	mustRunGit(t, root, "init", "--bare", bare)
+
+	empty := repositoryBytes(context.Background(), bare)
+	if empty != 0 {
+		t.Fatalf("empty repository = %d bytes, want 0", empty)
+	}
+
+	// A commit written into the bare repository is content the tenant now holds.
+	work := filepath.Join(root, "work")
+	mustRunGit(t, root, "init", work)
+	mustRunGit(t, work, "config", "user.email", "t@example.test")
+	mustRunGit(t, work, "config", "user.name", "T")
+	if err := os.WriteFile(filepath.Join(work, "payload"), []byte(strings.Repeat("x", 64*1024)), 0o600); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	mustRunGit(t, work, "add", "payload")
+	mustRunGit(t, work, "commit", "-m", "payload")
+	mustRunGit(t, work, "push", bare, "HEAD:refs/heads/main")
+
+	held := repositoryBytes(context.Background(), bare)
+	if held <= empty {
+		t.Fatalf("repository holding a commit = %d bytes, want more than the empty %d", held, empty)
+	}
+}
+
+// An unmeasurable repository reports zero rather than failing: at the point this
+// is called the objects are already durable, and failing an import that landed
+// would be a worse answer than an unrecorded charge.
+func TestRepositoryBytesOfNothingIsZero(t *testing.T) {
+	if got := repositoryBytes(context.Background(), filepath.Join(t.TempDir(), "absent")); got != 0 {
+		t.Fatalf("absent repository = %d bytes, want 0", got)
 	}
 }

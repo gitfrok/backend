@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +52,13 @@ func (s *Server) ImportRefs(ctx context.Context, req *gitv1.ImportRefsRequest) (
 		return nil, unavailable()
 	}
 
+	// The bytes this repository holds before the fetch. The import's charge is
+	// the growth of the tier that stores it, measured here rather than counted
+	// off the wire: the wire number includes protocol framing and excludes what
+	// repacking costs, so it is not the number a tenant should be charged
+	// (SPEC-0011 AC9/AC21).
+	bytesBefore := repositoryBytes(ctx, repository.path)
+
 	// The fetch happens into the live bare repository. The source URL never
 	// appears in an event or audit record; the token travels only in the child
 	// process environment, never in argv (which /proc would expose).
@@ -65,7 +73,9 @@ func (s *Server) ImportRefs(ctx context.Context, req *gitv1.ImportRefsRequest) (
 	moved := refDeltas(before, after)
 	if len(moved) == 0 {
 		// Nothing to acknowledge: an import of an already-current source is a
-		// no-op, not a failure.
+		// no-op, not a failure. It is also nothing to charge — a fetch that
+		// moved no ref may still have written objects, but nothing reachable,
+		// and the next gc reclaims them.
 		return &gitv1.ImportRefsResponse{}, nil
 	}
 
@@ -93,7 +103,50 @@ func (s *Server) ImportRefs(ctx context.Context, req *gitv1.ImportRefsRequest) (
 		}
 		response = append(response, &gitv1.RefUpdate{Ref: delta.ref, Revision: delta.newSHA})
 	}
-	return &gitv1.ImportRefsResponse{Refs: response}, nil
+
+	// Growth only. A fetch that pruned more than it added leaves the tenant
+	// holding less than before, and an import must never report a negative
+	// charge — nor a credit the import did not earn.
+	imported := repositoryBytes(ctx, repository.path) - bytesBefore
+	if imported < 0 {
+		imported = 0
+	}
+	return &gitv1.ImportRefsResponse{Refs: response, ImportedBytes: imported}, nil
+}
+
+// repositoryBytes is what this repository weighs on the storage tier, as git
+// itself measures it: loose objects plus packs.
+//
+// It is deliberately best-effort. An unmeasurable repository reports zero rather
+// than failing the import: the objects are already durable at the point this is
+// called, and refusing an import that succeeded would be a worse answer than an
+// unrecorded charge. A zero is visibly wrong to whoever reads the meter; a
+// failed import that actually landed is not.
+func repositoryBytes(ctx context.Context, repositoryPath string) int64 {
+	command := exec.CommandContext(ctx, "git", "-C", repositoryPath, "count-objects", "-v")
+	output, err := command.Output()
+	if err != nil {
+		return 0
+	}
+	var kibibytes int64
+	for _, line := range strings.Split(string(output), "\n") {
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		// "size" is loose objects, "size-pack" is packs; both in KiB. The
+		// garbage sizes are excluded: they are not reachable content, and a
+		// tenant should not be charged for what the next gc removes.
+		if key != "size" && key != "size-pack" {
+			continue
+		}
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			continue
+		}
+		kibibytes += parsed
+	}
+	return kibibytes * 1024
 }
 
 // fetchFromSource runs `git fetch --prune` from the source URL into the bare
