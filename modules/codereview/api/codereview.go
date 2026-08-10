@@ -112,6 +112,58 @@ type ProtectionRequest struct {
 	ExpectedVersion   int64
 }
 
+// ImportState is the coarse lifecycle of an import job (SPEC-0011).
+type ImportState string
+
+const (
+	ImportPending  ImportState = "PENDING"
+	ImportRunning  ImportState = "RUNNING"
+	ImportComplete ImportState = "COMPLETE"
+	ImportFailed   ImportState = "FAILED"
+	ImportStalled  ImportState = "STALLED"
+	ImportRevoked  ImportState = "REVOKED"
+)
+
+// Import is the import job's state, scoped to one tenant and repository. It
+// carries no source token, no audit content, and no credential (SPEC-0011
+// AC22).
+type Import struct {
+	ID, TenantID, RepositoryID string
+	SourceURL                  string
+	SourceSystem               string
+	SourceInstance             string
+	State                      ImportState
+	ManifestDigest             string
+	GitPhaseComplete           bool
+	HistoryPhaseComplete       bool
+	RecordCounts               map[string]int64
+	FailureReason              string
+	CreatedAt, UpdatedAt       time.Time
+}
+
+// CreateImportRequest starts (or resumes) an import of one source repository.
+type CreateImportRequest struct {
+	Context
+	SourceURL, SourceSystem, SourceInstance string
+	SourceToken                             string
+}
+
+// RevokeImportRequest tombstones an import's records.
+type RevokeImportRequest struct {
+	Context
+	ImportID string
+}
+
+// ImportService is the import surface. Code Review owns imported history as
+// ATTESTED_IMPORT domain data (ADR-0029 §2); Audit owns only the
+// HistoryImported/HistoryImportRevoked events.
+type ImportService interface {
+	Create(context.Context, CreateImportRequest) (Import, error)
+	Get(context.Context, Context, string) (Import, error)
+	List(context.Context, Context, string) ([]Import, error)
+	Revoke(context.Context, RevokeImportRequest) (Import, error)
+}
+
 // MergeRequests is the context's full in-process surface.
 type MergeRequests interface {
 	Open(context.Context, OpenRequest) (MergeRequest, error)
