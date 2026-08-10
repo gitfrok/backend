@@ -158,7 +158,21 @@ func repositoryBytes(ctx context.Context, repositoryPath string) int64 {
 // source the token is appended by the caller as a bearer in the URL only inside
 // this process, and the environment keeps it out of argv).
 func fetchFromSource(ctx context.Context, repositoryPath, sourceURL, token string) error {
-	args := []string{"-C", repositoryPath, "fetch", "--prune", "--tags", sourceURL}
+	// The refspec is not optional, and its absence was a bug: `git fetch <url>`
+	// with no refspec writes the objects and then records the result in
+	// FETCH_HEAD only. Tags arrive because of --tags, branches do not arrive at
+	// all — an import that looked successful produced a repository with every
+	// object present and no branch to reach them from (SPEC-0011 AC1).
+	//
+	// Not forced. A `+` here would let an import overwrite a branch this platform
+	// already holds, which is a silent rewrite of first-party history by a foreign
+	// source — the one thing an import must never do. A source whose branch has
+	// diverged from ours fails the fetch, and the import fails with it, which is a
+	// conflict a human should see rather than a loss nobody is told about.
+	args := []string{
+		"-C", repositoryPath, "fetch", "--prune", "--tags", sourceURL,
+		"refs/heads/*:refs/heads/*",
+	}
 	command := exec.CommandContext(ctx, "git", args...)
 	// Refuse to write the token into argv; /proc would expose it. The
 	// environment is the narrower surface.
