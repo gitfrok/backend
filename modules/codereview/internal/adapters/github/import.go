@@ -236,16 +236,16 @@ func (c *Client) buildRecord(ctx context.Context, st *fetchState, src source, co
 	}
 
 	return api.ImportedMergeRequest{
-		MergeRequestID: fmt.Sprintf("%d", pr.Number),
-		SourceRef:      pr.Head.Ref,
-		TargetRef:      pr.Base.Ref,
-		Title:          pr.Title,
-		Description:    pr.Body,
-		State:          pr.State,
-		CreatorID:      pr.User.Login,
-		Threads:        threads,
-		Approvals:      approvals,
-		Provenance:     provenance,
+		MergeRequestID:  fmt.Sprintf("%d", pr.Number),
+		SourceRef:       pr.Head.Ref,
+		TargetRef:       pr.Base.Ref,
+		Title:           pr.Title,
+		Description:     pr.Body,
+		State:           pr.State,
+		DeclaredCreator: pr.User.Login,
+		Threads:         threads,
+		Approvals:       approvals,
+		Provenance:      provenance,
 	}, nil
 }
 

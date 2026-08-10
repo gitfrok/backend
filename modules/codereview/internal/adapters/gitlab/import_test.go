@@ -102,7 +102,7 @@ func TestImportHistoryStoresAttestedRecords(t *testing.T) {
 		t.Fatalf("stored = %v err = %v", stored, err)
 	}
 	mr := stored[0]
-	if mr.Title != "Add widget" || mr.CreatorID != "carol" || mr.SourceRef != "feature/widget" {
+	if mr.Title != "Add widget" || mr.DeclaredCreator != "carol" || mr.SourceRef != "feature/widget" {
 		t.Fatalf("mr = %+v", mr)
 	}
 	if mr.Provenance.Class != api.AttestImported || mr.Provenance.SourceSystem != "gitlab" {
