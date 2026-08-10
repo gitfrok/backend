@@ -457,6 +457,221 @@ func (x *ReceivePackResponse) GetData() []byte {
 	return nil
 }
 
+// RefUpdateContext identifies one authorized ref move. It is the OperationContext
+// fields that still mean something without a Git protocol exchange: there is no
+// transport, because no client framing is involved. Like OperationContext it
+// carries no path, credential, or authorization result, and its roles are a
+// verified principal attribute the storage PDP evaluates, never an assertion.
+type RefUpdateContext struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TenantId      string                 `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	RepositoryId  string                 `protobuf:"bytes,2,opt,name=repository_id,json=repositoryId,proto3" json:"repository_id,omitempty"`
+	ActorId       string                 `protobuf:"bytes,3,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
+	RequestId     string                 `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	ActorRoles    []string               `protobuf:"bytes,5,rep,name=actor_roles,json=actorRoles,proto3" json:"actor_roles,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RefUpdateContext) Reset() {
+	*x = RefUpdateContext{}
+	mi := &file_proto_git_v1_git_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RefUpdateContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RefUpdateContext) ProtoMessage() {}
+
+func (x *RefUpdateContext) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_git_v1_git_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RefUpdateContext.ProtoReflect.Descriptor instead.
+func (*RefUpdateContext) Descriptor() ([]byte, []int) {
+	return file_proto_git_v1_git_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *RefUpdateContext) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *RefUpdateContext) GetRepositoryId() string {
+	if x != nil {
+		return x.RepositoryId
+	}
+	return ""
+}
+
+func (x *RefUpdateContext) GetActorId() string {
+	if x != nil {
+		return x.ActorId
+	}
+	return ""
+}
+
+func (x *RefUpdateContext) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *RefUpdateContext) GetActorRoles() []string {
+	if x != nil {
+		return x.ActorRoles
+	}
+	return nil
+}
+
+// MergeRefRequest moves target_ref to revision.
+//
+// expected_current_revision makes the move a compare-and-swap: storage applies it
+// only if the ref is still where the caller last saw it, so a merge decided
+// against one state cannot land on a different one. An empty value means the ref
+// is expected not to exist yet.
+//
+// Deliberately absent: a force flag, a delete, a pattern, an approval count, a
+// protection result, and an allow flag. None of them can be expressed here, which
+// is what keeps this narrower than a ref-write API.
+type MergeRefRequest struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Context *RefUpdateContext      `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
+	// An exact refs/heads/... name. Pattern syntax is not accepted.
+	TargetRef string `protobuf:"bytes,2,opt,name=target_ref,json=targetRef,proto3" json:"target_ref,omitempty"`
+	// An existing revision in this repository; storage refuses an unknown one.
+	Revision                string `protobuf:"bytes,3,opt,name=revision,proto3" json:"revision,omitempty"`
+	ExpectedCurrentRevision string `protobuf:"bytes,4,opt,name=expected_current_revision,json=expectedCurrentRevision,proto3" json:"expected_current_revision,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *MergeRefRequest) Reset() {
+	*x = MergeRefRequest{}
+	mi := &file_proto_git_v1_git_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MergeRefRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MergeRefRequest) ProtoMessage() {}
+
+func (x *MergeRefRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_git_v1_git_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MergeRefRequest.ProtoReflect.Descriptor instead.
+func (*MergeRefRequest) Descriptor() ([]byte, []int) {
+	return file_proto_git_v1_git_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *MergeRefRequest) GetContext() *RefUpdateContext {
+	if x != nil {
+		return x.Context
+	}
+	return nil
+}
+
+func (x *MergeRefRequest) GetTargetRef() string {
+	if x != nil {
+		return x.TargetRef
+	}
+	return ""
+}
+
+func (x *MergeRefRequest) GetRevision() string {
+	if x != nil {
+		return x.Revision
+	}
+	return ""
+}
+
+func (x *MergeRefRequest) GetExpectedCurrentRevision() string {
+	if x != nil {
+		return x.ExpectedCurrentRevision
+	}
+	return ""
+}
+
+// MergeRefResponse reports the ref's new revision. A refused move returns a coarse
+// error and no partial state, in the same shape as any other storage refusal.
+type MergeRefResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TargetRef     string                 `protobuf:"bytes,1,opt,name=target_ref,json=targetRef,proto3" json:"target_ref,omitempty"`
+	Revision      string                 `protobuf:"bytes,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MergeRefResponse) Reset() {
+	*x = MergeRefResponse{}
+	mi := &file_proto_git_v1_git_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MergeRefResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MergeRefResponse) ProtoMessage() {}
+
+func (x *MergeRefResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_git_v1_git_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MergeRefResponse.ProtoReflect.Descriptor instead.
+func (*MergeRefResponse) Descriptor() ([]byte, []int) {
+	return file_proto_git_v1_git_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *MergeRefResponse) GetTargetRef() string {
+	if x != nil {
+		return x.TargetRef
+	}
+	return ""
+}
+
+func (x *MergeRefResponse) GetRevision() string {
+	if x != nil {
+		return x.Revision
+	}
+	return ""
+}
+
 var File_proto_git_v1_git_proto protoreflect.FileDescriptor
 
 const file_proto_git_v1_git_proto_rawDesc = "" +
@@ -484,17 +699,36 @@ const file_proto_git_v1_git_proto_rawDesc = "" +
 	"\x05close\x18\x03 \x01(\bH\x00R\x05closeB\t\n" +
 	"\apayload\")\n" +
 	"\x13ReceivePackResponse\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data*\x8e\x01\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"\xaf\x01\n" +
+	"\x10RefUpdateContext\x12\x1b\n" +
+	"\ttenant_id\x18\x01 \x01(\tR\btenantId\x12#\n" +
+	"\rrepository_id\x18\x02 \x01(\tR\frepositoryId\x12\x19\n" +
+	"\bactor_id\x18\x03 \x01(\tR\aactorId\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x04 \x01(\tR\trequestId\x12\x1f\n" +
+	"\vactor_roles\x18\x05 \x03(\tR\n" +
+	"actorRoles\"\xc4\x01\n" +
+	"\x0fMergeRefRequest\x12:\n" +
+	"\acontext\x18\x01 \x01(\v2 .gitsaas.git.v1.RefUpdateContextR\acontext\x12\x1d\n" +
+	"\n" +
+	"target_ref\x18\x02 \x01(\tR\ttargetRef\x12\x1a\n" +
+	"\brevision\x18\x03 \x01(\tR\brevision\x12:\n" +
+	"\x19expected_current_revision\x18\x04 \x01(\tR\x17expectedCurrentRevision\"M\n" +
+	"\x10MergeRefResponse\x12\x1d\n" +
+	"\n" +
+	"target_ref\x18\x01 \x01(\tR\ttargetRef\x12\x1a\n" +
+	"\brevision\x18\x02 \x01(\tR\brevision*\x8e\x01\n" +
 	"\fGitTransport\x12\x1d\n" +
 	"\x19GIT_TRANSPORT_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11GIT_TRANSPORT_SSH\x10\x01\x12&\n" +
 	"\"GIT_TRANSPORT_SMART_HTTP_DISCOVERY\x10\x02\x12 \n" +
-	"\x1cGIT_TRANSPORT_SMART_HTTP_RPC\x10\x032\xc1\x01\n" +
+	"\x1cGIT_TRANSPORT_SMART_HTTP_RPC\x10\x032\x90\x02\n" +
 	"\n" +
 	"GitStorage\x12W\n" +
 	"\n" +
 	"UploadPack\x12!.gitsaas.git.v1.UploadPackRequest\x1a\".gitsaas.git.v1.UploadPackResponse(\x010\x01\x12Z\n" +
-	"\vReceivePack\x12\".gitsaas.git.v1.ReceivePackRequest\x1a#.gitsaas.git.v1.ReceivePackResponse(\x010\x01B\xab\x01\n" +
+	"\vReceivePack\x12\".gitsaas.git.v1.ReceivePackRequest\x1a#.gitsaas.git.v1.ReceivePackResponse(\x010\x01\x12M\n" +
+	"\bMergeRef\x12\x1f.gitsaas.git.v1.MergeRefRequest\x1a .gitsaas.git.v1.MergeRefResponseB\xab\x01\n" +
 	"\x12com.gitsaas.git.v1B\bGitProtoP\x01Z1github.com/gitfrok/backend/gen/proto/git/v1;gitv1\xa2\x02\x03GGX\xaa\x02\x0eGitsaas.Git.V1\xca\x02\x0eGitsaas\\Git\\V1\xe2\x02\x1aGitsaas\\Git\\V1\\GPBMetadata\xea\x02\x10Gitsaas::Git::V1b\x06proto3"
 
 var (
@@ -510,7 +744,7 @@ func file_proto_git_v1_git_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_git_v1_git_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_git_v1_git_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_proto_git_v1_git_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_proto_git_v1_git_proto_goTypes = []any{
 	(GitTransport)(0),           // 0: gitsaas.git.v1.GitTransport
 	(*OperationContext)(nil),    // 1: gitsaas.git.v1.OperationContext
@@ -518,20 +752,26 @@ var file_proto_git_v1_git_proto_goTypes = []any{
 	(*UploadPackResponse)(nil),  // 3: gitsaas.git.v1.UploadPackResponse
 	(*ReceivePackRequest)(nil),  // 4: gitsaas.git.v1.ReceivePackRequest
 	(*ReceivePackResponse)(nil), // 5: gitsaas.git.v1.ReceivePackResponse
+	(*RefUpdateContext)(nil),    // 6: gitsaas.git.v1.RefUpdateContext
+	(*MergeRefRequest)(nil),     // 7: gitsaas.git.v1.MergeRefRequest
+	(*MergeRefResponse)(nil),    // 8: gitsaas.git.v1.MergeRefResponse
 }
 var file_proto_git_v1_git_proto_depIdxs = []int32{
 	0, // 0: gitsaas.git.v1.OperationContext.transport:type_name -> gitsaas.git.v1.GitTransport
 	1, // 1: gitsaas.git.v1.UploadPackRequest.context:type_name -> gitsaas.git.v1.OperationContext
 	1, // 2: gitsaas.git.v1.ReceivePackRequest.context:type_name -> gitsaas.git.v1.OperationContext
-	2, // 3: gitsaas.git.v1.GitStorage.UploadPack:input_type -> gitsaas.git.v1.UploadPackRequest
-	4, // 4: gitsaas.git.v1.GitStorage.ReceivePack:input_type -> gitsaas.git.v1.ReceivePackRequest
-	3, // 5: gitsaas.git.v1.GitStorage.UploadPack:output_type -> gitsaas.git.v1.UploadPackResponse
-	5, // 6: gitsaas.git.v1.GitStorage.ReceivePack:output_type -> gitsaas.git.v1.ReceivePackResponse
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	6, // 3: gitsaas.git.v1.MergeRefRequest.context:type_name -> gitsaas.git.v1.RefUpdateContext
+	2, // 4: gitsaas.git.v1.GitStorage.UploadPack:input_type -> gitsaas.git.v1.UploadPackRequest
+	4, // 5: gitsaas.git.v1.GitStorage.ReceivePack:input_type -> gitsaas.git.v1.ReceivePackRequest
+	7, // 6: gitsaas.git.v1.GitStorage.MergeRef:input_type -> gitsaas.git.v1.MergeRefRequest
+	3, // 7: gitsaas.git.v1.GitStorage.UploadPack:output_type -> gitsaas.git.v1.UploadPackResponse
+	5, // 8: gitsaas.git.v1.GitStorage.ReceivePack:output_type -> gitsaas.git.v1.ReceivePackResponse
+	8, // 9: gitsaas.git.v1.GitStorage.MergeRef:output_type -> gitsaas.git.v1.MergeRefResponse
+	7, // [7:10] is the sub-list for method output_type
+	4, // [4:7] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_proto_git_v1_git_proto_init() }
@@ -555,7 +795,7 @@ func file_proto_git_v1_git_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_git_v1_git_proto_rawDesc), len(file_proto_git_v1_git_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   5,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

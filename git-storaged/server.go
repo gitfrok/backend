@@ -403,8 +403,20 @@ func (s *Server) exchange(ctx context.Context, op *gitv1.OperationContext, actio
 }
 
 func (s *Server) prepare(ctx context.Context, op *gitv1.OperationContext, action string) (repositoryOperation, error) {
+	return s.prepareWith(ctx, op, action, nil)
+}
+
+// prepareWith resolves the tenant-scoped handle and asks the PDP, adding the
+// caller's attributes to the decision context. Those attributes describe the
+// operation storage is about to perform; every one of them is derived here, and
+// none of them can carry an authorization result.
+func (s *Server) prepareWith(ctx context.Context, op *gitv1.OperationContext, action string, attributes map[string]string) (repositoryOperation, error) {
 	if op == nil || !validHandle(op.GetTenantId()) || !validHandle(op.GetRepositoryId()) || op.GetActorId() == "" || op.GetRequestId() == "" {
 		return repositoryOperation{}, unavailable()
+	}
+	decisionContext := map[string]string{"request_id": op.GetRequestId()}
+	for name, value := range attributes {
+		decisionContext[name] = value
 	}
 	path := filepath.Join(s.root, op.GetTenantId(), op.GetRepositoryId()+".git")
 	relative, err := filepath.Rel(s.root, path)
@@ -419,7 +431,7 @@ func (s *Server) prepare(ctx context.Context, op *gitv1.OperationContext, action
 		Subject:  policyapi.Subject{ID: op.GetActorId(), TenantID: op.GetTenantId(), Roles: append([]string(nil), op.GetActorRoles()...)},
 		Action:   action,
 		Resource: policyapi.Resource{Type: "repository", ID: op.GetRepositoryId()},
-		Context:  map[string]string{"request_id": op.GetRequestId()},
+		Context:  decisionContext,
 	})
 	if err != nil || !decision.Allowed {
 		return repositoryOperation{}, unavailable()
