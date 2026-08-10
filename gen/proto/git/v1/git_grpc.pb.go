@@ -28,6 +28,7 @@ const (
 	GitStorage_UploadPack_FullMethodName  = "/gitsaas.git.v1.GitStorage/UploadPack"
 	GitStorage_ReceivePack_FullMethodName = "/gitsaas.git.v1.GitStorage/ReceivePack"
 	GitStorage_MergeRef_FullMethodName    = "/gitsaas.git.v1.GitStorage/MergeRef"
+	GitStorage_ImportRefs_FullMethodName  = "/gitsaas.git.v1.GitStorage/ImportRefs"
 )
 
 // GitStorageClient is the client API for GitStorage service.
@@ -49,6 +50,19 @@ type GitStorageClient interface {
 	// it does for a push — a caller that has already been allowed by its own PEP is
 	// still not trusted to assert that here.
 	MergeRef(ctx context.Context, in *MergeRefRequest, opts ...grpc.CallOption) (*MergeRefResponse, error)
+	// ImportRefs fetches a source repository's refs and tags into this repository
+	// on behalf of an authorized import (SPEC-0011, T-0018).
+	//
+	// It is the import path's git phase: the caller has already been PDP-authorized
+	// by Code Review's ImportService; storage asks the PDP again with its own
+	// server-derived context, then runs `git fetch` from the source URL and
+	// publishes RefUpdated for every ref that moved. The fetch is acknowledged
+	// through the same durability path as a push — the primary and one in-sync
+	// replica must both hold the objects before the refs are announced (ADR-0016).
+	//
+	// The source URL and token are request-only secrets. They are never stored,
+	// never logged, and never copied into an event, audit record, or error.
+	ImportRefs(ctx context.Context, in *ImportRefsRequest, opts ...grpc.CallOption) (*ImportRefsResponse, error)
 }
 
 type gitStorageClient struct {
@@ -95,6 +109,16 @@ func (c *gitStorageClient) MergeRef(ctx context.Context, in *MergeRefRequest, op
 	return out, nil
 }
 
+func (c *gitStorageClient) ImportRefs(ctx context.Context, in *ImportRefsRequest, opts ...grpc.CallOption) (*ImportRefsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ImportRefsResponse)
+	err := c.cc.Invoke(ctx, GitStorage_ImportRefs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GitStorageServer is the server API for GitStorage service.
 // All implementations must embed UnimplementedGitStorageServer
 // for forward compatibility.
@@ -114,6 +138,19 @@ type GitStorageServer interface {
 	// it does for a push — a caller that has already been allowed by its own PEP is
 	// still not trusted to assert that here.
 	MergeRef(context.Context, *MergeRefRequest) (*MergeRefResponse, error)
+	// ImportRefs fetches a source repository's refs and tags into this repository
+	// on behalf of an authorized import (SPEC-0011, T-0018).
+	//
+	// It is the import path's git phase: the caller has already been PDP-authorized
+	// by Code Review's ImportService; storage asks the PDP again with its own
+	// server-derived context, then runs `git fetch` from the source URL and
+	// publishes RefUpdated for every ref that moved. The fetch is acknowledged
+	// through the same durability path as a push — the primary and one in-sync
+	// replica must both hold the objects before the refs are announced (ADR-0016).
+	//
+	// The source URL and token are request-only secrets. They are never stored,
+	// never logged, and never copied into an event, audit record, or error.
+	ImportRefs(context.Context, *ImportRefsRequest) (*ImportRefsResponse, error)
 	mustEmbedUnimplementedGitStorageServer()
 }
 
@@ -132,6 +169,9 @@ func (UnimplementedGitStorageServer) ReceivePack(grpc.BidiStreamingServer[Receiv
 }
 func (UnimplementedGitStorageServer) MergeRef(context.Context, *MergeRefRequest) (*MergeRefResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MergeRef not implemented")
+}
+func (UnimplementedGitStorageServer) ImportRefs(context.Context, *ImportRefsRequest) (*ImportRefsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ImportRefs not implemented")
 }
 func (UnimplementedGitStorageServer) mustEmbedUnimplementedGitStorageServer() {}
 func (UnimplementedGitStorageServer) testEmbeddedByValue()                    {}
@@ -186,6 +226,24 @@ func _GitStorage_MergeRef_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GitStorage_ImportRefs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ImportRefsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GitStorageServer).ImportRefs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GitStorage_ImportRefs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GitStorageServer).ImportRefs(ctx, req.(*ImportRefsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GitStorage_ServiceDesc is the grpc.ServiceDesc for GitStorage service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -196,6 +254,10 @@ var GitStorage_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MergeRef",
 			Handler:    _GitStorage_MergeRef_Handler,
+		},
+		{
+			MethodName: "ImportRefs",
+			Handler:    _GitStorage_ImportRefs_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
