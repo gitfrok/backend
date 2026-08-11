@@ -27,6 +27,7 @@ func watchRefUpdates(ctx context.Context, client gitv1.GitStorageClient, b bus.B
 		for ctx.Err() == nil {
 			stream, err := client.SubscribeRefUpdates(ctx, &gitv1.SubscribeRefUpdatesRequest{})
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "dataplane: ref watch subscribe: %v\n", err)
 				select {
 				case <-time.After(time.Second):
 				case <-ctx.Done():
@@ -34,11 +35,14 @@ func watchRefUpdates(ctx context.Context, client gitv1.GitStorageClient, b bus.B
 				}
 				continue
 			}
+			fmt.Fprintf(os.Stderr, "dataplane: ref watch connected\n")
 			for {
 				n, err := stream.Recv()
 				if err != nil {
+					fmt.Fprintf(os.Stderr, "dataplane: ref watch stream ended: %v\n", err)
 					break
 				}
+				fmt.Fprintf(os.Stderr, "dataplane: ref watch %s %s %s -> %s\n", n.GetTenantId(), n.GetRepositoryId(), n.GetRef(), n.GetNewSha())
 				if err := b.Publish(ctx, repoapi.RefUpdated{
 					EventID:    n.GetEventId(),
 					TenantID:   n.GetTenantId(),
