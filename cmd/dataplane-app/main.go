@@ -197,6 +197,7 @@ func main() {
 					RepositoryId: e.RepositoryID,
 					ActorId:      e.ActorID,
 					RequestId:    e.EventID,
+					ActorRoles:   append([]string(nil), e.ActorRoles...),
 				},
 				TargetRef:         e.TargetRef,
 				RequiredApprovals: e.RequiredApprovals,
