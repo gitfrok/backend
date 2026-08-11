@@ -286,6 +286,7 @@ func TestDataPlaneServesPolicyGRPCDoor(t *testing.T) {
 		t.Fatalf("startGitFrontDoors(): %v", err)
 	}
 	defer doors.Close()
+	doors.ServePolicy()
 
 	conn, err := grpc.NewClient(doors.PolicyAddr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {

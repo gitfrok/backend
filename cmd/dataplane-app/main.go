@@ -268,6 +268,10 @@ func main() {
 		}
 	}
 
+	// Every service that shares the policy door is registered above; only now
+	// may it serve (registration and Serve must not race, gRPC is fatal on it).
+	doors.ServePolicy()
+
 	if dp.ci.Dispatches() {
 		go func() {
 			if err := dp.ci.RunDispatcher(ctx); err != nil && !errors.Is(err, context.Canceled) {
