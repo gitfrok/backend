@@ -25,7 +25,7 @@ func (f *fakeAuthenticator) AuthenticatePAT(_ context.Context, token string) (id
 func (f *fakeAuthenticator) AuthenticateSSHKey(context.Context, string, string) (identityapi.Principal, bool) {
 	return f.sshPrincipal, f.sshOK
 }
-func (f *fakeAuthenticator) IssuePAT(context.Context, string, string, string, []string, *time.Time) (identityapi.PAT, string, error) {
+func (f *fakeAuthenticator) IssuePAT(context.Context, string, string, string, []string, []string, *time.Time) (identityapi.PAT, string, error) {
 	panic("not used")
 }
 func (f *fakeAuthenticator) RevokePAT(context.Context, string, string, string) (identityapi.PAT, error) {

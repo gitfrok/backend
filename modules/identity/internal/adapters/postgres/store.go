@@ -66,13 +66,18 @@ func (s *Store) resolve(ctx context.Context, kind, keyID, verifier string) (api.
 	return principal, true
 }
 
-func (s *Store) IssuePAT(ctx context.Context, tenantID, actorID, label string, scopes []string, expiresAt *time.Time) (api.PAT, string, error) {
+func (s *Store) IssuePAT(ctx context.Context, tenantID, actorID, label string, scopes, roles []string, expiresAt *time.Time) (api.PAT, string, error) {
 	if err := s.authorizeLifecycle(ctx, tenantID, "identity.pat.issue", actorID); err != nil {
 		return api.PAT{}, "", err
 	}
 	if expiresAt != nil && !expiresAt.After(s.now()) {
 		return api.PAT{}, "", errors.New("identity postgres: expiry must be in the future")
 	}
+	// roles is intentionally not persisted here: production resolves the principal's
+	// roles from the tenant directory at authenticate time (resolve_active_credential,
+	// ADR-0043), so directory changes apply to an existing PAT without reissuing. The
+	// parameter exists for interface parity with the in-memory dev store, which has
+	// no directory and therefore carries roles on the credential itself.
 	id, token, verifier, err := s.keys.issuePAT()
 	if err != nil {
 		return api.PAT{}, "", err

@@ -25,7 +25,7 @@ func (transportAuthenticator) AuthenticatePAT(context.Context, string) (identity
 func (transportAuthenticator) AuthenticateSSHKey(context.Context, string, string) (identityapi.Principal, bool) {
 	return identityapi.Principal{}, false
 }
-func (transportAuthenticator) IssuePAT(context.Context, string, string, string, []string, *time.Time) (identityapi.PAT, string, error) {
+func (transportAuthenticator) IssuePAT(context.Context, string, string, string, []string, []string, *time.Time) (identityapi.PAT, string, error) {
 	panic("not used")
 }
 func (transportAuthenticator) RevokePAT(context.Context, string, string, string) (identityapi.PAT, error) {

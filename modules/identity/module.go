@@ -48,11 +48,11 @@ func (s service) AuthenticateSSHKey(_ context.Context, key, verifierKeyID string
 	p, ok := s.domain.AuthenticateSSHKey(key, verifierKeyID)
 	return api.Principal{TenantID: p.TenantID, ActorID: p.ActorID, Roles: p.Roles}, ok
 }
-func (s service) IssuePAT(ctx context.Context, t, a, l string, scopes []string, expiresAt *time.Time) (api.PAT, string, error) {
+func (s service) IssuePAT(ctx context.Context, t, a, l string, scopes, roles []string, expiresAt *time.Time) (api.PAT, string, error) {
 	if err := s.authorizeLifecycle(ctx, t, "identity.pat.issue", a); err != nil {
 		return api.PAT{}, "", err
 	}
-	p, tok, e := s.domain.IssuePAT(t, a, l, scopes, expiresAt)
+	p, tok, e := s.domain.IssuePAT(t, a, l, scopes, roles, expiresAt)
 	return publicPAT(p), tok, e
 }
 func (s service) RevokePAT(ctx context.Context, t, a, id string) (api.PAT, error) {
@@ -106,7 +106,7 @@ func (s service) authorizeLifecycle(ctx context.Context, requestedTenant, action
 	return nil
 }
 func publicPAT(p domain.PAT) api.PAT {
-	return api.PAT{ID: p.ID, TenantID: p.TenantID, ActorID: p.ActorID, Label: p.Label, Scopes: append([]string(nil), p.Scopes...), CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt, RevokedAt: p.RevokedAt}
+	return api.PAT{ID: p.ID, TenantID: p.TenantID, ActorID: p.ActorID, Label: p.Label, Scopes: append([]string(nil), p.Scopes...), Roles: append([]string(nil), p.Roles...), CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt, RevokedAt: p.RevokedAt}
 }
 
 // OIDCConfig is the per-environment OIDC login configuration, restated here so

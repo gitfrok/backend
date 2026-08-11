@@ -150,7 +150,7 @@ func issueTestPAT(t *testing.T, auth identityapi.Authenticator) string {
 	t.Helper()
 	ctx := tenancy.WithTenant(t.Context(), tenancy.ID("tenant-a"))
 	ctx = identityapi.WithPrincipal(ctx, identityapi.Principal{TenantID: "tenant-a", ActorID: "actor-a", Roles: []string{"owner"}})
-	_, token, err := auth.IssuePAT(ctx, "tenant-a", "actor-a", "wiring", []string{"repo.read", "repo.write"}, nil)
+	_, token, err := auth.IssuePAT(ctx, "tenant-a", "actor-a", "wiring", []string{"repo.read", "repo.write"}, nil, nil)
 	if err != nil {
 		t.Fatalf("IssuePAT(): %v", err)
 	}

@@ -17,10 +17,11 @@ type Principal struct {
 	Roles             []string
 }
 type PAT struct {
-	ID, TenantID, ActorID, Label, verifier string
-	Scopes                                 []string
-	CreatedAt                              time.Time
-	ExpiresAt, RevokedAt                   *time.Time
+	ID, TenantID, ActorID, Label string
+	Scopes, Roles                []string
+	verifier                     string
+	CreatedAt                    time.Time
+	ExpiresAt, RevokedAt         *time.Time
 }
 type sshKey struct {
 	principal Principal
@@ -131,7 +132,7 @@ func (s *Service) RetireVerifierKey(keyID string) error {
 	delete(s.verifierKeys, keyID)
 	return nil
 }
-func (s *Service) IssuePAT(tenant, actor, label string, scopes []string, expiry ...*time.Time) (PAT, string, error) {
+func (s *Service) IssuePAT(tenant, actor, label string, scopes, roles []string, expiry ...*time.Time) (PAT, string, error) {
 	if tenant == "" || actor == "" {
 		return PAT{}, "", errors.New("tenant and actor required")
 	}
@@ -156,7 +157,7 @@ func (s *Service) IssuePAT(tenant, actor, label string, scopes []string, expiry 
 	token := "gfp_" + s.activeKeyID + "_" + hex.EncodeToString(b)
 	id := hex.EncodeToString(b[:16])
 	createdAt := s.now().UTC()
-	p := &PAT{ID: id, TenantID: tenant, ActorID: actor, Label: label, Scopes: append([]string(nil), scopes...), CreatedAt: createdAt, ExpiresAt: expiresAt, verifier: hashWithKey(key, token)}
+	p := &PAT{ID: id, TenantID: tenant, ActorID: actor, Label: label, Scopes: append([]string(nil), scopes...), Roles: append([]string(nil), roles...), CreatedAt: createdAt, ExpiresAt: expiresAt, verifier: hashWithKey(key, token)}
 	s.pats[id] = p
 	s.byVerifier[p.verifier] = id
 	return s.public(*p), token, nil
@@ -179,7 +180,7 @@ func (s *Service) AuthenticatePAT(token string) (Principal, bool) {
 	}
 	p := s.pats[id]
 	if p != nil && p.RevokedAt == nil && (p.ExpiresAt == nil || s.now().Before(*p.ExpiresAt)) && hmac.Equal([]byte(p.verifier), []byte(verifier)) {
-		return Principal{TenantID: p.TenantID, ActorID: p.ActorID}, true
+		return Principal{TenantID: p.TenantID, ActorID: p.ActorID, Roles: append([]string(nil), p.Roles...)}, true
 	}
 	return Principal{}, false
 }

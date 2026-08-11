@@ -8,7 +8,7 @@ import (
 
 func TestPATRevocationDeniesNextAuthentication(t *testing.T) {
 	s := NewService([]byte("test-key"))
-	meta, token, err := s.IssuePAT("tenant-a", "actor-a", "ci", []string{"repo.read"})
+	meta, token, err := s.IssuePAT("tenant-a", "actor-a", "ci", []string{"repo.read"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestPATRevocationDeniesNextAuthentication(t *testing.T) {
 
 func TestPATDoesNotCrossTenant(t *testing.T) {
 	s := NewService([]byte("test-key"))
-	meta, _, err := s.IssuePAT("tenant-a", "actor-a", "ci", nil)
+	meta, _, err := s.IssuePAT("tenant-a", "actor-a", "ci", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,10 +51,10 @@ func TestSSHKeyAuthenticatesToSamePrincipalShape(t *testing.T) {
 
 func TestListPATsIsTenantAndActorScoped(t *testing.T) {
 	s := NewService([]byte("test-key"))
-	if _, _, err := s.IssuePAT("tenant-a", "actor-a", "a", nil); err != nil {
+	if _, _, err := s.IssuePAT("tenant-a", "actor-a", "a", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.IssuePAT("tenant-b", "actor-b", "b", nil); err != nil {
+	if _, _, err := s.IssuePAT("tenant-b", "actor-b", "b", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.ListPATs("tenant-a", "actor-a"); len(got) != 1 || got[0].TenantID != "tenant-a" {
@@ -65,13 +65,37 @@ func TestListPATsIsTenantAndActorScoped(t *testing.T) {
 	}
 }
 
+// SPEC-0016 AC6: roles granted at issuance resolve on every authentication
+// and appear on issued/list metadata, never the plaintext.
+func TestPATRolesRoundTripThroughIssueAuthenticateAndList(t *testing.T) {
+	s := NewService([]byte("test-key"))
+	meta, token, err := s.IssuePAT("tenant-a", "actor-a", "ci", []string{"repo.read"}, []string{"developer", "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.Roles) != 2 || meta.Roles[0] != "developer" || meta.Roles[1] != "admin" {
+		t.Fatalf("issued metadata roles = %#v", meta.Roles)
+	}
+	p, ok := s.AuthenticatePAT(token)
+	if !ok || len(p.Roles) != 2 || p.Roles[0] != "developer" || p.Roles[1] != "admin" {
+		t.Fatalf("authenticated roles = %#v ok=%v", p.Roles, ok)
+	}
+	listed := s.ListPATs("tenant-a", "actor-a")
+	if len(listed) != 1 || len(listed[0].Roles) != 2 || listed[0].Roles[0] != "developer" {
+		t.Fatalf("listed roles = %#v", listed)
+	}
+	if strings.HasPrefix(token, "gfp_") && strings.Contains(token, "admin") {
+		t.Fatal("plaintext token leaked role material")
+	}
+}
+
 // SPEC-0016 AC4: expiry denies the very next authentication decision.  The
 // clock is injected so this is a boundary test, not a sleep-based race.
 func TestExpiredPATDeniesAuthentication(t *testing.T) {
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	s := NewServiceWithClock([]byte("test-key"), func() time.Time { return now })
 	expiresAt := now.Add(time.Minute)
-	_, token, err := s.IssuePAT("tenant-a", "actor-a", "ci", nil, &expiresAt)
+	_, token, err := s.IssuePAT("tenant-a", "actor-a", "ci", nil, nil, &expiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +142,7 @@ func TestVerifierKeyRotationKeepsThenRetiresOldCredentials(t *testing.T) {
 		"old": []byte("old-key"),
 		"new": []byte("new-key"),
 	}, time.Now)
-	_, oldToken, err := s.IssuePAT("tenant-a", "actor-a", "old", nil)
+	_, oldToken, err := s.IssuePAT("tenant-a", "actor-a", "old", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +152,7 @@ func TestVerifierKeyRotationKeepsThenRetiresOldCredentials(t *testing.T) {
 	if err := s.ActivateVerifierKey("new"); err != nil {
 		t.Fatal(err)
 	}
-	_, newToken, err := s.IssuePAT("tenant-a", "actor-a", "new", nil)
+	_, newToken, err := s.IssuePAT("tenant-a", "actor-a", "new", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +178,7 @@ func TestPATMetadataCarriesLifecycleButNeverVerifier(t *testing.T) {
 	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	s := NewServiceWithClock([]byte("test-key"), func() time.Time { return now })
 	expiresAt := now.Add(time.Hour)
-	issued, _, err := s.IssuePAT("tenant-a", "actor-a", "ci", []string{"repo.read"}, &expiresAt)
+	issued, _, err := s.IssuePAT("tenant-a", "actor-a", "ci", []string{"repo.read"}, nil, &expiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}

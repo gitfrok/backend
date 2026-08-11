@@ -14,13 +14,14 @@ import (
 )
 
 type fakeAuthenticator struct {
-	principal api.Principal
-	ok        bool
-	pat       api.PAT
-	token     string
-	err       error
-	sshKey    string
-	sshKeyID  string
+	principal  api.Principal
+	ok         bool
+	pat        api.PAT
+	token      string
+	err        error
+	sshKey     string
+	sshKeyID   string
+	issueRoles []string
 }
 
 func (f fakeAuthenticator) AuthenticatePAT(context.Context, string) (api.Principal, bool) {
@@ -31,8 +32,23 @@ func (f *fakeAuthenticator) AuthenticateSSHKey(_ context.Context, key, keyID str
 	f.sshKeyID = keyID
 	return f.principal, f.ok
 }
-func (f fakeAuthenticator) IssuePAT(context.Context, string, string, string, []string, *time.Time) (api.PAT, string, error) {
+func (f *fakeAuthenticator) IssuePAT(_ context.Context, _, _, _ string, _, roles []string, _ *time.Time) (api.PAT, string, error) {
+	f.issueRoles = roles
 	return f.pat, f.token, f.err
+}
+
+// SPEC-0016 AC6: roles requested at issuance ride the wire to the store; the
+// server never drops them before forwarding.
+func TestIssuePATForwardsRequestedRoles(t *testing.T) {
+	f := &fakeAuthenticator{}
+	s := NewServer(f)
+	req := &identityv1.IssuePATRequest{Roles: []string{"developer", "ci"}}
+	if _, err := s.IssuePAT(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.issueRoles) != 2 || f.issueRoles[0] != "developer" || f.issueRoles[1] != "ci" {
+		t.Fatalf("roles forwarded = %#v", f.issueRoles)
+	}
 }
 func (f fakeAuthenticator) RevokePAT(context.Context, string, string, string) (api.PAT, error) {
 	return f.pat, f.err
