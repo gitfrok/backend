@@ -57,7 +57,7 @@ func (s *Server) IssuePAT(ctx context.Context, req *identityv1.IssuePATRequest) 
 		value := expiresAt.AsTime()
 		expiry = &value
 	}
-	p, t, e := s.auth.IssuePAT(ctx, req.GetTenantId(), req.GetActorId(), req.GetLabel(), req.GetScopeLabels(), expiry)
+	p, t, e := s.auth.IssuePAT(ctx, req.GetTenantId(), req.GetActorId(), req.GetLabel(), req.GetScopeLabels(), req.GetRoles(), expiry)
 	if e != nil {
 		return nil, lifecycleDenied()
 	}

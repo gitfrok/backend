@@ -155,7 +155,7 @@ func (a sshTransportAuthenticator) AuthenticateSSHKey(_ context.Context, key, _ 
 	return identityapi.Principal{TenantID: "tenant-a", ActorID: "actor-a", Roles: []string{"member"}}, true
 }
 
-func (a sshTransportAuthenticator) IssuePAT(context.Context, string, string, string, []string, *time.Time) (identityapi.PAT, string, error) {
+func (a sshTransportAuthenticator) IssuePAT(context.Context, string, string, string, []string, []string, *time.Time) (identityapi.PAT, string, error) {
 	panic("not used")
 }
 

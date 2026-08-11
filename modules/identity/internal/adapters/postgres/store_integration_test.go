@@ -48,7 +48,7 @@ func TestPostgresPATRevocationDeniesNextResolverLookup(t *testing.T) {
 
 	auth := identity.NewPostgres(pool, "test", map[string][]byte{"test": []byte("test-verifier-key")}, allowPDP{})
 	lifecycleCtx := identityapi.WithPrincipal(ctx, identityapi.Principal{TenantID: tenantID, ActorID: actorID, Roles: []string{"member"}})
-	pat, token, err := auth.IssuePAT(lifecycleCtx, tenantID, actorID, "integration", []string{"repo.read"}, nil)
+	pat, token, err := auth.IssuePAT(lifecycleCtx, tenantID, actorID, "integration", []string{"repo.read"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

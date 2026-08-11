@@ -30,11 +30,11 @@ func TestPATLifecycleRequiresMatchingTenantContext(t *testing.T) {
 	auth := identity.NewInMemory([]byte("test-key"), pdp)
 	ctx := api.WithPrincipal(tenancy.WithTenant(t.Context(), "tenant-a"), api.Principal{TenantID: "tenant-a", ActorID: "actor-a", Roles: []string{"owner"}})
 	expiresAt := time.Now().Add(time.Hour)
-	pat, _, err := auth.IssuePAT(ctx, "tenant-a", "actor-a", "ci", nil, &expiresAt)
+	pat, _, err := auth.IssuePAT(ctx, "tenant-a", "actor-a", "ci", nil, nil, &expiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := auth.IssuePAT(t.Context(), "tenant-a", "actor-a", "ci", nil, &expiresAt); !errors.Is(err, tenancy.ErrNoTenant) {
+	if _, _, err := auth.IssuePAT(t.Context(), "tenant-a", "actor-a", "ci", nil, nil, &expiresAt); !errors.Is(err, tenancy.ErrNoTenant) {
 		t.Fatalf("missing tenant error = %v, want %v", err, tenancy.ErrNoTenant)
 	}
 	if _, err := auth.ListPATs(ctx, "tenant-b", "actor-a"); !errors.Is(err, api.ErrTenantMismatch) {
@@ -55,7 +55,7 @@ func TestPATLifecycleDeniesWithoutPDPGrant(t *testing.T) {
 	auth := identity.NewInMemory([]byte("test-key"), pdp)
 	ctx := api.WithPrincipal(tenancy.WithTenant(t.Context(), "tenant-a"), api.Principal{TenantID: "tenant-a", ActorID: "actor-a"})
 	expiresAt := time.Now().Add(time.Hour)
-	if _, _, err := auth.IssuePAT(ctx, "tenant-a", "actor-a", "ci", nil, &expiresAt); !errors.Is(err, api.ErrAuthorizationDenied) {
+	if _, _, err := auth.IssuePAT(ctx, "tenant-a", "actor-a", "ci", nil, nil, &expiresAt); !errors.Is(err, api.ErrAuthorizationDenied) {
 		t.Fatalf("denied issue error = %v, want %v", err, api.ErrAuthorizationDenied)
 	}
 }

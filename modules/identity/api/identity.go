@@ -45,14 +45,14 @@ func RequirePrincipal(ctx context.Context) (Principal, error) {
 
 type PAT struct {
 	ID, TenantID, ActorID, Label string
-	Scopes                       []string
+	Scopes, Roles                []string
 	CreatedAt                    time.Time
 	ExpiresAt, RevokedAt         *time.Time
 }
 type Authenticator interface {
 	AuthenticatePAT(ctx context.Context, token string) (Principal, bool)
 	AuthenticateSSHKey(ctx context.Context, key, verifierKeyID string) (Principal, bool)
-	IssuePAT(ctx context.Context, tenantID, actorID, label string, scopes []string, expiresAt *time.Time) (PAT, string, error)
+	IssuePAT(ctx context.Context, tenantID, actorID, label string, scopes, roles []string, expiresAt *time.Time) (PAT, string, error)
 	RevokePAT(ctx context.Context, tenantID, actorID, patID string) (PAT, error)
 	ListPATs(ctx context.Context, tenantID, actorID string) ([]PAT, error)
 }
