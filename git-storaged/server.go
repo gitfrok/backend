@@ -89,6 +89,9 @@ type Server struct {
 	protection    Protection
 	objects       ObjectStore
 	sourceLFS     *sourceLFSClient
+
+	refMu   sync.Mutex
+	refSubs []*refSubscriber
 }
 
 // NewServer validates process wiring and the live-repository filesystem before the service accepts
@@ -133,7 +136,7 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 	if quorumTimeout <= 0 {
 		quorumTimeout = 5 * time.Second
 	}
-	return &Server{
+	server := &Server{
 		root:          config.RepositoryRoot,
 		pdp:           config.PDP,
 		events:        config.Events,
@@ -145,7 +148,9 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 		protection:    config.Protection,
 		objects:       config.Objects,
 		sourceLFS:     newSourceLFSClient(),
-	}, nil
+	}
+	bus.SubscribeTyped(config.Events, server.forwardRefUpdate)
+	return server, nil
 }
 
 const (

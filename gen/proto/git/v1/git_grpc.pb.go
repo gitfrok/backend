@@ -25,11 +25,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	GitStorage_UploadPack_FullMethodName    = "/gitsaas.git.v1.GitStorage/UploadPack"
-	GitStorage_ReceivePack_FullMethodName   = "/gitsaas.git.v1.GitStorage/ReceivePack"
-	GitStorage_MergeRef_FullMethodName      = "/gitsaas.git.v1.GitStorage/MergeRef"
-	GitStorage_ImportRefs_FullMethodName    = "/gitsaas.git.v1.GitStorage/ImportRefs"
-	GitStorage_SetProtection_FullMethodName = "/gitsaas.git.v1.GitStorage/SetProtection"
+	GitStorage_UploadPack_FullMethodName          = "/gitsaas.git.v1.GitStorage/UploadPack"
+	GitStorage_ReceivePack_FullMethodName         = "/gitsaas.git.v1.GitStorage/ReceivePack"
+	GitStorage_MergeRef_FullMethodName            = "/gitsaas.git.v1.GitStorage/MergeRef"
+	GitStorage_ImportRefs_FullMethodName          = "/gitsaas.git.v1.GitStorage/ImportRefs"
+	GitStorage_SetProtection_FullMethodName       = "/gitsaas.git.v1.GitStorage/SetProtection"
+	GitStorage_SubscribeRefUpdates_FullMethodName = "/gitsaas.git.v1.GitStorage/SubscribeRefUpdates"
 )
 
 // GitStorageClient is the client API for GitStorage service.
@@ -78,6 +79,12 @@ type GitStorageClient interface {
 	// operation — a caller that has already been allowed by its own PEP is still
 	// not trusted to assert the rule into effect.
 	SetProtection(ctx context.Context, in *SetProtectionRequest, opts ...grpc.CallOption) (*SetProtectionResponse, error)
+	// SubscribeRefUpdates streams every ref update this node applies, so a
+	// separate-process consumer (the dataplane today) can project what the
+	// receive-pack and merge paths changed without reading this node's storage
+	// tables or bus (invariant 15, ADR-0022). It is a wire event channel, not a
+	// command: the node keeps applying updates whether or not anyone subscribes.
+	SubscribeRefUpdates(ctx context.Context, in *SubscribeRefUpdatesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RefUpdateNotification], error)
 }
 
 type gitStorageClient struct {
@@ -144,6 +151,25 @@ func (c *gitStorageClient) SetProtection(ctx context.Context, in *SetProtectionR
 	return out, nil
 }
 
+func (c *gitStorageClient) SubscribeRefUpdates(ctx context.Context, in *SubscribeRefUpdatesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RefUpdateNotification], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &GitStorage_ServiceDesc.Streams[2], GitStorage_SubscribeRefUpdates_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SubscribeRefUpdatesRequest, RefUpdateNotification]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type GitStorage_SubscribeRefUpdatesClient = grpc.ServerStreamingClient[RefUpdateNotification]
+
 // GitStorageServer is the server API for GitStorage service.
 // All implementations must embed UnimplementedGitStorageServer
 // for forward compatibility.
@@ -190,6 +216,12 @@ type GitStorageServer interface {
 	// operation — a caller that has already been allowed by its own PEP is still
 	// not trusted to assert the rule into effect.
 	SetProtection(context.Context, *SetProtectionRequest) (*SetProtectionResponse, error)
+	// SubscribeRefUpdates streams every ref update this node applies, so a
+	// separate-process consumer (the dataplane today) can project what the
+	// receive-pack and merge paths changed without reading this node's storage
+	// tables or bus (invariant 15, ADR-0022). It is a wire event channel, not a
+	// command: the node keeps applying updates whether or not anyone subscribes.
+	SubscribeRefUpdates(*SubscribeRefUpdatesRequest, grpc.ServerStreamingServer[RefUpdateNotification]) error
 	mustEmbedUnimplementedGitStorageServer()
 }
 
@@ -214,6 +246,9 @@ func (UnimplementedGitStorageServer) ImportRefs(context.Context, *ImportRefsRequ
 }
 func (UnimplementedGitStorageServer) SetProtection(context.Context, *SetProtectionRequest) (*SetProtectionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetProtection not implemented")
+}
+func (UnimplementedGitStorageServer) SubscribeRefUpdates(*SubscribeRefUpdatesRequest, grpc.ServerStreamingServer[RefUpdateNotification]) error {
+	return status.Errorf(codes.Unimplemented, "method SubscribeRefUpdates not implemented")
 }
 func (UnimplementedGitStorageServer) mustEmbedUnimplementedGitStorageServer() {}
 func (UnimplementedGitStorageServer) testEmbeddedByValue()                    {}
@@ -304,6 +339,17 @@ func _GitStorage_SetProtection_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GitStorage_SubscribeRefUpdates_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeRefUpdatesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(GitStorageServer).SubscribeRefUpdates(m, &grpc.GenericServerStream[SubscribeRefUpdatesRequest, RefUpdateNotification]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type GitStorage_SubscribeRefUpdatesServer = grpc.ServerStreamingServer[RefUpdateNotification]
+
 // GitStorage_ServiceDesc is the grpc.ServiceDesc for GitStorage service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -336,6 +382,11 @@ var GitStorage_ServiceDesc = grpc.ServiceDesc{
 			Handler:       _GitStorage_ReceivePack_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "SubscribeRefUpdates",
+			Handler:       _GitStorage_SubscribeRefUpdates_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "proto/git/v1/git.proto",

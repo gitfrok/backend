@@ -183,6 +183,11 @@ func main() {
 	// composed at all, rather than composed with a merge path that cannot work.
 	if doors.storageClient != nil {
 		dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
+		// Ref updates cross the process boundary in the other direction: the
+		// receive-pack path announces RefUpdated on git-storaged's bus, and this
+		// plane subscribes and republishes so the repository projection, search,
+		// and CI triggers light up exactly as they do in the monolith (SPEC-0015).
+		watchRefUpdates(ctx, doors.storageClient, dp.bus)
 		// Branch protection crosses the process boundary here. Code Review owns
 		// the rules and announces each change as BranchProtectionChanged; when it
 		// and git-storaged share a process the event is enough, and when they do
