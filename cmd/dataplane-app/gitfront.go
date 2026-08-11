@@ -295,11 +295,6 @@ func startGitFrontDoors(ctx context.Context, cfg frontDoorConfig, authenticator 
 		doors.policyListener = listener
 		doors.policyServer = grpc.NewServer()
 		policyv1.RegisterPolicyDecisionPointServer(doors.policyServer, policy.NewGRPCServer(pdp))
-		go func() {
-			if err := doors.policyServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-				fmt.Fprintf(os.Stderr, "dataplane policy grpc: %v\n", err)
-			}
-		}()
 	}
 
 	go func() {
@@ -307,6 +302,20 @@ func startGitFrontDoors(ctx context.Context, cfg frontDoorConfig, authenticator 
 		doors.Close()
 	}()
 	return doors, nil
+}
+
+// ServePolicy starts the policy gRPC door. It is called by the plane's owner
+// after every service that shares the door has been registered, so a late
+// RegisterService can never race Serve — gRPC makes that a fatal error.
+func (d *gitFrontDoors) ServePolicy() {
+	if d.policyServer == nil {
+		return
+	}
+	go func() {
+		if err := d.policyServer.Serve(d.policyListener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			fmt.Fprintf(os.Stderr, "dataplane policy grpc: %v\n", err)
+		}
+	}()
 }
 
 // loadHostSigner loads a PEM private key from path, or generates an ephemeral
