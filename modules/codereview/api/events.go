@@ -53,6 +53,10 @@ type BranchProtectionChanged struct {
 	EventID, TenantID, RepositoryID, TargetRef string
 	RequiredApprovals                          int32
 	OccurredAt                                 time.Time
+	// ActorID is the verified subject whose authorized SetProtection produced
+	// this change. Cross-process consumers re-derive the PDP subject from it
+	// when they apply the rule at their own enforcement point.
+	ActorID string
 }
 
 func (BranchProtectionChanged) EventName() string { return EventBranchProtectionChanged }

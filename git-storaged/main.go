@@ -16,7 +16,9 @@ import (
 	"github.com/gitfrok/backend/git-storaged/protection"
 	"github.com/gitfrok/backend/modules/policy"
 	"github.com/gitfrok/backend/modules/repository"
+	auditsink "github.com/gitfrok/backend/platform/auditsink"
 	"github.com/gitfrok/backend/platform/bus"
+	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/ids"
 	"github.com/gitfrok/backend/platform/objectstore"
 	"google.golang.org/grpc"
@@ -44,6 +46,13 @@ const (
 	objectBucketEnv    = "GITFROK_SEAWEEDFS_S3_BUCKET"
 	objectAccessKeyEnv = "GITFROK_SEAWEEDFS_S3_ACCESS_KEY"
 	objectSecretKeyEnv = "GITFROK_SEAWEEDFS_S3_SECRET_KEY"
+
+	// databaseURLEnv is the tenant-scoped application DSN. When set, this node
+	// persists the audit events it emits (PDP refusals, RLS violations) onto the
+	// Postgres trail; when absent, events are published and dropped as before.
+	// The DSN must be the gitfrok_app role — a superuser would pass db.Open's
+	// RLS check for the wrong reason.
+	databaseURLEnv = "GITFROK_DATABASE_URL"
 )
 
 // objectTier builds the SeaweedFS-S3 store, or returns nil when this node is not
@@ -129,6 +138,21 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+
+	// The audit sink rides the same bus the PDP audits its refusals to. A node
+	// without a database URL persists nothing — the events are still published,
+	// still dropped, exactly as before. A node with one but a broken write fails
+	// loudly: the PDP reports an unaudited denial as an error (ADR-0007).
+	if dsn := os.Getenv(databaseURLEnv); dsn != "" {
+		pool, err := db.Open(context.Background(), dsn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "git-storaged: audit database: %v\n", err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		auditsink.NewSink(pool, events).Subscribe(events)
+		fmt.Fprintln(os.Stderr, "git-storaged: audit sink on GITFROK_DATABASE_URL")
 	}
 
 	server, err := NewServer(Config{

@@ -25,10 +25,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	GitStorage_UploadPack_FullMethodName  = "/gitsaas.git.v1.GitStorage/UploadPack"
-	GitStorage_ReceivePack_FullMethodName = "/gitsaas.git.v1.GitStorage/ReceivePack"
-	GitStorage_MergeRef_FullMethodName    = "/gitsaas.git.v1.GitStorage/MergeRef"
-	GitStorage_ImportRefs_FullMethodName  = "/gitsaas.git.v1.GitStorage/ImportRefs"
+	GitStorage_UploadPack_FullMethodName    = "/gitsaas.git.v1.GitStorage/UploadPack"
+	GitStorage_ReceivePack_FullMethodName   = "/gitsaas.git.v1.GitStorage/ReceivePack"
+	GitStorage_MergeRef_FullMethodName      = "/gitsaas.git.v1.GitStorage/MergeRef"
+	GitStorage_ImportRefs_FullMethodName    = "/gitsaas.git.v1.GitStorage/ImportRefs"
+	GitStorage_SetProtection_FullMethodName = "/gitsaas.git.v1.GitStorage/SetProtection"
 )
 
 // GitStorageClient is the client API for GitStorage service.
@@ -63,6 +64,20 @@ type GitStorageClient interface {
 	// The source URL and token are request-only secrets. They are never stored,
 	// never logged, and never copied into an event, audit record, or error.
 	ImportRefs(ctx context.Context, in *ImportRefsRequest, opts ...grpc.CallOption) (*ImportRefsResponse, error)
+	// SetProtection delivers one exact-ref branch-protection rule from Code Review
+	// to this storage node (SPEC-0019 AC7).
+	//
+	// Code Review owns the rules and has already PDP-authorized the change; the
+	// rule arrives here so the receive-pack path can derive server-side context
+	// for the PDP before it accepts a direct ref update. It is the cross-process
+	// counterpart of BranchProtectionChanged: when Code Review and git-storaged
+	// share a process the event is enough, and when they do not, this RPC is the
+	// route by which the rule reaches the node that enforces direct pushes.
+	//
+	// Storage asks the PDP itself, exactly as for every other ref-affecting
+	// operation — a caller that has already been allowed by its own PEP is still
+	// not trusted to assert the rule into effect.
+	SetProtection(ctx context.Context, in *SetProtectionRequest, opts ...grpc.CallOption) (*SetProtectionResponse, error)
 }
 
 type gitStorageClient struct {
@@ -119,6 +134,16 @@ func (c *gitStorageClient) ImportRefs(ctx context.Context, in *ImportRefsRequest
 	return out, nil
 }
 
+func (c *gitStorageClient) SetProtection(ctx context.Context, in *SetProtectionRequest, opts ...grpc.CallOption) (*SetProtectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetProtectionResponse)
+	err := c.cc.Invoke(ctx, GitStorage_SetProtection_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GitStorageServer is the server API for GitStorage service.
 // All implementations must embed UnimplementedGitStorageServer
 // for forward compatibility.
@@ -151,6 +176,20 @@ type GitStorageServer interface {
 	// The source URL and token are request-only secrets. They are never stored,
 	// never logged, and never copied into an event, audit record, or error.
 	ImportRefs(context.Context, *ImportRefsRequest) (*ImportRefsResponse, error)
+	// SetProtection delivers one exact-ref branch-protection rule from Code Review
+	// to this storage node (SPEC-0019 AC7).
+	//
+	// Code Review owns the rules and has already PDP-authorized the change; the
+	// rule arrives here so the receive-pack path can derive server-side context
+	// for the PDP before it accepts a direct ref update. It is the cross-process
+	// counterpart of BranchProtectionChanged: when Code Review and git-storaged
+	// share a process the event is enough, and when they do not, this RPC is the
+	// route by which the rule reaches the node that enforces direct pushes.
+	//
+	// Storage asks the PDP itself, exactly as for every other ref-affecting
+	// operation — a caller that has already been allowed by its own PEP is still
+	// not trusted to assert the rule into effect.
+	SetProtection(context.Context, *SetProtectionRequest) (*SetProtectionResponse, error)
 	mustEmbedUnimplementedGitStorageServer()
 }
 
@@ -172,6 +211,9 @@ func (UnimplementedGitStorageServer) MergeRef(context.Context, *MergeRefRequest)
 }
 func (UnimplementedGitStorageServer) ImportRefs(context.Context, *ImportRefsRequest) (*ImportRefsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ImportRefs not implemented")
+}
+func (UnimplementedGitStorageServer) SetProtection(context.Context, *SetProtectionRequest) (*SetProtectionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetProtection not implemented")
 }
 func (UnimplementedGitStorageServer) mustEmbedUnimplementedGitStorageServer() {}
 func (UnimplementedGitStorageServer) testEmbeddedByValue()                    {}
@@ -244,6 +286,24 @@ func _GitStorage_ImportRefs_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GitStorage_SetProtection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetProtectionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GitStorageServer).SetProtection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GitStorage_SetProtection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GitStorageServer).SetProtection(ctx, req.(*SetProtectionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GitStorage_ServiceDesc is the grpc.ServiceDesc for GitStorage service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -258,6 +318,10 @@ var GitStorage_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ImportRefs",
 			Handler:    _GitStorage_ImportRefs_Handler,
+		},
+		{
+			MethodName: "SetProtection",
+			Handler:    _GitStorage_SetProtection_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

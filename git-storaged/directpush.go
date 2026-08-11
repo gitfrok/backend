@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
+	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 )
 
@@ -19,6 +20,9 @@ import (
 type Protection interface {
 	// ProtectedRefs lists the protected refs in one tenant and repository.
 	ProtectedRefs(tenantID, repositoryID string) []string
+	// Set installs or replaces one exact-ref rule, delivered by the
+	// SetProtection RPC (git.proto) from the process that owns the rules.
+	Set(rule codereviewapi.BranchProtection)
 }
 
 // protectedRefsEnv carries the refs a push may not update to the pre-receive

@@ -367,7 +367,7 @@ func (s *Service) SetProtection(ctx context.Context, req api.ProtectionRequest) 
 	return updated, s.bus.Publish(ctx, api.BranchProtectionChanged{
 		EventID: s.newID(), TenantID: updated.TenantID, RepositoryID: updated.RepositoryID,
 		TargetRef: updated.TargetRef, RequiredApprovals: updated.RequiredApprovals,
-		OccurredAt: s.now().UTC(),
+		ActorID: req.Context.ActorID, OccurredAt: s.now().UTC(),
 	})
 }
 
