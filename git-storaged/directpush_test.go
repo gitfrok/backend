@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
+	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	repoapi "github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/platform/bus"
@@ -21,6 +22,8 @@ type staticProtection map[string][]string
 func (p staticProtection) ProtectedRefs(tenantID, repositoryID string) []string {
 	return p[tenantID+"/"+repositoryID]
 }
+
+func (p staticProtection) Set(codereviewapi.BranchProtection) {}
 
 // protectionPDP answers the way the Rego policy does: a direct push to a
 // protected ref is refused, and everything else this test needs is allowed.

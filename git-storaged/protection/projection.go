@@ -32,18 +32,28 @@ func New() *Projection {
 }
 
 // Subscribe connects the projection to the bus. This is the only route by which
-// protection facts enter Repository/Git.
+// protection facts enter Repository/Git when Code Review shares the process.
 func (p *Projection) Subscribe(events bus.Bus) {
 	bus.SubscribeTyped(events, p.onBranchProtectionChanged)
 }
 
-func (p *Projection) onBranchProtectionChanged(_ context.Context, event codereviewapi.BranchProtectionChanged) error {
+// Set installs or replaces the exact-ref rule, mirroring Code Review's
+// replace-only semantics (SPEC-0019): there is no unprotect path, and a rule
+// requiring zero approvals still protects the ref. It is the cross-process
+// counterpart of the BranchProtectionChanged event: when Code Review and
+// git-storaged do not share a bus, the rule reaches the node that enforces
+// direct pushes through this setter instead.
+func (p *Projection) Set(rule codereviewapi.BranchProtection) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.rules[key(event.TenantID, event.RepositoryID, event.TargetRef)] = codereviewapi.BranchProtection{
+	p.rules[key(rule.TenantID, rule.RepositoryID, rule.TargetRef)] = rule
+}
+
+func (p *Projection) onBranchProtectionChanged(_ context.Context, event codereviewapi.BranchProtectionChanged) error {
+	p.Set(codereviewapi.BranchProtection{
 		TenantID: event.TenantID, RepositoryID: event.RepositoryID, TargetRef: event.TargetRef,
 		RequiredApprovals: event.RequiredApprovals,
-	}
+	})
 	return nil
 }
 
