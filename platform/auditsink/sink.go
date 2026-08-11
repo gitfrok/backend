@@ -97,8 +97,11 @@ func (s *Sink) appendMerge(ctx context.Context, e platformaudit.MergeRequestMerg
 
 // append scopes the surrounding transaction to the event's own tenant before
 // writing. The trail is tenant-isolated (SPEC-0003), so the scoping is the
-// record's read side as much as its write side.
+// record's read side as much as its write side. Every sink record is first
+// party: it is witnessed by a plane of this platform, and ADR-0029 §1 admits
+// nothing else — the store rejects any other class.
 func (s *Sink) append(ctx context.Context, tenant string, e auditapi.Entry) error {
+	e.Provenance = auditapi.ProvenanceFirstParty
 	_, err := s.log.Append(tenancy.WithTenant(ctx, tenancy.ID(tenant)), e)
 	return err
 }

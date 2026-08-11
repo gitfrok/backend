@@ -57,6 +57,11 @@ type BranchProtectionChanged struct {
 	// this change. Cross-process consumers re-derive the PDP subject from it
 	// when they apply the rule at their own enforcement point.
 	ActorID string
+	// ActorRoles are the roles the subject held when the change was decided,
+	// carried so a cross-process consumer can re-run its own PDP decision with
+	// the same subject the authorizing PEP saw (events/ci RefUpdated precedent).
+	// They are identity attributes, never a policy outcome.
+	ActorRoles []string
 }
 
 func (BranchProtectionChanged) EventName() string { return EventBranchProtectionChanged }
