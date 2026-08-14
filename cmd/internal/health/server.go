@@ -34,7 +34,9 @@ func Run(ctx context.Context, addr string) error {
 // conflict-free ephemeral port.
 func Serve(ctx context.Context, listener net.Listener) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	// http_servemux_patterns (SPEC-0036 CONDITIONAL): method-aware pattern — probes GET this
+	// endpoint, and a non-GET now gets 405 instead of an answer, which is the intended tightening.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})

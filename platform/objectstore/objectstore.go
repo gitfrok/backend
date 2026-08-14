@@ -32,7 +32,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -91,7 +91,7 @@ func New(config Config) (*Store, error) {
 		}
 	}
 	if len(missing) > 0 {
-		sort.Strings(missing)
+		slices.Sort(missing)
 		// The message names what is missing and never what was configured: a
 		// secret must not reach an error string.
 		return nil, fmt.Errorf("objectstore: incomplete configuration, missing %s", strings.Join(missing, ", "))
