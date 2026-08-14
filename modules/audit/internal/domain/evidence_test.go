@@ -104,6 +104,109 @@ func TestAssembleSectionsMarksTruncatedSectionsIncomplete(t *testing.T) {
 	}
 }
 
+// Wave-2 N4 pin: a section type whose records live ONLY in the unread tail
+// still appears in a truncated pack — as an empty section marked incomplete
+// with the truncation gap, never absent. Absence would let a truncated read
+// hide that the range even witnessed that control.
+func TestTruncatedReadEmitsTailOnlySectionTypesIncomplete(t *testing.T) {
+	// The prefix holds one approval only; scan gates and policy decisions
+	// exist solely in the unread tail.
+	records := []api.Record{
+		trailRecord(1, api.Action("codereview.review.approved"), map[string]string{"protection_rule_id": "rule-1"}),
+	}
+	gap := api.SectionGap{
+		From: records[0].OccurredAt, To: evidenceNow.Add(24 * time.Hour), Reason: api.GapReadTruncated,
+	}
+
+	sections := AssembleSections(records, "", &gap)
+	if len(sections) != 3 {
+		t.Fatalf("trail-fed sections = %d, want 3", len(sections))
+	}
+	for _, sec := range sections {
+		if sec.Complete {
+			t.Errorf("section %s: a truncated read must not render Complete", sec.Type)
+		}
+		if len(sec.Gaps) != 1 || sec.Gaps[0] != gap {
+			t.Errorf("section %s: gaps = %+v, want exactly the truncation gap %+v", sec.Type, sec.Gaps, gap)
+		}
+	}
+	// The tail-only types are present with zero records — present AND
+	// incomplete is the honest shape.
+	for _, want := range []api.SectionType{api.SectionPolicyDecisions, api.SectionScanGates} {
+		found := false
+		for _, sec := range sections {
+			if sec.Type == want {
+				found = true
+				if len(sec.Records) != 0 || sec.Anchor != (api.ChainAnchor{}) {
+					t.Errorf("section %s: a tail-only type must carry no records and no anchors, got %+v", want, sec)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("section %s: a truncated read must still emit the type, not drop it", want)
+		}
+	}
+}
+
+// Wave-2 N6 — an enforced policy decision lacking its input digest is
+// excluded from the section's records (SPEC-0031 AC3), but never dropped
+// silently: the policy-decisions section renders Complete: false with one
+// visible exclusion gap per excluded record (SPEC-0031 AC10).
+func TestExcludedPolicyDecisionsMarkTheSectionIncomplete(t *testing.T) {
+	admitted := trailRecord(1, api.Action("security.scan.denied"), map[string]string{
+		"policy_mode": "ENFORCED", "decision_id": "d-1",
+		"policy_revision": "rev-1", "input_digest": "sha256:in",
+	})
+	excluded := trailRecord(2, api.Action("security.finding.read.denied"), map[string]string{
+		"policy_mode": "ENFORCED", "decision_id": "d-2",
+		"policy_revision": "rev-1", // the input digest is missing
+	})
+	wantGap := api.SectionGap{From: excluded.OccurredAt, To: excluded.OccurredAt, Reason: api.GapRecordsExcluded}
+
+	policy := func(sections []api.Section) api.Section {
+		t.Helper()
+		for _, sec := range sections {
+			if sec.Type == api.SectionPolicyDecisions {
+				return sec
+			}
+		}
+		t.Fatal("the policy-decisions section must be present")
+		return api.Section{}
+	}
+
+	// Without truncation: the exclusion alone marks the section.
+	sec := policy(AssembleSections([]api.Record{admitted, excluded}, "", nil))
+	if sec.Complete {
+		t.Error("a section with an excluded decision must not render Complete")
+	}
+	if len(sec.Records) != 1 || sec.Records[0].PolicyDecision == nil ||
+		sec.Records[0].PolicyDecision.DecisionID != "d-1" {
+		t.Fatalf("only the fully-provenanced decision may be cited, got %+v", sec.Records)
+	}
+	if len(sec.Gaps) != 1 || sec.Gaps[0] != wantGap {
+		t.Fatalf("gaps = %+v, want exactly the exclusion marker %+v", sec.Gaps, wantGap)
+	}
+	// The cited record stays verifiable: digest over the records as delivered.
+	if sec.RecordsDigest != RecordsDigest(sec.Records) {
+		t.Error("the cited slice must stay digest-verifiable")
+	}
+
+	// Other sections are untouched by the exclusion.
+	for _, s := range AssembleSections([]api.Record{admitted, excluded}, "", nil) {
+		if s.Type != api.SectionPolicyDecisions && (!s.Complete || len(s.Gaps) != 0) {
+			t.Errorf("section %s: the exclusion belongs to policy decisions only, got %+v", s.Type, s)
+		}
+	}
+
+	// With truncation too: the exclusion gap renders first, then the
+	// truncation gap — chain order.
+	trunc := api.SectionGap{From: excluded.OccurredAt, To: evidenceNow.Add(24 * time.Hour), Reason: api.GapReadTruncated}
+	sec = policy(AssembleSections([]api.Record{admitted, excluded}, "", &trunc))
+	if len(sec.Gaps) != 2 || sec.Gaps[0] != wantGap || sec.Gaps[1] != trunc || sec.Complete {
+		t.Fatalf("truncated section gaps = %+v, want [%+v, %+v] and Complete=false", sec.Gaps, wantGap, trunc)
+	}
+}
+
 // The bounded-chunk streaming shape: the header chunk carries the pack's
 // identity ONLY — sections and appendix travel in their own chunks. A header
 // embedding the whole pack would make chunk 0 unbounded and defeat the shape

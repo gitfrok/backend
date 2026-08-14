@@ -174,10 +174,11 @@ func gapReasonOf(r api.GapReason) auditv1.GapReason {
 		return auditv1.GapReason_GAP_REASON_PROJECTION_LAGGED
 	case api.GapAssemblyFailed:
 		return auditv1.GapReason_GAP_REASON_ASSEMBLY_FAILED
-	// api.GapReadTruncated has no dedicated wire value yet: the contract
-	// enum is governance-owned (gen/**), and a wire addition needs the
-	// governance-first contract change. It renders UNSPECIFIED here, while
-	// Complete=false still carries the truncation marker (SPEC-0032 AC8).
+	// api.GapReadTruncated and api.GapRecordsExcluded have no dedicated wire
+	// values yet: the contract enum is governance-owned (gen/**), and a wire
+	// addition needs the governance-first contract change. Both render
+	// UNSPECIFIED here, while Complete=false still carries the marker
+	// (SPEC-0032 AC8).
 	default:
 		return auditv1.GapReason_GAP_REASON_UNSPECIFIED
 	}

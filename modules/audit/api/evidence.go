@@ -177,6 +177,17 @@ const (
 	// contract change adds a dedicated value; Complete=false plus the gap is
 	// the machine-checkable marker either way.
 	GapReadTruncated
+	// GapRecordsExcluded: the trail witnessed policy-decision records inside
+	// the range that the control section cannot admit — enforced decisions
+	// lacking part of their SPEC-0030 provenance (decision ID, policy
+	// revision, or input digest). They are excluded from the section's
+	// records (SPEC-0031 AC3) but their presence is marked, never dropped
+	// silently: the section renders Complete: false with one point gap per
+	// excluded record (SPEC-0031 AC10). Like GapReadTruncated, the wire
+	// enum renders it UNSPECIFIED until a governance contract change adds a
+	// dedicated value; Complete=false plus the gap is the machine-checkable
+	// marker either way.
+	GapRecordsExcluded
 )
 
 // SectionGap marks the parts of a section's range that could not be assembled.

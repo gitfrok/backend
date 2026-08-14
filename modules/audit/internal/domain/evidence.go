@@ -103,6 +103,27 @@ func Classify(r api.Record) (api.SectionRecord, api.SectionType, bool) {
 	return base, api.SectionPolicyDecisions, true
 }
 
+// excludedPolicyDecision reports whether a witnessed record is an enforced
+// policy decision the control section cannot admit: it carries the ENFORCED
+// mode but lacks part of its SPEC-0030 provenance (decision ID, policy
+// revision, or input digest). Classify refuses it — the section may cite
+// only fully-provenanced decisions (SPEC-0031 AC3) — and assembly marks the
+// exclusion with a gap instead of dropping it silently (wave-2 N6). The two
+// actions classified by their action string are never policy decisions, and
+// a DRY_RUN (or un-moded) record is not an exclusion: it is simply not
+// control evidence at all (SPEC-0032 AC3).
+func excludedPolicyDecision(r api.Record) bool {
+	switch string(r.Action) {
+	case actionReviewApproved, actionScanIngested:
+		return false
+	}
+	if r.Detail[detailPolicyMode] != policyModeEnforced {
+		return false
+	}
+	return r.Detail[detailDecisionID] == "" || r.Detail[detailPolicyRevision] == "" ||
+		r.Detail[detailInputDigest] == ""
+}
+
 // resourceID extracts the identifier after the kind prefix of a trail
 // resource ("merge_request/mr-1" -> "mr-1"). A resource without a prefix is
 // returned whole.
@@ -160,14 +181,28 @@ func AnchorWithPrev(records []api.SectionRecord, prevHash string) api.ChainAncho
 // (SPEC-0031 AC10, SPEC-0032 AC8). The access-changes section is unaffected:
 // it assembles separately from the AccessChangesSource port; see Service for
 // its degraded shape when no such surface is wired.
+//
+// Exclusions are marked, never silent: an enforced policy decision lacking
+// its SPEC-0030 provenance cannot enter the policy-decisions section
+// (SPEC-0031 AC3), but its presence in the range is witnessed — the section
+// renders Complete: false with one point gap (From = To = the record's
+// witnessed time) per excluded record, ordered before any truncation gap
+// (wave-2 N6, SPEC-0031 AC10).
 func AssembleSections(records []api.Record, repositoryID string, truncation *api.SectionGap) []api.Section {
 	grouped := map[api.SectionType][]api.SectionRecord{}
 	firstPrev := map[api.SectionType]string{}
+	var excludedGaps []api.SectionGap
 	for _, r := range records {
 		if repositoryID != "" {
 			if repo, ok := r.Detail[detailRepositoryID]; ok && repo != repositoryID {
 				continue
 			}
+		}
+		if excludedPolicyDecision(r) {
+			excludedGaps = append(excludedGaps, api.SectionGap{
+				From: r.OccurredAt, To: r.OccurredAt, Reason: api.GapRecordsExcluded,
+			})
+			continue
 		}
 		sr, section, ok := Classify(r)
 		if !ok {
@@ -194,12 +229,20 @@ func AssembleSections(records []api.Record, repositoryID string, truncation *api
 			Complete:      true,
 			RecordsDigest: RecordsDigest(recs),
 		}
+		// Gaps render in chain order: the policy section's witnessed
+		// exclusions first, then the unread-tail truncation when the read
+		// was bounded. Any gap makes the section incomplete.
+		if st == api.SectionPolicyDecisions {
+			sec.Gaps = append(sec.Gaps, excludedGaps...)
+		}
 		if truncation != nil {
 			// The unread tail may hold records of ANY section: the honest
 			// shape marks every trail-fed section incomplete, whether or not
 			// it cited records from the prefix it did read.
+			sec.Gaps = append(sec.Gaps, *truncation)
+		}
+		if len(sec.Gaps) > 0 {
 			sec.Complete = false
-			sec.Gaps = []api.SectionGap{*truncation}
 		}
 		sections = append(sections, sec)
 	}
