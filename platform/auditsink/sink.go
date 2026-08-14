@@ -11,6 +11,7 @@ package auditsink
 
 import (
 	"context"
+	"strconv"
 
 	auditmodule "github.com/gitfrok/backend/modules/audit"
 	auditapi "github.com/gitfrok/backend/modules/audit/api"
@@ -41,6 +42,7 @@ func (s *Sink) Subscribe(events bus.Bus) {
 	bus.SubscribeTyped(events, s.appendIsolationViolation)
 	bus.SubscribeTyped(events, s.appendApproval)
 	bus.SubscribeTyped(events, s.appendMerge)
+	bus.SubscribeTyped(events, s.appendFindingsScanIngested)
 }
 
 func (s *Sink) appendDenied(ctx context.Context, e platformaudit.PolicyDecisionDenied) error {
@@ -90,6 +92,25 @@ func (s *Sink) appendMerge(ctx context.Context, e platformaudit.MergeRequestMerg
 		Detail: map[string]string{
 			"repository_id": e.RepositoryID, "target_ref": e.TargetRef, "head_revision": e.HeadRevision,
 			"request_id": e.RequestID, "decision_id": e.PolicyDecisionID,
+		},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendFindingsScanIngested records an accepted security scan ingest
+// (SPEC-0025 AC5). The emission point is the ingest service; the replay
+// guard there is what makes this append exactly-once per accepted batch.
+func (s *Sink) appendFindingsScanIngested(ctx context.Context, e platformaudit.FindingsScanIngested) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID: e.TenantID,
+		Action:   auditapi.Action(platformaudit.ActionFindingsScanIngested),
+		ActorID:  e.ActorID,
+		Resource: "repository/" + e.RepositoryID,
+		Outcome:  auditapi.OutcomeAllowed,
+		Detail: map[string]string{
+			"scan_id": e.ScanID, "request_id": e.RequestID,
+			"decision_id": e.PolicyDecisionID,
+			"findings_recorded": strconv.FormatInt(e.FindingsRecorded, 10),
 		},
 		OccurredAt: e.OccurredAt,
 	})

@@ -22,6 +22,7 @@ import (
 	codereviewv1 "github.com/gitfrok/backend/gen/proto/codereview/v1"
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
+	securityv1 "github.com/gitfrok/backend/gen/proto/security/v1"
 	"github.com/gitfrok/backend/modules/ci"
 	"github.com/gitfrok/backend/modules/codereview"
 	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
@@ -33,6 +34,8 @@ import (
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/repository"
 	repoapi "github.com/gitfrok/backend/modules/repository/api"
+	"github.com/gitfrok/backend/modules/security"
+	securityapi "github.com/gitfrok/backend/modules/security/api"
 	"github.com/gitfrok/backend/platform/auditsink"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/db"
@@ -65,6 +68,9 @@ type dataplane struct {
 	// imports is the repository & review-history import surface (SPEC-0011),
 	// composed alongside codeReview on the same route to Git storage.
 	imports codereviewapi.ImportService
+	// findings is the Security/Findings surface (SPEC-0024, SPEC-0025):
+	// normalized findings ingestion and tenant-scoped reads.
+	findings securityapi.Findings
 }
 
 // newDataplane wires the plane. Concrete implementations are chosen in main and injected here; the
@@ -75,7 +81,9 @@ type dataplane struct {
 // no "without a PDP" plane: a nil one would mean authorization silently had no answer, so it is
 // refused here rather than discovered on the first protected request.
 // A nil ciLauncher means this environment records CI jobs but dispatches none.
-func newDataplane(pdp policyapi.DecisionPoint, ciConfig ci.RunnerConfig, ciLauncher ci.Launcher) *dataplane {
+// A nil findingsPool means Security/Findings runs on its in-memory store;
+// a configured one runs on the Postgres adapter.
+func newDataplane(pdp policyapi.DecisionPoint, ciConfig ci.RunnerConfig, ciLauncher ci.Launcher, findingsPool *db.Pool) *dataplane {
 	if pdp == nil {
 		panic("dataplane: no PDP — every protected action needs a decision (invariant 2)")
 	}
@@ -94,7 +102,17 @@ func newDataplane(pdp policyapi.DecisionPoint, ciConfig ci.RunnerConfig, ciLaunc
 	// Repository reaches CI without either module calling the other (invariant 14).
 	ciRuntime := ci.NewRuntime(pdp, b, ciConfig, ciLauncher)
 
-	return &dataplane{bus: b, repositories: repositories, searchIndex: searchIndex, policy: pdp, ci: ciRuntime}
+	// Security/Findings context. Every ingest and read is a PDP decision
+	// with server-derived context; identities and lifecycle are computed
+	// here, never asserted by a caller (SPEC-0024, SPEC-0025).
+	var findings securityapi.Findings
+	if findingsPool != nil {
+		findings = security.NewWithPostgres(findingsPool, pdp, b)
+	} else {
+		findings = security.New(pdp, b)
+	}
+
+	return &dataplane{bus: b, repositories: repositories, searchIndex: searchIndex, policy: pdp, ci: ciRuntime, findings: findings}
 }
 
 func main() {
@@ -116,6 +134,7 @@ func main() {
 	// write is never silent: the PDP reports an unaudited denial as an error
 	// (ADR-0007). The DSN must be the gitfrok_app role — db.Open refuses a
 	// superuser, because RLS must actually bind.
+	var dbPool *db.Pool
 	if dsn := os.Getenv(databaseURLEnv); dsn != "" {
 		pool, err := db.Open(context.Background(), dsn)
 		if err != nil {
@@ -123,6 +142,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer pool.Close()
+		dbPool = pool
 		auditsink.NewSink(pool, b).Subscribe(b)
 	}
 
@@ -152,7 +172,7 @@ func main() {
 		}
 	}
 
-	dp := newDataplane(pdp, ciConfig, ciLauncher)
+	dp := newDataplane(pdp, ciConfig, ciLauncher, dbPool)
 	// Compile-time proof that the generated contracts compose into this plane alongside the
 	// modules; the agent gateway itself is wired in Phase 3.
 	_ = agentv1.HealthState_HEALTH_STATE_HEALTHY
@@ -244,6 +264,7 @@ func main() {
 	// The CI, Code Review and Identity surfaces share the plane's gRPC door.
 	if doors.policyServer != nil {
 		civ1.RegisterCIJobServiceServer(doors.policyServer, ci.NewGRPCServer(dp.ci.Jobs()))
+		securityv1.RegisterFindingsServiceServer(doors.policyServer, security.NewGRPCServer(dp.findings))
 		if dp.codeReview != nil {
 			codereviewv1.RegisterMergeRequestServiceServer(doors.policyServer, codereview.NewGRPCServer(dp.codeReview))
 		}
