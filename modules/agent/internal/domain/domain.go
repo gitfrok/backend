@@ -7,10 +7,21 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"time"
 
 	"github.com/gitfrok/backend/modules/agent/api"
 )
+
+// ErrStoreNotFound is the miss sentinel every store port returns: unknown record, or
+// another tenant's — one shape, so the api surface cannot leak existence across tenants
+// (SPEC-0038 AC9). Adapters return it; the app layer maps it. It lives here — not in app —
+// so adapters can report it without importing the layer that consumes it.
+var ErrStoreNotFound = errors.New("agent store: no such record")
+
+// ErrTokenSpent reports a revoke aimed at a token that was already used: its enrolment
+// happened, so the operator's act is revoking the data plane, not the token.
+var ErrTokenSpent = errors.New("agent: token already spent")
 
 // SecretBytes is the token secret's entropy. 32 bytes makes the token a bearer credential
 // that cannot be guessed within the lifetime anything here issues; the blast radius of one

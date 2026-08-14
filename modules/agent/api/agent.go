@@ -229,6 +229,9 @@ type StreamSession interface {
 	Lapsed(now time.Time) bool
 	// Touch records contact now (AC8's staleness window reads from here).
 	Touch(ctx context.Context)
+	// Done closes when the control plane ends the stream itself — a revocation landing on
+	// a live session. The adapter stops the stream when it fires.
+	Done() <-chan struct{}
 	// Close releases the stream's registration. Idempotent.
 	Close(ctx context.Context)
 }
