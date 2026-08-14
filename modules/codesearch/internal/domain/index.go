@@ -55,6 +55,21 @@ func (i *Index) Get(t TenantID, id RepoID) (Entry, error) {
 	return e, nil
 }
 
+// EntriesOfTenant returns the tenant's entries keyed by repository id. The caller receives the
+// live map under no lock contract beyond the caller's own: the index hands back a copy of the
+// key set's ownership, so iterate keys only.
+func (i *Index) EntriesOfTenant(t TenantID) map[RepoID]Entry {
+	byRepo, ok := i.entries[t]
+	if !ok {
+		return nil
+	}
+	out := make(map[RepoID]Entry, len(byRepo))
+	for id, e := range byRepo {
+		out[id] = e
+	}
+	return out
+}
+
 // SetRef records the sha last seen for a ref. An update for an entry that is not indexed is
 // reported, not invented: once these events arrive over Redpanda they can be reordered, and a
 // half-populated entry would be worse than none.

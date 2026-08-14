@@ -34,6 +34,8 @@ import (
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/repository"
 	repoapi "github.com/gitfrok/backend/modules/repository/api"
+	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
+	searchv1 "github.com/gitfrok/backend/gen/proto/search/v1"
 	"github.com/gitfrok/backend/modules/security"
 	securityapi "github.com/gitfrok/backend/modules/security/api"
 	"github.com/gitfrok/backend/platform/auditsink"
@@ -60,7 +62,7 @@ const databaseURLEnv = "GITFROK_DATABASE_URL"
 type dataplane struct {
 	bus          *bus.InProcess
 	repositories repoapi.Repositories
-	searchIndex  csapi.Index
+	searchIndex  csapi.Service
 	policy       policyapi.DecisionPoint
 	ci           *ci.Runtime
 	// codeReview is composed in main once the plane has a route to Git storage.
@@ -94,9 +96,11 @@ func newDataplane(pdp policyapi.DecisionPoint, ciConfig ci.RunnerConfig, ciLaunc
 	// baseline (T-0004). Swapping adapters is a change to this line and nothing else.
 	repositories := repository.NewInMemory(b)
 
-	// Code Search context, handed the bus it listens on and the Repository read port it resolves
-	// against — the only two in-process routes a module may take (invariant 14).
-	searchIndex := codesearch.New(b, repositories)
+	// Code Search context, handed the bus it listens on, the Repository read port it resolves
+	// names against, and the PDP every result path asks (invariant 2) — the only in-process
+	// routes a module may take (invariant 14). The route to repository content is attached in
+	// main once the plane has a connection to Git storage.
+	searchIndex := codesearch.New(b, repositories, pdp, nil)
 
 	// CI/CD context. It shares this plane's bus, so a RefUpdated published by
 	// Repository reaches CI without either module calling the other (invariant 14).
@@ -202,6 +206,18 @@ func main() {
 	// only has one when the Git doors are configured. Without it the context is not
 	// composed at all, rather than composed with a merge path that cannot work.
 	if doors.storageClient != nil {
+		// Code Search's route to repository content rides the same connection: the
+		// RepositoryReader contract (GetTree/GetFile), never Git storage internals
+		// (SPEC-0035 AC7). With it attached, the index starts absorbing admitted
+		// revisions; the backfill catches up repositories admitted before the route
+		// existed, paced behind interactive indexing.
+		dp.searchIndex.AttachContentSource(
+			codesearch.NewGRPCContentSource(repositoryv1.NewRepositoryReaderClient(doors.conn)))
+		go func() {
+			if err := dp.searchIndex.Backfill(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "dataplane search backfill: %v\n", err)
+			}
+		}()
 		dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
 		// Ref updates cross the process boundary in the other direction: the
 		// receive-pack path announces RefUpdated on git-storaged's bus, and this
@@ -265,6 +281,7 @@ func main() {
 	if doors.policyServer != nil {
 		civ1.RegisterCIJobServiceServer(doors.policyServer, ci.NewGRPCServer(dp.ci.Jobs()))
 		securityv1.RegisterFindingsServiceServer(doors.policyServer, security.NewGRPCServer(dp.findings))
+		searchv1.RegisterSearchServiceServer(doors.policyServer, codesearch.NewGRPCServer(dp.searchIndex))
 		if dp.codeReview != nil {
 			codereviewv1.RegisterMergeRequestServiceServer(doors.policyServer, codereview.NewGRPCServer(dp.codeReview))
 		}
