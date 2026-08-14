@@ -21,6 +21,7 @@ const (
 	EventScanIngested    = "gitsaas.events.security.v1.ScanIngested"
 	EventFindingOpened   = "gitsaas.events.security.v1.FindingOpened"
 	EventFindingResolved = "gitsaas.events.security.v1.FindingResolved"
+	EventFindingTriaged  = "gitsaas.events.security.v1.FindingTriaged"
 )
 
 // Event is the contract a Security/Findings event satisfies. It is
@@ -101,8 +102,37 @@ func (FindingResolved) EventName() string { return EventFindingResolved }
 // Tenant reports the owning tenant; the bus refuses to publish without one (invariant 1).
 func (e FindingResolved) Tenant() string { return e.TenantID }
 
+// FindingTriaged records that an authorized actor set a triage state on a
+// finding identity (SPEC-0026, SPEC-0027). It carries prior and new state so
+// a consumer can project transitions without reading back; PriorState is
+// TriageStateUnspecified for the first decision on a finding. It never
+// carries justification text, provenance bytes, source code, or a policy
+// outcome — the decision that authorized the transition lives in the audit
+// record (SPEC-0026 AC4), not in this event.
+type FindingTriaged struct {
+	EventID      string
+	FindingID    string
+	TenantID     string
+	RepositoryID string
+	// TriageID is the opaque identity of the triage record this transition
+	// wrote.
+	TriageID   string
+	PriorState TriageState
+	NewState   TriageState
+	// ActorID is the verified actor who recorded the decision.
+	ActorID    string
+	OccurredAt time.Time
+}
+
+// EventName is the routing key, matching the contracts/events message full name.
+func (FindingTriaged) EventName() string { return EventFindingTriaged }
+
+// Tenant reports the owning tenant; the bus refuses to publish without one (invariant 1).
+func (e FindingTriaged) Tenant() string { return e.TenantID }
+
 var (
 	_ Event = ScanIngested{}
 	_ Event = FindingOpened{}
 	_ Event = FindingResolved{}
+	_ Event = FindingTriaged{}
 )

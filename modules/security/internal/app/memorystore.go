@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/gitfrok/backend/modules/security/api"
 	"github.com/gitfrok/backend/platform/ids"
@@ -51,13 +52,18 @@ type findingRecord struct {
 	finding api.Finding
 	// identity is the SPEC-0024 identity the record is stored under.
 	identity string
+	// firstSeenAt is when the finding was first sighted; the age filters
+	// (SPEC-0026 AC2) measure whole days from it. The Postgres adapter
+	// measures from the row's created_at, which the upsert never touches.
+	firstSeenAt time.Time
 }
 
 // MemoryStore is the in-memory Store for dev and tests. It implements the
 // same contract the Postgres adapter does: serializable per-scan ingest
 // (a single mutex stands in for the transaction), chunk visibility only
-// after the final chunk, idempotency per request ID, and the
-// resolved-not-deleted lifecycle (SPEC-0024 AC9, SPEC-0025).
+// after the final chunk, idempotency per request ID, the
+// resolved-not-deleted lifecycle (SPEC-0024 AC9, SPEC-0025), and the
+// append-only, version-guarded triage history (SPEC-0026 AC5).
 type MemoryStore struct {
 	mu     sync.Mutex
 	scans  map[string]*scanRecord
@@ -66,16 +72,29 @@ type MemoryStore struct {
 	// lands on the same record: the dedup the Postgres adapter gets from
 	// UNIQUE (tenant_id, repository_id, identity).
 	byIdentity map[string]map[string]string // tenant -> identity -> finding ID
-	nextID     func() string
+	// triages is the append-only triage history per finding: tenant ->
+	// finding ID -> records in ascending version order. Superseding a
+	// decision appends; nothing here is ever mutated (SPEC-0026 AC5).
+	triages map[string]map[string][]api.TriageRecord
+	// triageReplays keys recorded triage outcomes by (tenant, finding,
+	// request ID): the idempotency of SPEC-0027 AC1.
+	triageReplays map[string]map[string]map[string]api.TriageRecord
+	// ownership is the repository-level owning-team attribution projection
+	// (SPEC-0026): tenant -> repository ID -> team.
+	ownership map[string]map[string]string
+	nextID    func() string
 }
 
 // NewMemoryStore builds the in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		scans:      map[string]*scanRecord{},
-		finds:      map[string]map[string]*findingRecord{},
-		byIdentity: map[string]map[string]string{},
-		nextID:     ids.NewULID,
+		scans:         map[string]*scanRecord{},
+		finds:         map[string]map[string]*findingRecord{},
+		byIdentity:    map[string]map[string]string{},
+		triages:       map[string]map[string][]api.TriageRecord{},
+		triageReplays: map[string]map[string]map[string]api.TriageRecord{},
+		ownership:     map[string]map[string]string{},
+		nextID:        ids.NewULID,
 	}
 }
 
@@ -215,7 +234,7 @@ func (m *MemoryStore) applyLifecycle(rec *scanRecord, final IngestParams) ([]api
 			Provenance:          pf.Raw.Provenance,
 			ProvenanceMediaType: pf.Raw.ProvenanceMediaType,
 		}
-		tenant[findingID] = &findingRecord{finding: f, identity: id}
+		tenant[findingID] = &findingRecord{finding: f, identity: id, firstSeenAt: final.Scan.StartedAt.UTC()}
 		identityIndex[id] = findingID
 		opened = append(opened, f)
 	}
@@ -270,7 +289,7 @@ func (m *MemoryStore) ListFindings(_ context.Context, tenantID string, f ListFil
 
 	rows := []api.Finding{}
 	for _, rec := range m.finds[tenantID] {
-		if f.RepositoryID != "" && rec.finding.RepositoryID != f.RepositoryID {
+		if !m.repoMatches(tenantID, rec.finding.RepositoryID, f) {
 			continue
 		}
 		if f.ScannerClass != "" && rec.finding.ScannerClass != f.ScannerClass {
@@ -280,6 +299,12 @@ func (m *MemoryStore) ListFindings(_ context.Context, tenantID string, f ListFil
 			continue
 		}
 		if f.Lifecycle != "" && rec.finding.Lifecycle != f.Lifecycle {
+			continue
+		}
+		if !m.ageMatches(rec.firstSeenAt, f.MinAgeDays, f.MaxAgeDays) {
+			continue
+		}
+		if f.OwningTeam != "" && m.ownership[tenantID][rec.finding.RepositoryID] != f.OwningTeam {
 			continue
 		}
 		rows = append(rows, rec.finding)
@@ -294,4 +319,200 @@ func (m *MemoryStore) ListFindings(_ context.Context, tenantID string, f ListFil
 		rows = rows[:f.Limit]
 	}
 	return rows, nil
+}
+
+// repoMatches applies the repository scoping of a filter: the
+// authorization-derived RepositoryIDs set wins when non-nil — and a non-nil
+// empty set matches nothing, fail closed (SPEC-0026 AC6).
+func (m *MemoryStore) repoMatches(tenantID, repoID string, f ListFilter) bool {
+	if f.RepositoryIDs != nil {
+		for _, r := range f.RepositoryIDs {
+			if r == repoID {
+				return true
+			}
+		}
+		return false
+	}
+	return f.RepositoryID == "" || f.RepositoryID == repoID
+}
+
+// ageMatches bounds the finding's age in whole days since first sight
+// (SPEC-0026 AC2); zero on a bound leaves that side unbounded.
+func (m *MemoryStore) ageMatches(firstSeenAt time.Time, minDays, maxDays int) bool {
+	if minDays == 0 && maxDays == 0 {
+		return true
+	}
+	ageDays := int(time.Now().UTC().Sub(firstSeenAt) / (24 * time.Hour))
+	if minDays > 0 && ageDays < minDays {
+		return false
+	}
+	if maxDays > 0 && ageDays > maxDays {
+		return false
+	}
+	return true
+}
+
+// SetTriage appends one triage record under the single mutex — the
+// in-memory stand-in for the per-finding serializable transaction. Replay
+// first, then the version guard, then the append (SPEC-0027 AC1, SPEC-0026
+// AC5).
+func (m *MemoryStore) SetTriage(_ context.Context, p SetTriageParams) (SetTriageResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if byReq, ok := m.triageReplays[p.TenantID][p.FindingID]; ok {
+		if rec, ok := byReq[p.RequestID]; ok {
+			return SetTriageResult{Record: rec, Replayed: true}, nil
+		}
+	}
+
+	history := m.triages[p.TenantID][p.FindingID]
+	var current int64
+	if len(history) > 0 {
+		current = history[len(history)-1].Version
+	}
+	if current != p.ExpectedVersion {
+		var inForce api.TriageRecord
+		if len(history) > 0 {
+			inForce = history[len(history)-1]
+		}
+		return SetTriageResult{Record: inForce, Mismatch: true}, nil
+	}
+
+	rec := api.TriageRecord{
+		TriageID: p.TriageID, FindingID: p.FindingID, TenantID: p.TenantID,
+		RepositoryID: p.RepositoryID, State: p.State, Justification: p.Justification,
+		Version: current + 1, ActorID: p.ActorID, OccurredAt: p.OccurredAt,
+	}
+	if m.triages[p.TenantID] == nil {
+		m.triages[p.TenantID] = map[string][]api.TriageRecord{}
+	}
+	m.triages[p.TenantID][p.FindingID] = append(history, rec)
+	if m.triageReplays[p.TenantID] == nil {
+		m.triageReplays[p.TenantID] = map[string]map[string]api.TriageRecord{}
+	}
+	if m.triageReplays[p.TenantID][p.FindingID] == nil {
+		m.triageReplays[p.TenantID][p.FindingID] = map[string]api.TriageRecord{}
+	}
+	m.triageReplays[p.TenantID][p.FindingID][p.RequestID] = rec
+	return SetTriageResult{Record: rec}, nil
+}
+
+// GetTriage returns the finding's triage record: the latest when version is
+// zero, the exact history version otherwise.
+func (m *MemoryStore) GetTriage(_ context.Context, tenantID, findingID string, version int64) (api.TriageRecord, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	history := m.triages[tenantID][findingID]
+	if len(history) == 0 {
+		return api.TriageRecord{}, false, nil
+	}
+	if version == 0 {
+		return history[len(history)-1], true, nil
+	}
+	for _, rec := range history {
+		if rec.Version == version {
+			return rec, true, nil
+		}
+	}
+	return api.TriageRecord{}, false, nil
+}
+
+// RepositoriesWithFindings returns the distinct repositories holding the
+// tenant's findings, in stable order.
+func (m *MemoryStore) RepositoriesWithFindings(_ context.Context, tenantID string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	set := map[string]struct{}{}
+	for _, rec := range m.finds[tenantID] {
+		set[rec.finding.RepositoryID] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for r := range set {
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// FindingsSummary computes counts and facets under the query's filters —
+// the authorization-derived repository set among them — so a value that
+// exists only outside the caller's readable set can appear in no facet
+// (SPEC-0027 AC4).
+func (m *MemoryStore) FindingsSummary(_ context.Context, tenantID string, q SummaryQuery) (api.FindingsSummary, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := api.FindingsSummary{Facets: []api.SummaryFacet{}}
+	counts := make(map[string]map[string]int64, len(q.Facets))
+	for _, dim := range q.Facets {
+		counts[dim] = map[string]int64{}
+	}
+	for _, rec := range m.finds[tenantID] {
+		if !m.repoMatches(tenantID, rec.finding.RepositoryID, q.ListFilter) {
+			continue
+		}
+		if q.ScannerClass != "" && rec.finding.ScannerClass != q.ScannerClass {
+			continue
+		}
+		if q.Severity != "" && rec.finding.Severity != q.Severity {
+			continue
+		}
+		if q.Lifecycle != "" && rec.finding.Lifecycle != q.Lifecycle {
+			continue
+		}
+		if !m.ageMatches(rec.firstSeenAt, q.MinAgeDays, q.MaxAgeDays) {
+			continue
+		}
+		team := m.ownership[tenantID][rec.finding.RepositoryID]
+		if q.OwningTeam != "" && team != q.OwningTeam {
+			continue
+		}
+		out.TotalCount++
+		for _, dim := range q.Facets {
+			var value string
+			switch dim {
+			case api.FacetSeverity:
+				value = string(rec.finding.Severity)
+			case api.FacetScannerClass:
+				value = string(rec.finding.ScannerClass)
+			case api.FacetLifecycle:
+				value = string(rec.finding.Lifecycle)
+			case api.FacetOwningTeam:
+				value = team
+			}
+			// A finding whose repository carries no owning-team attribution
+			// contributes to no owning_team value: absence, not an empty
+			// bucket.
+			if value == "" {
+				continue
+			}
+			counts[dim][value]++
+		}
+	}
+	for _, dim := range q.Facets {
+		facet := api.SummaryFacet{Dimension: dim, Values: []api.SummaryFacetValue{}}
+		values := make([]string, 0, len(counts[dim]))
+		for v := range counts[dim] {
+			values = append(values, v)
+		}
+		sort.Strings(values)
+		for _, v := range values {
+			facet.Values = append(facet.Values, api.SummaryFacetValue{Value: v, Count: counts[dim][v]})
+		}
+		out.Facets = append(out.Facets, facet)
+	}
+	return out, nil
+}
+
+// SetRepositoryOwningTeam records the repository-level owning-team
+// attribution (SPEC-0026 v1 assumption).
+func (m *MemoryStore) SetRepositoryOwningTeam(_ context.Context, tenantID, repositoryID, owningTeam string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ownership[tenantID] == nil {
+		m.ownership[tenantID] = map[string]string{}
+	}
+	m.ownership[tenantID][repositoryID] = owningTeam
+	return nil
 }

@@ -43,6 +43,7 @@ func (s *Sink) Subscribe(events bus.Bus) {
 	bus.SubscribeTyped(events, s.appendApproval)
 	bus.SubscribeTyped(events, s.appendMerge)
 	bus.SubscribeTyped(events, s.appendFindingsScanIngested)
+	bus.SubscribeTyped(events, s.appendFindingsTriaged)
 }
 
 func (s *Sink) appendDenied(ctx context.Context, e platformaudit.PolicyDecisionDenied) error {
@@ -111,6 +112,28 @@ func (s *Sink) appendFindingsScanIngested(ctx context.Context, e platformaudit.F
 			"scan_id": e.ScanID, "request_id": e.RequestID,
 			"decision_id": e.PolicyDecisionID,
 			"findings_recorded": strconv.FormatInt(e.FindingsRecorded, 10),
+		},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendFindingsTriaged records an accepted triage transition (SPEC-0026
+// AC4). The emission point is the triage service; its replay and
+// version-mismatch guards are what make this append exactly-once per
+// recorded transition. The record names the actor, the finding, the prior
+// and new state, and the decision ID that authorized the transition —
+// never the justification text, which stays with the triage record.
+func (s *Sink) appendFindingsTriaged(ctx context.Context, e platformaudit.FindingsTriaged) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID: e.TenantID,
+		Action:   auditapi.Action(platformaudit.ActionFindingsTriaged),
+		ActorID:  e.ActorID,
+		Resource: "finding/" + e.FindingID,
+		Outcome:  auditapi.OutcomeAllowed,
+		Detail: map[string]string{
+			"repository_id": e.RepositoryID, "triage_id": e.TriageID,
+			"prior_state": e.PriorState, "new_state": e.NewState,
+			"request_id": e.RequestID, "decision_id": e.PolicyDecisionID,
 		},
 		OccurredAt: e.OccurredAt,
 	})

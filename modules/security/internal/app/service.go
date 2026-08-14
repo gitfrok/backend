@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/gitfrok/backend/modules/security/api"
@@ -316,6 +317,161 @@ func (s *Service) allowed(ctx context.Context, principal api.Context, action, re
 		Context:  attributes,
 	})
 	return err == nil && decision.Allowed
+}
+
+// SetTriage records one triage decision on a finding identity (SPEC-0026,
+// SPEC-0027). Triage is a control action: the PDP decides with server-derived
+// facts from the finding row and the current triage record — never claims
+// from the request — and an accepted transition appends one immutable record,
+// one bus event, and one audit record (SPEC-0026 AC4). Replays and version
+// mismatches change nothing and emit nothing (SPEC-0027 AC1).
+func (s *Service) SetTriage(ctx context.Context, req api.TriageTransition) (api.SetTriageOutcome, error) {
+	if !validContext(req.Context) || req.FindingID == "" {
+		return api.SetTriageOutcome{}, api.ErrDenied
+	}
+	if !req.State.Valid() || len(req.Justification) > api.MaxJustificationBytes {
+		return api.SetTriageOutcome{}, api.ErrMalformed
+	}
+
+	// The finding row supplies the server facts the PDP decides on; a missing,
+	// cross-tenant, or out-of-context finding is the same coarse denial
+	// (SPEC-0001).
+	f, err := s.store.GetFinding(ctx, req.TenantID, req.FindingID)
+	if err != nil || f.RepositoryID != req.RepositoryID {
+		return api.SetTriageOutcome{}, api.ErrDenied
+	}
+	current, _, err := s.store.GetTriage(ctx, req.TenantID, req.FindingID, 0)
+	if err != nil {
+		return api.SetTriageOutcome{}, api.ErrDenied
+	}
+
+	decision, err := s.pdp.Decide(ctx, policyapi.Request{
+		TenantID: req.TenantID,
+		Subject: policyapi.Subject{
+			ID: req.ActorID, TenantID: req.TenantID,
+			Roles: append([]string(nil), req.ActorRoles...),
+		},
+		Action:   "findings.triage",
+		Resource: policyapi.Resource{Type: "finding", ID: req.FindingID},
+		Context: map[string]string{
+			"repository":         f.RepositoryID,
+			"scanner_class":      string(f.ScannerClass),
+			"severity":           string(f.Severity),
+			"current_triage_state": string(current.State),
+		},
+	})
+	if err != nil || !decision.Allowed {
+		return api.SetTriageOutcome{}, api.ErrDenied
+	}
+
+	res, err := s.store.SetTriage(ctx, SetTriageParams{
+		TenantID: req.TenantID, RepositoryID: f.RepositoryID, FindingID: req.FindingID,
+		RequestID: req.RequestID, TriageID: s.newID(), State: req.State,
+		Justification: req.Justification, ExpectedVersion: req.ExpectedVersion,
+		ActorID: req.ActorID, OccurredAt: s.now().UTC(),
+	})
+	if err != nil {
+		return api.SetTriageOutcome{}, api.ErrDenied
+	}
+	if res.Replayed || res.Mismatch {
+		return api.SetTriageOutcome{Record: res.Record, Replayed: res.Replayed, Mismatch: res.Mismatch}, nil
+	}
+
+	now := s.now().UTC()
+	if err := s.bus.Publish(ctx, api.FindingTriaged{
+		EventID: s.newID(), FindingID: req.FindingID, TenantID: req.TenantID,
+		RepositoryID: f.RepositoryID, TriageID: res.Record.TriageID,
+		PriorState: current.State, NewState: req.State,
+		ActorID: req.ActorID, OccurredAt: now,
+	}); err != nil {
+		return api.SetTriageOutcome{}, fmt.Errorf("security: publish FindingTriaged: %w", err)
+	}
+	if err := s.bus.Publish(ctx, platformaudit.FindingsTriaged{
+		TenantID: req.TenantID, ActorID: req.ActorID, RepositoryID: f.RepositoryID,
+		FindingID: req.FindingID, TriageID: res.Record.TriageID,
+		PriorState: string(current.State), NewState: string(req.State),
+		RequestID: req.RequestID, PolicyDecisionID: decision.DecisionID, OccurredAt: now,
+	}); err != nil {
+		return api.SetTriageOutcome{}, fmt.Errorf("security: audit triage: %w", err)
+	}
+	return api.SetTriageOutcome{Record: res.Record, PriorState: current.State}, nil
+}
+
+// GetTriage reads a finding's triage record: the latest when version is
+// zero, an exact superseded version otherwise (SPEC-0027 AC6). The read is a
+// PDP decision on the finding itself; absence and denial are the same coarse
+// shape.
+func (s *Service) GetTriage(ctx context.Context, c api.Context, findingID string, version int64) (api.TriageRecord, bool, error) {
+	if !validContext(c) || findingID == "" || version < 0 {
+		return api.TriageRecord{}, false, api.ErrDenied
+	}
+	if !s.allowed(ctx, c, "findings.read", "finding", findingID, map[string]string{}) {
+		return api.TriageRecord{}, false, api.ErrDenied
+	}
+	rec, found, err := s.store.GetTriage(ctx, c.TenantID, findingID, version)
+	if err != nil {
+		return api.TriageRecord{}, false, api.ErrDenied
+	}
+	return rec, found, nil
+}
+
+// GetFindingsSummary returns counts and facet values computed under the
+// caller's authorization (SPEC-0026 AC6, SPEC-0027 AC4). The readable
+// repository set is derived per request from PDP decisions over the
+// repositories that hold findings — never cached across queries — and goes
+// into the store's query, never over an unfiltered pre-aggregate. An
+// org-wide summary is the same request with no repository filter
+// (SPEC-0026 AC1).
+func (s *Service) GetFindingsSummary(ctx context.Context, req api.SummaryRequest) (api.FindingsSummary, error) {
+	if req.TenantID == "" || req.ActorID == "" || req.RequestID == "" {
+		return api.FindingsSummary{}, api.ErrDenied
+	}
+	for _, dim := range req.FacetDimensions {
+		if !api.ValidFacetDimensions[dim] {
+			return api.FindingsSummary{}, api.ErrMalformed
+		}
+	}
+
+	candidates, err := s.store.RepositoriesWithFindings(ctx, req.TenantID)
+	if err != nil {
+		return api.FindingsSummary{}, api.ErrDenied
+	}
+	readable := make([]string, 0, len(candidates))
+	for _, repoID := range candidates {
+		if s.allowed(ctx, req.Context, "findings.summary.read", "repository", repoID,
+			map[string]string{"facet_dimensions": strings.Join(req.FacetDimensions, ",")}) {
+			readable = append(readable, repoID)
+		}
+	}
+
+	// Naming one repository the caller may not read is the same coarse
+	// denial as naming one that does not exist (SPEC-0026).
+	if req.RepositoryFilter != "" {
+		inSet := false
+		for _, r := range readable {
+			if r == req.RepositoryFilter {
+				inSet = true
+				break
+			}
+		}
+		if !inSet {
+			return api.FindingsSummary{}, api.ErrDenied
+		}
+		readable = []string{req.RepositoryFilter}
+	}
+
+	return s.store.FindingsSummary(ctx, req.TenantID, SummaryQuery{
+		ListFilter: ListFilter{
+			RepositoryIDs: readable,
+			ScannerClass:  req.ScannerClassFilter,
+			Severity:      req.SeverityFilter,
+			Lifecycle:     req.LifecycleFilter,
+			MinAgeDays:    req.MinAgeDays,
+			MaxAgeDays:    req.MaxAgeDays,
+			OwningTeam:    req.OwningTeamFilter,
+		},
+		Facets: req.FacetDimensions,
+	})
 }
 
 // validContext is the verified-identity check every operation applies. An

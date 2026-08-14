@@ -7,6 +7,7 @@ package app
 
 import (
 	"context"
+	"time"
 
 	"github.com/gitfrok/backend/modules/security/api"
 )
@@ -64,19 +65,82 @@ type IngestOutcome struct {
 // ListFilter is the server-enforced filter set for a tenant-scoped listing.
 // An empty value is no filter. AfterID is the cursor position: the page
 // starts after it.
+//
+// Repository scoping (SPEC-0026 AC6): RepositoryIDs is the caller's
+// authorization-derived readable set, applied INSIDE the query; a non-nil
+// empty set matches nothing (fail closed). RepositoryID names a single
+// repository and is honored when RepositoryIDs is nil, so the adapter-level
+// reads keep their shape.
 type ListFilter struct {
-	RepositoryID string
-	ScannerClass api.ScannerClass
-	Severity     api.Severity
-	Lifecycle    api.Lifecycle
-	AfterID      string
-	Limit        int
+	RepositoryID  string
+	RepositoryIDs []string
+	ScannerClass  api.ScannerClass
+	Severity      api.Severity
+	Lifecycle     api.Lifecycle
+	// MinAgeDays and MaxAgeDays bound the finding's age in whole days since
+	// first sight; zero leaves the side unbounded (SPEC-0026 AC2).
+	MinAgeDays int
+	MaxAgeDays int
+	// OwningTeam scopes to the owning team of the finding's repository
+	// (SPEC-0026); empty is no filter.
+	OwningTeam string
+	AfterID    string
+	Limit      int
 }
 
-// Store persists scans and findings. Implementations: the in-memory store for
-// dev and tests, and the Postgres adapter under adapters/postgres. Both are
-// tenant-scoped; the Postgres one additionally binds under row-level
-// security (SPEC-0001).
+// SummaryQuery is the server-enforced input for GetFindingsSummary: the
+// same filters as a listing — including the authorization-derived
+// RepositoryIDs set the aggregate runs under — plus the requested facet
+// dimensions. The authorization filter is part of the query, not a mask
+// applied late (SPEC-0026 non-functional, SPEC-0027 AC4).
+type SummaryQuery struct {
+	ListFilter
+	Facets []string
+}
+
+// SetTriageParams is one triage transition's server-derived state, handed to
+// the store. Everything a caller could assert has already been validated or
+// computed server-side by the time it arrives here: the finding row exists,
+// the PDP allowed the transition, and the triage ID, actor and timestamp are
+// server-assigned.
+type SetTriageParams struct {
+	TenantID     string
+	RepositoryID string
+	FindingID    string
+	// RequestID keys idempotency per (tenant, finding, request ID): a
+	// replay reports the recorded record and creates nothing new
+	// (SPEC-0027 AC1).
+	RequestID string
+	// TriageID is the server-assigned opaque identity of the record this
+	// transition writes.
+	TriageID      string
+	State         api.TriageState
+	Justification string
+	// ExpectedVersion guards the transition: the record is written only if
+	// the finding's current version equals it (zero expects no record at
+	// all). A mismatch changes no state (SPEC-0027 AC1).
+	ExpectedVersion int64
+	ActorID         string
+	OccurredAt      time.Time
+}
+
+// SetTriageResult is what one SetTriage produced at the store level.
+type SetTriageResult struct {
+	// Record is the record written, or — on Replayed/Mismatch — the one
+	// already in force.
+	Record api.TriageRecord
+	// Replayed: the request ID was already recorded for this finding; the
+	// result is the recorded one, nothing new was created, and the caller
+	// must emit no event and no audit record (SPEC-0027 AC1).
+	Replayed bool
+	// Mismatch: the expected version did not match; no state changed.
+	Mismatch bool
+}
+
+// Store persists scans, findings, and triage records. Implementations: the
+// in-memory store for dev and tests, and the Postgres adapter under
+// adapters/postgres. Both are tenant-scoped; the Postgres one additionally
+// binds under row-level security (SPEC-0001).
 type Store interface {
 	// IngestChunk applies one chunk, serializably per scan: a partially
 	// delivered batch leaves no half-ingested scan visible to a reader
@@ -88,4 +152,29 @@ type Store interface {
 	// ListFindings returns one page of the tenant's findings matching f, in
 	// identity order.
 	ListFindings(ctx context.Context, tenantID string, f ListFilter) ([]api.Finding, error)
+	// SetTriage appends one triage record, serializably per finding:
+	// guarded by expected version and idempotent per (tenant, finding,
+	// request ID). Superseded records are retained, never mutated
+	// (SPEC-0026 AC5).
+	SetTriage(ctx context.Context, p SetTriageParams) (SetTriageResult, error)
+	// GetTriage returns the finding's triage record: the latest when
+	// version is zero, the exact history version otherwise. Found is false
+	// when there is no record (or none at that version).
+	GetTriage(ctx context.Context, tenantID, findingID string, version int64) (api.TriageRecord, bool, error)
+	// RepositoriesWithFindings returns the distinct repositories holding
+	// the tenant's findings, in stable order. It is the candidate set the
+	// service asks the PDP about when deriving the caller's readable
+	// repository set (SPEC-0026 AC1); it reveals no counts.
+	RepositoriesWithFindings(ctx context.Context, tenantID string) ([]string, error)
+	// FindingsSummary computes counts and facet values under q — including
+	// the authorization-derived repository set — in one scoped aggregate
+	// (SPEC-0027 AC4).
+	FindingsSummary(ctx context.Context, tenantID string, q SummaryQuery) (api.FindingsSummary, error)
+	// SetRepositoryOwningTeam records the repository-level owning-team
+	// attribution, the v1 shape SPEC-0026 assumes: an opaque team
+	// identifier per repository, fed from Identity & Access. The feed
+	// itself arrives with Identity & Access' team events; the attribution
+	// lives here because Security/Findings owns the attribution it derives
+	// (SPEC-0026 data owned), never by reading another context's tables.
+	SetRepositoryOwningTeam(ctx context.Context, tenantID, repositoryID, owningTeam string) error
 }

@@ -1,13 +1,17 @@
 // Package api is the Security/Findings context's in-process surface
-// (SPEC-0024, SPEC-0025).
+// (SPEC-0024, SPEC-0025, SPEC-0026, SPEC-0027).
 //
-// It exposes the normalized finding model, the ingestion surface, and the
-// read surface as plain data and behavioural ports. What it deliberately does
-// NOT expose is as load bearing as what it does: no request type carries a
-// finding identity, a lifecycle state, or a first-seen value — identity is
-// computed server-side per SPEC-0024, lifecycle and history are server state
-// — and nothing carries an authorization outcome. Ingest and read are PDP
-// decisions with server-derived context (ADR-0006, SPEC-0025 AC3/AC4).
+// It exposes the normalized finding model, the ingestion surface, the
+// triage resource, and the dashboard read surface as plain data and
+// behavioural ports. What it deliberately does NOT expose is as load
+// bearing as what it does: no request type COMPUTES or asserts a finding
+// identity — a caller may only refer to a finding by the opaque identity
+// the server returned — no request carries a lifecycle state or a
+// first-seen value, and nothing carries an authorization outcome, a
+// severity claim on a triage request, or a triage field on a finding
+// (SPEC-0027 AC7). Ingest, read, triage and summary are PDP decisions
+// with server-derived context (ADR-0006, SPEC-0025 AC3/AC4, SPEC-0027
+// AC5).
 package api
 
 import (
@@ -228,12 +232,27 @@ type IngestResult struct {
 // ListRequest pages a tenant-scoped, filtered list of findings. An empty
 // filter value is no filter. Facets and counts obey the same authorization
 // as the result list (SPEC-0025).
+//
+// Dashboard semantics (SPEC-0026): an EMPTY RepositoryFilter lists across
+// every repository the caller may read — the readable set is derived
+// server-side from PDP decisions per request and applied inside the query,
+// never as a mask over an unfiltered pre-aggregate (SPEC-0027 AC4). A
+// non-empty RepositoryFilter names one repository; naming one the caller
+// may not read is the same coarse denial as naming one that does not exist.
 type ListRequest struct {
 	Context
 	RepositoryFilter   string
 	ScannerClassFilter ScannerClass
 	SeverityFilter     Severity
 	LifecycleFilter    Lifecycle
+	// MinAgeDays and MaxAgeDays bound the finding's age in whole days since
+	// first sight; zero on either bound leaves that side unbounded
+	// (SPEC-0026 AC2).
+	MinAgeDays int
+	MaxAgeDays int
+	// OwningTeamFilter is the owning team as an opaque identifier fed by
+	// Identity & Access (SPEC-0026). Empty is no filter.
+	OwningTeamFilter string
 	// PageSize is the maximum number of findings to return. Zero means
 	// DefaultPageSize; anything above MaxPageSize is clamped to it.
 	PageSize int
@@ -257,10 +276,11 @@ type ListPage struct {
 }
 
 // Findings is the context's full in-process surface: ingestion of completed
-// scans and tenant-scoped reads. Every operation is a PDP decision with
-// server-derived context; identity and lifecycle are server-computed
-// (SPEC-0024, SPEC-0025).
+// scans, tenant-scoped reads, triage, and dashboard reads (SPEC-0024,
+// SPEC-0025, SPEC-0026, SPEC-0027). Every operation is a PDP decision with
+// server-derived context; identity and lifecycle are server-computed.
 type Findings interface {
+	Triage
 	// IngestScanResults ingests one chunk of a completed scan's batch.
 	// Idempotent per tenant, scan, and request ID: replaying a request
 	// creates no duplicate finding, event, or audit record (SPEC-0025 AC1).

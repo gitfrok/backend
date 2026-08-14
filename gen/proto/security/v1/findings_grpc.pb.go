@@ -4,14 +4,18 @@
 // - protoc             (unknown)
 // source: proto/security/v1/findings.proto
 
-// Internal Security/Findings surface for ingesting completed scan results and
-// reading findings (SPEC-0024, SPEC-0025).
+// Internal Security/Findings surface for ingesting completed scan results,
+// reading findings, triaging findings, and reading dashboard summaries
+// (SPEC-0024, SPEC-0025, SPEC-0026, SPEC-0027).
 //
 // Security/Findings owns findings, their identities, scan records, provenance
-// blobs, and idempotency keys. A finding's identity is computed server-side
-// from a fixed input set (SPEC-0024); no request carries a finding identity,
-// a lifecycle state, or a first-seen value, and no request carries an
-// authorization outcome. Ingest and read are PDP decisions with
+// blobs, triage records and their history, and idempotency keys. A finding's
+// identity is computed server-side from a fixed input set (SPEC-0024); no
+// request carries a finding identity, a lifecycle state, or a first-seen
+// value, and no request carries an authorization outcome. Triage is a
+// resource keyed by finding identity, never a field of the finding message:
+// that shape is what lets a triage state survive a re-scan by construction
+// (SPEC-0027). Ingest, read, triage and summary are PDP decisions with
 // server-derived context (ADR-0006); scanner-native payloads cross this
 // boundary only as opaque provenance bytes (SPEC-0025 AC6).
 
@@ -30,9 +34,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	FindingsService_IngestScanResults_FullMethodName = "/gitsaas.security.v1.FindingsService/IngestScanResults"
-	FindingsService_GetFinding_FullMethodName        = "/gitsaas.security.v1.FindingsService/GetFinding"
-	FindingsService_ListFindings_FullMethodName      = "/gitsaas.security.v1.FindingsService/ListFindings"
+	FindingsService_IngestScanResults_FullMethodName  = "/gitsaas.security.v1.FindingsService/IngestScanResults"
+	FindingsService_GetFinding_FullMethodName         = "/gitsaas.security.v1.FindingsService/GetFinding"
+	FindingsService_ListFindings_FullMethodName       = "/gitsaas.security.v1.FindingsService/ListFindings"
+	FindingsService_SetTriage_FullMethodName          = "/gitsaas.security.v1.FindingsService/SetTriage"
+	FindingsService_GetTriage_FullMethodName          = "/gitsaas.security.v1.FindingsService/GetTriage"
+	FindingsService_GetFindingsSummary_FullMethodName = "/gitsaas.security.v1.FindingsService/GetFindingsSummary"
 )
 
 // FindingsServiceClient is the client API for FindingsService service.
@@ -52,6 +59,24 @@ type FindingsServiceClient interface {
 	// are opaque, signed, and bound to the tenant and revision that issued
 	// them; a forged or cross-tenant cursor yields no content (SPEC-0025).
 	ListFindings(ctx context.Context, in *ListFindingsRequest, opts ...grpc.CallOption) (*ListFindingsResponse, error)
+	// SetTriage records a triage decision on a finding identity. It is a
+	// control action, not a UI preference: the transition is a PDP decision
+	// with server-derived context and appends exactly one immutable audit
+	// record (SPEC-0026 AC4). Guarded by expected version and idempotent per
+	// request ID; a superseded record is retained, never mutated
+	// (SPEC-0026 AC5, SPEC-0027).
+	SetTriage(ctx context.Context, in *SetTriageRequest, opts ...grpc.CallOption) (*SetTriageResponse, error)
+	// GetTriage reads the triage record attached to a finding identity — the
+	// latest, or an exact superseded version by request (SPEC-0027 AC6).
+	// Not-found, cross-tenant, and unauthorized are the same coarse denial
+	// (SPEC-0001).
+	GetTriage(ctx context.Context, in *GetTriageRequest, opts ...grpc.CallOption) (*GetTriageResponse, error)
+	// GetFindingsSummary returns counts and facet values for the unified
+	// dashboard, computed under the caller's authorization: the authorization
+	// filter is part of the query, not a mask applied late, and a facet value
+	// that exists only in a repository the caller may not read is absent,
+	// not zero (SPEC-0026 AC6, SPEC-0027 AC4).
+	GetFindingsSummary(ctx context.Context, in *GetFindingsSummaryRequest, opts ...grpc.CallOption) (*GetFindingsSummaryResponse, error)
 }
 
 type findingsServiceClient struct {
@@ -92,6 +117,36 @@ func (c *findingsServiceClient) ListFindings(ctx context.Context, in *ListFindin
 	return out, nil
 }
 
+func (c *findingsServiceClient) SetTriage(ctx context.Context, in *SetTriageRequest, opts ...grpc.CallOption) (*SetTriageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetTriageResponse)
+	err := c.cc.Invoke(ctx, FindingsService_SetTriage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *findingsServiceClient) GetTriage(ctx context.Context, in *GetTriageRequest, opts ...grpc.CallOption) (*GetTriageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTriageResponse)
+	err := c.cc.Invoke(ctx, FindingsService_GetTriage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *findingsServiceClient) GetFindingsSummary(ctx context.Context, in *GetFindingsSummaryRequest, opts ...grpc.CallOption) (*GetFindingsSummaryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetFindingsSummaryResponse)
+	err := c.cc.Invoke(ctx, FindingsService_GetFindingsSummary_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FindingsServiceServer is the server API for FindingsService service.
 // All implementations must embed UnimplementedFindingsServiceServer
 // for forward compatibility.
@@ -109,6 +164,24 @@ type FindingsServiceServer interface {
 	// are opaque, signed, and bound to the tenant and revision that issued
 	// them; a forged or cross-tenant cursor yields no content (SPEC-0025).
 	ListFindings(context.Context, *ListFindingsRequest) (*ListFindingsResponse, error)
+	// SetTriage records a triage decision on a finding identity. It is a
+	// control action, not a UI preference: the transition is a PDP decision
+	// with server-derived context and appends exactly one immutable audit
+	// record (SPEC-0026 AC4). Guarded by expected version and idempotent per
+	// request ID; a superseded record is retained, never mutated
+	// (SPEC-0026 AC5, SPEC-0027).
+	SetTriage(context.Context, *SetTriageRequest) (*SetTriageResponse, error)
+	// GetTriage reads the triage record attached to a finding identity — the
+	// latest, or an exact superseded version by request (SPEC-0027 AC6).
+	// Not-found, cross-tenant, and unauthorized are the same coarse denial
+	// (SPEC-0001).
+	GetTriage(context.Context, *GetTriageRequest) (*GetTriageResponse, error)
+	// GetFindingsSummary returns counts and facet values for the unified
+	// dashboard, computed under the caller's authorization: the authorization
+	// filter is part of the query, not a mask applied late, and a facet value
+	// that exists only in a repository the caller may not read is absent,
+	// not zero (SPEC-0026 AC6, SPEC-0027 AC4).
+	GetFindingsSummary(context.Context, *GetFindingsSummaryRequest) (*GetFindingsSummaryResponse, error)
 	mustEmbedUnimplementedFindingsServiceServer()
 }
 
@@ -127,6 +200,15 @@ func (UnimplementedFindingsServiceServer) GetFinding(context.Context, *GetFindin
 }
 func (UnimplementedFindingsServiceServer) ListFindings(context.Context, *ListFindingsRequest) (*ListFindingsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListFindings not implemented")
+}
+func (UnimplementedFindingsServiceServer) SetTriage(context.Context, *SetTriageRequest) (*SetTriageResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetTriage not implemented")
+}
+func (UnimplementedFindingsServiceServer) GetTriage(context.Context, *GetTriageRequest) (*GetTriageResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTriage not implemented")
+}
+func (UnimplementedFindingsServiceServer) GetFindingsSummary(context.Context, *GetFindingsSummaryRequest) (*GetFindingsSummaryResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetFindingsSummary not implemented")
 }
 func (UnimplementedFindingsServiceServer) mustEmbedUnimplementedFindingsServiceServer() {}
 func (UnimplementedFindingsServiceServer) testEmbeddedByValue()                         {}
@@ -203,6 +285,60 @@ func _FindingsService_ListFindings_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FindingsService_SetTriage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetTriageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FindingsServiceServer).SetTriage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FindingsService_SetTriage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FindingsServiceServer).SetTriage(ctx, req.(*SetTriageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FindingsService_GetTriage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTriageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FindingsServiceServer).GetTriage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FindingsService_GetTriage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FindingsServiceServer).GetTriage(ctx, req.(*GetTriageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FindingsService_GetFindingsSummary_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetFindingsSummaryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FindingsServiceServer).GetFindingsSummary(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FindingsService_GetFindingsSummary_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FindingsServiceServer).GetFindingsSummary(ctx, req.(*GetFindingsSummaryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // FindingsService_ServiceDesc is the grpc.ServiceDesc for FindingsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -221,6 +357,18 @@ var FindingsService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListFindings",
 			Handler:    _FindingsService_ListFindings_Handler,
+		},
+		{
+			MethodName: "SetTriage",
+			Handler:    _FindingsService_SetTriage_Handler,
+		},
+		{
+			MethodName: "GetTriage",
+			Handler:    _FindingsService_GetTriage_Handler,
+		},
+		{
+			MethodName: "GetFindingsSummary",
+			Handler:    _FindingsService_GetFindingsSummary_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
