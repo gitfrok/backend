@@ -1,0 +1,184 @@
+// Package pki is the Agent context's certificate adapter: a control-plane CA that issues,
+// inspects and verifies the short-lived client certificates an enrolled data plane
+// authenticates with (ADR-0060 §2).
+//
+// This is the DEV/TEST custody of the CA key: an in-process ECDSA key. Production key
+// custody is explicitly NOT decided here (ADR-0057 follow-up); swapping this adapter for a
+// custody-backed issuer is a composition-root change, not a contract change.
+package pki
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"math/big"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gitfrok/backend/modules/agent/api"
+	"github.com/gitfrok/backend/platform/ids"
+)
+
+// DevCA is an in-process certificate authority. It is safe for concurrent issuance.
+type DevCA struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	pool *x509.CertPool
+	now  func() time.Time
+
+	mu     sync.Mutex
+	serial *big.Int
+}
+
+var _ api.CertificateIssuer = (*DevCA)(nil)
+
+// NewDevCA generates one fresh CA key and self-signed certificate. The key never leaves
+// this process; that is precisely why this constructor is dev/test custody only.
+func NewDevCA(commonName string, now func() time.Time) (*DevCA, error) {
+	if now == nil {
+		return nil, errors.New("pki: nil clock")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("pki: generate ca key: %w", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             now().Add(-time.Hour),
+		NotAfter:              now().Add(10 * 365 * 24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, fmt.Errorf("pki: self-sign ca: %w", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, fmt.Errorf("pki: parse ca: %w", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	return &DevCA{cert: cert, key: key, pool: pool, now: now, serial: big.NewInt(1)}, nil
+}
+
+// CAPool returns the trust pool containing the CA certificate — the verifier side that
+// cmd/ wires into the gRPC server's mTLS configuration.
+func (ca *DevCA) CAPool() *x509.CertPool { return ca.pool }
+
+// Issue mints one short-lived client certificate naming the identity (SPEC-0038 AC3: the
+// certificate names the tenant and the data plane). The returned PEM bundle is the whole
+// credential — leaf, CA chain, private key — and travels only onto the channel that
+// presented it; the caller must never log or persist it (AC2).
+func (ca *DevCA) Issue(_ context.Context, id api.Identity, now time.Time, lifetime, leeway time.Duration) (api.IssuedCertificate, error) {
+	if id.TenantID == "" || id.DataPlaneID == "" {
+		return api.IssuedCertificate{}, errors.New("pki: identity must name tenant and data plane")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return api.IssuedCertificate{}, fmt.Errorf("pki: generate leaf key: %w", err)
+	}
+	ca.mu.Lock()
+	ca.serial = new(big.Int).Add(ca.serial, big.NewInt(1))
+	serial := new(big.Int).Set(ca.serial)
+	ca.mu.Unlock()
+
+	// NotBefore is backdated by the clock-skew leeway: a mildly skewed customer cluster
+	// clock must not reject a freshly issued certificate. NotAfter is the rotation
+	// deadline and is never extended (SPEC-0038 AC4).
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: subjectFor(id)},
+		NotBefore:    now.Add(-leeway),
+		NotAfter:     now.Add(lifetime),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		return api.IssuedCertificate{}, fmt.Errorf("pki: issue leaf: %w", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return api.IssuedCertificate{}, fmt.Errorf("pki: marshal leaf key: %w", err)
+	}
+	var bundle []byte
+	bundle = append(bundle, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+	bundle = append(bundle, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.cert.Raw})...)
+	bundle = append(bundle, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})...)
+	return api.IssuedCertificate{
+		CertificateID: ids.NewULID(),
+		PEM:           bundle,
+		ExpiresAt:     now.Add(lifetime),
+	}, nil
+}
+
+// Inspect recovers the identity and expiry from a leaf certificate, refusing anything this
+// CA did not sign. It takes DER, the form gRPC surfaces after mTLS verification.
+func (ca *DevCA) Inspect(leafDER []byte) (api.Identity, time.Time, error) {
+	cert, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		return api.Identity{}, time.Time{}, fmt.Errorf("pki: unparsable leaf: %w", err)
+	}
+	if err := cert.CheckSignatureFrom(ca.cert); err != nil {
+		return api.Identity{}, time.Time{}, errors.New("pki: leaf not issued by this ca")
+	}
+	id, err := identityFromSubject(cert.Subject.CommonName)
+	if err != nil {
+		return api.Identity{}, time.Time{}, err
+	}
+	return id, cert.NotAfter, nil
+}
+
+// VerifyChain checks a peer chain against this CA at the given instant. A trusted chain
+// whose leaf is past NotAfter reports expired=true without an error — the admission path
+// audits and refuses it rather than treating expiry like an attack (AC5).
+func (ca *DevCA) VerifyChain(rawCerts [][]byte, now time.Time) ([]byte, bool, error) {
+	if len(rawCerts) == 0 {
+		return nil, false, errors.New("pki: no peer certificates")
+	}
+	leaf, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return nil, false, fmt.Errorf("pki: unparsable peer leaf: %w", err)
+	}
+	intermediates := x509.NewCertPool()
+	for _, raw := range rawCerts[1:] {
+		if c, err := x509.ParseCertificate(raw); err == nil {
+			intermediates.AddCert(c)
+		}
+	}
+	_, err = leaf.Verify(x509.VerifyOptions{
+		Roots:         ca.pool,
+		Intermediates: intermediates,
+		CurrentTime:   now,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	if err == nil {
+		return leaf.Raw, false, nil
+	}
+	if !now.Before(leaf.NotAfter) || now.Before(leaf.NotBefore) {
+		return leaf.Raw, !now.Before(leaf.NotAfter), nil
+	}
+	return nil, false, fmt.Errorf("pki: chain does not verify: %w", err)
+}
+
+// subjectFor encodes the identity into the certificate subject; identityFromSubject is its
+// inverse. The encoding is private to this adapter.
+func subjectFor(id api.Identity) string { return id.TenantID + "/" + id.DataPlaneID }
+
+func identityFromSubject(cn string) (api.Identity, error) {
+	tenant, dataPlane, ok := strings.Cut(cn, "/")
+	if !ok || tenant == "" || dataPlane == "" {
+		return api.Identity{}, errors.New("pki: subject does not name an identity")
+	}
+	return api.Identity{TenantID: tenant, DataPlaneID: dataPlane}, nil
+}
