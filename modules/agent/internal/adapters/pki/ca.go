@@ -12,6 +12,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -120,6 +121,40 @@ func (ca *DevCA) Issue(_ context.Context, id api.Identity, now time.Time, lifeti
 		PEM:           bundle,
 		ExpiresAt:     now.Add(lifetime),
 	}, nil
+}
+
+// IssueServer mints the gRPC SERVER certificate for a dev/test composition, signed by the
+// same CA so clients can verify it through the normal trust pool. It is not part of the
+// agent identity surface: no data plane ever authenticates with it.
+func (ca *DevCA) IssueServer(commonName string, dnsNames []string, now time.Time, lifetime time.Duration) (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("pki: generate server key: %w", err)
+	}
+	ca.mu.Lock()
+	ca.serial = new(big.Int).Add(ca.serial, big.NewInt(1))
+	serial := new(big.Int).Set(ca.serial)
+	ca.mu.Unlock()
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: commonName},
+		DNSNames:     dnsNames,
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(lifetime),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("pki: issue server cert: %w", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("pki: marshal server key: %w", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
 // Inspect recovers the identity and expiry from a leaf certificate, refusing anything this
