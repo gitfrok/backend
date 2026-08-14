@@ -81,6 +81,10 @@ func TestTruncatedTrailReadMarksSectionsIncomplete(t *testing.T) {
 		t.Fatalf("get pack: %v", err)
 	}
 	wantGap := api.SectionGap{From: prefix[0].OccurredAt, To: req.RangeTo, Reason: api.GapReadTruncated}
+	// The residency section's declaration-history read truncates too, but on
+	// its own terms: the unread tail may hold the pinning in force, so its
+	// honest gap covers the whole range (T-0033).
+	residencyGap := api.SectionGap{From: req.RangeFrom, To: req.RangeTo, Reason: api.GapReadTruncated}
 	checked := 0
 	for _, c := range chunks {
 		if c.Section == nil || c.Section.Type == api.SectionAccessChanges {
@@ -90,12 +94,16 @@ func TestTruncatedTrailReadMarksSectionsIncomplete(t *testing.T) {
 		if c.Section.Complete {
 			t.Errorf("section %s must not render complete over a truncated trail read", c.Section.Type)
 		}
-		if len(c.Section.Gaps) != 1 || c.Section.Gaps[0] != wantGap {
-			t.Errorf("section %s gaps = %+v, want exactly %+v", c.Section.Type, c.Section.Gaps, wantGap)
+		gap := wantGap
+		if c.Section.Type == api.SectionResidency {
+			gap = residencyGap
+		}
+		if len(c.Section.Gaps) != 1 || c.Section.Gaps[0] != gap {
+			t.Errorf("section %s gaps = %+v, want exactly %+v", c.Section.Type, c.Section.Gaps, gap)
 		}
 	}
-	if checked != 3 {
-		t.Fatalf("checked %d trail-fed sections, want 3", checked)
+	if checked != 4 {
+		t.Fatalf("checked %d trail-fed sections, want 4 (residency reads the trail on its own)", checked)
 	}
 
 	// The live status surface carries the same marker.

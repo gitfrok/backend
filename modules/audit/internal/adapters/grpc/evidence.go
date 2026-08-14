@@ -162,6 +162,8 @@ func sectionTypeOf(t api.SectionType) auditv1.SectionType {
 		return auditv1.SectionType_SECTION_TYPE_SCAN_GATES
 	case api.SectionAccessChanges:
 		return auditv1.SectionType_SECTION_TYPE_ACCESS_CHANGES
+	case api.SectionResidency:
+		return auditv1.SectionType_SECTION_TYPE_RESIDENCY
 	default:
 		return auditv1.SectionType_SECTION_TYPE_UNSPECIFIED
 	}
@@ -175,6 +177,8 @@ func gapReasonOf(r api.GapReason) auditv1.GapReason {
 		return auditv1.GapReason_GAP_REASON_PROJECTION_LAGGED
 	case api.GapAssemblyFailed:
 		return auditv1.GapReason_GAP_REASON_ASSEMBLY_FAILED
+	case api.GapPlacementSilent:
+		return auditv1.GapReason_GAP_REASON_PLACEMENT_SILENT
 	// api.GapReadTruncated and api.GapRecordsExcluded have no dedicated wire
 	// values yet: the contract enum is governance-owned (gen/**), and a wire
 	// addition needs the governance-first contract change. Both render
@@ -273,8 +277,35 @@ func recordOf(r api.SectionRecord) *auditv1.ControlSectionRecord {
 			TargetPrincipalId: r.AccessChange.TargetPrincipalID,
 			GrantId:           r.AccessChange.GrantID,
 		}}
+	case r.Residency != nil:
+		pb.Detail = &auditv1.ControlSectionRecord_Residency{Residency: &auditv1.ResidencyRecord{
+			FactKind:       residencyFactKindOf(r.Residency.FactKind),
+			DataPlaneId:    r.Residency.DataPlaneID,
+			PinnedCloud:    r.Residency.PinnedCloud,
+			PinnedRegion:   r.Residency.PinnedRegion,
+			ObservedCloud:  r.Residency.ObservedCloud,
+			ObservedRegion: r.Residency.ObservedRegion,
+		}}
 	}
 	return pb
+}
+
+// residencyFactKindOf maps the in-process fact kinds onto the contract's
+// closed enum (T-0033). An unknown kind renders UNSPECIFIED — it cannot
+// occur through Classify, and the wire must never invent a value.
+func residencyFactKindOf(k api.ResidencyFactKind) auditv1.ResidencyFactKind {
+	switch k {
+	case api.ResidencyFactPinning:
+		return auditv1.ResidencyFactKind_RESIDENCY_FACT_KIND_PINNING
+	case api.ResidencyFactPlacement:
+		return auditv1.ResidencyFactKind_RESIDENCY_FACT_KIND_PLACEMENT
+	case api.ResidencyFactPlacementRefused:
+		return auditv1.ResidencyFactKind_RESIDENCY_FACT_KIND_PLACEMENT_REFUSED
+	case api.ResidencyFactPlacementContradiction:
+		return auditv1.ResidencyFactKind_RESIDENCY_FACT_KIND_PLACEMENT_CONTRADICTION
+	default:
+		return auditv1.ResidencyFactKind_RESIDENCY_FACT_KIND_UNSPECIFIED
+	}
 }
 
 func appendixOf(a api.Appendix) *auditv1.AttestedAppendix {

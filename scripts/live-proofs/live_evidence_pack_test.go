@@ -161,9 +161,9 @@ func TestLiveEvidencePackProof(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get pack: %v", err)
 	}
-	// Shape: header, four control sections in order, appendix, closing chunk.
-	if len(chunks) != 7 {
-		t.Fatalf("pack streamed %d chunks; want 7 (header + 4 sections + appendix + final)", len(chunks))
+	// Shape: header, five control sections in order, appendix, closing chunk.
+	if len(chunks) != 8 {
+		t.Fatalf("pack streamed %d chunks; want 8 (header + 5 sections + appendix + final)", len(chunks))
 	}
 	header := chunks[0].Header
 	if header == nil || header.PackID != packID || header.RequestedBy != "u-owner" || header.DecisionID == "" {
@@ -174,17 +174,17 @@ func TestLiveEvidencePackProof(t *testing.T) {
 	if len(header.Sections) != 0 || header.Appendix.Label != "" || len(header.Appendix.Groups) != 0 {
 		t.Fatalf("header chunk must carry no sections or appendix, got %+v", header)
 	}
-	if chunks[5].Appendix == nil || chunks[5].Appendix.Label != auditapi.AppendixLabel || len(chunks[5].Appendix.Groups) != 0 {
-		t.Fatalf("appendix chunk must be empty and carry the server-set label, got %+v", chunks[5])
+	if chunks[6].Appendix == nil || chunks[6].Appendix.Label != auditapi.AppendixLabel || len(chunks[6].Appendix.Groups) != 0 {
+		t.Fatalf("appendix chunk must be empty and carry the server-set label, got %+v", chunks[6])
 	}
-	if !chunks[6].Final || chunks[6].Header != nil || chunks[6].Section != nil || chunks[6].Appendix != nil {
-		t.Fatalf("closing chunk must carry no content: %+v", chunks[6])
+	if !chunks[7].Final || chunks[7].Header != nil || chunks[7].Section != nil || chunks[7].Appendix != nil {
+		t.Fatalf("closing chunk must carry no content: %+v", chunks[7])
 	}
 
 	sections := map[auditapi.SectionType]auditapi.Section{}
 	for i, want := range []auditapi.SectionType{
 		auditapi.SectionApprovals, auditapi.SectionPolicyDecisions,
-		auditapi.SectionScanGates, auditapi.SectionAccessChanges,
+		auditapi.SectionScanGates, auditapi.SectionResidency, auditapi.SectionAccessChanges,
 	} {
 		c := chunks[1+i]
 		if c.Section == nil || c.Section.Type != want {
@@ -227,6 +227,15 @@ func TestLiveEvidencePackProof(t *testing.T) {
 		t.Fatalf("scan-gates section must cite exactly scan-1, got %+v", gates)
 	}
 
+	// Residency (T-0033, SPEC-0040 AC4): this proof seeds no residency facts
+	// — the tenant declared nothing, so placement was unconstrained and the
+	// section is empty, complete and gap-free. Declared tenants are covered
+	// by the audit module's own tests; the live proof pins the shape.
+	residency := sections[auditapi.SectionResidency]
+	if !residency.Complete || len(residency.Records) != 0 || len(residency.Gaps) != 0 {
+		t.Fatalf("an undeclared tenant's residency section must be empty and complete, got %+v", residency)
+	}
+
 	// Access changes: the degraded section itself — complete=false, one
 	// SOURCE_UNAVAILABLE gap over the whole range, no records.
 	access := sections[auditapi.SectionAccessChanges]
@@ -244,7 +253,7 @@ func TestLiveEvidencePackProof(t *testing.T) {
 	}
 
 	t.Logf("live proof: pack %s assembled under the real governance bundle — "+
-		"approvals=%d policy_decisions=%d scan_gates=%d, access-changes degraded SOURCE_UNAVAILABLE, "+
+		"approvals=%d policy_decisions=%d scan_gates=%d residency=%d, access-changes degraded SOURCE_UNAVAILABLE, "+
 		"non-owner generation and cross-tenant reads refused",
-		packID, len(approvals.Records), len(decisions.Records), len(gates.Records))
+		packID, len(approvals.Records), len(decisions.Records), len(gates.Records), len(residency.Records))
 }

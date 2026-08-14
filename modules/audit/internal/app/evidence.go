@@ -7,17 +7,18 @@
 // audited (SPEC-0032 AC6).
 //
 // Sections assemble through contract surfaces and the event-fed projection,
-// never by reading another context's tables (ADR-0022): the three sections
-// with a projection today are classified out of the tenant's own audit chain
-// — the chain IS the projection the owning contexts feed through auditsink —
-// and the access-changes section reads Identity & Access's contract surface
-// through the api.AccessChangesSource port, wired since T-0027 to the
-// auditor-grant lifecycle. A plane composing no source still degrades the
-// section per contract: an explicit gap marker over the range, never a
-// partial section presented as complete (SPEC-0031 AC10).
+// never by reading another context's tables (ADR-0022): the four trail-fed
+// sections classify out of the tenant's own audit chain — the chain IS the
+// projection the owning contexts feed through auditsink or their own witness
+// ports (residency, T-0033) — and the access-changes section reads Identity
+// & Access's contract surface through the api.AccessChangesSource port, wired
+// since T-0027 to the auditor-grant lifecycle. A plane composing no source
+// still degrades the section per contract: an explicit gap marker over the
+// range, never a partial section presented as complete (SPEC-0031 AC10).
 package app
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -54,6 +55,13 @@ type Service struct {
 	// fresh on every decision. nil means the plane has no grant surface, so
 	// every auditor pack read fails closed — member principals are unaffected.
 	grants identityapi.AuditorGrants
+	// maxReportInterval bounds how long a data plane may go without reporting
+	// its placement before the residency section renders the interval as a
+	// PLACEMENT_SILENT gap (T-0033, SPEC-0040 AC5). Zero is fail-safe: every
+	// obligation window renders as a gap rather than silence passing as
+	// compliance. The composition root sets it from environment configuration
+	// through WithResidencyWindow (invariant 13).
+	maxReportInterval time.Duration
 
 	mu    sync.Mutex
 	packs map[string]*packEntry
@@ -124,6 +132,17 @@ func New(pdp policyapi.DecisionPoint, events bus.Bus, trail api.TrailStore,
 		packs:    map[string]*packEntry{},
 		byIDKey:  map[string]*packReservation{},
 	}
+}
+
+// WithResidencyWindow sets the maximum placement-reporting interval the
+// residency section's AC5 silence gaps are computed against (T-0033,
+// SPEC-0040 AC5). It is a composition-root setting (invariant 13), a builder
+// rather than a New parameter so the existing constructor call sites keep
+// their shape. The zero value is the fail-safe: every obligation window
+// renders as a gap. Returns the service for composition-line chaining.
+func (s *Service) WithResidencyWindow(maxReportInterval time.Duration) *Service {
+	s.maxReportInterval = maxReportInterval
+	return s
 }
 
 // RequestPack implements api.PackService.
@@ -508,11 +527,13 @@ func (s *Service) assemble(packID string) {
 	})
 }
 
-// assembleSections builds the four control sections and the appendix. The
-// three trail-fed sections classify out of the tenant's chain; the
-// access-changes section reads the identity surface port, degrading into an
-// explicit gap when no such surface is wired; the appendix reads the
-// attested-history port, empty when the plane has no import surface.
+// assembleSections builds the five control sections and the appendix. Four
+// sections are trail-fed: the three classic ones classify out of the
+// tenant's chain, and the residency section assembles from its own trail
+// reads plus the AC5 silence-gap computation (T-0033); the access-changes
+// section reads the identity surface port, degrading into an explicit gap
+// when no such surface is wired; the appendix reads the attested-history
+// port, empty when the plane has no import surface.
 func (s *Service) assembleSections(ctx context.Context, entry *packEntry, pack api.Pack) ([]api.Section, api.Appendix, int64, string) {
 	records, truncated, err := s.trail.Query(ctx, api.TrailQuery{
 		From: pack.RangeFrom, To: pack.RangeTo, RepositoryID: pack.RepositoryID,
@@ -534,7 +555,12 @@ func (s *Service) assembleSections(ctx context.Context, entry *packEntry, pack a
 		truncation = &api.SectionGap{From: gapFrom, To: pack.RangeTo, Reason: api.GapReadTruncated}
 	}
 
-	sections := domain.AssembleSections(records, pack.RepositoryID, truncation)
+	residency, err := s.residencySection(ctx, pack)
+	if err != nil {
+		return nil, api.Appendix{}, 0, fmt.Sprintf("residency section failed: %v", err)
+	}
+
+	sections := domain.AssembleSections(records, pack.RepositoryID, truncation, &residency)
 
 	// Access changes: Identity & Access's own surface, or the honest degraded
 	// shape — a gap over the whole range, SOURCE_UNAVAILABLE. A section that
@@ -583,6 +609,127 @@ func (s *Service) assembleSections(ctx context.Context, entry *packEntry, pack a
 		}
 	}
 	return sections, appendix, appendixRecords, ""
+}
+
+// residencySection assembles the residency control section (T-0033, SPEC-0040
+// AC4): the declarations in force and the observed placement of every data
+// plane that served the tenant, plus the AC5 silence gaps. It admits only
+// first-party, control-plane-observed records classified out of the tenant's
+// own chain — the Residency context witnesses them through its trail port; a
+// customer attestation cannot write the chain, so the section is first-party
+// by construction (SPEC-0040 AC7).
+//
+// The facts are tenant-wide: repository scope filters nothing here, because
+// AC4 cites the observed placement of EVERY data plane whatever repository a
+// pack is scoped to. Two reads feed it: the declaration history — an
+// open-from read of every pinning up to the range's end, yielding both the
+// declaration in force before the range and any change inside it (AC6) — and
+// the in-range placement facts (observations, refusals, contradictions).
+func (s *Service) residencySection(ctx context.Context, pack api.Pack) (api.Section, error) {
+	declRecords, declTruncated, err := s.trail.Query(ctx, api.TrailQuery{
+		To:      pack.RangeTo,
+		Actions: []api.Action{api.Action(platformaudit.ActionResidencyDeclarationSet)},
+	})
+	if err != nil {
+		return api.Section{}, err
+	}
+	factRecords, factsTruncated, err := s.trail.Query(ctx, api.TrailQuery{
+		From: pack.RangeFrom, To: pack.RangeTo,
+		Actions: []api.Action{
+			api.Action(platformaudit.ActionResidencyPlacementObserved),
+			api.Action(platformaudit.ActionResidencyPlacementRefused),
+			api.Action(platformaudit.ActionResidencyPlacementContradiction),
+		},
+	})
+	if err != nil {
+		return api.Section{}, err
+	}
+
+	// Classify in chain order: the two reads merge into one sequence-sorted
+	// slice, and only records the classifier admits as residency facts enter.
+	all := append(slices.Clone(declRecords), factRecords...)
+	slices.SortFunc(all, func(a, b api.Record) int { return cmp.Compare(a.Seq, b.Seq) })
+	var inRange []api.SectionRecord
+	var declarations []api.SectionRecord
+	firstPrev := ""
+	for _, r := range all {
+		sr, st, ok := domain.Classify(r)
+		if !ok || st != api.SectionResidency {
+			continue
+		}
+		if sr.Residency.FactKind == api.ResidencyFactPinning {
+			declarations = append(declarations, sr)
+		}
+		if r.OccurredAt.Before(pack.RangeFrom) || r.OccurredAt.After(pack.RangeTo) {
+			continue
+		}
+		if len(inRange) == 0 {
+			firstPrev = r.PrevHash
+		}
+		inRange = append(inRange, sr)
+	}
+
+	// AC5 silence gaps first: the declaration in force at rangeFrom opens the
+	// obligation window at the range start; when none existed yet, the first
+	// in-range pinning opens it at its effective time instead. No declaration
+	// at all means placement was unconstrained — no gaps. (Computed on the
+	// in-range facts; truncation below suppresses them in favour of the
+	// honest gap.)
+	var windowDecl *api.SectionRecord
+	if inForce, ok := domain.LastDeclarationBefore(declarations, pack.RangeFrom); ok {
+		windowDecl = &inForce
+	} else if len(declarations) > 0 && !declarations[0].OccurredAt.After(pack.RangeTo) {
+		windowDecl = &declarations[0]
+	}
+
+	// AC4: the section cites the declaration IN FORCE, even when it took
+	// effect before the range — it is the constraint every cited placement
+	// was evaluated against. It precedes every in-range record in the chain,
+	// so the anchor's continuity link is its own.
+	classified := inRange
+	if windowDecl != nil && windowDecl.OccurredAt.Before(pack.RangeFrom) {
+		for _, r := range all {
+			if r.Seq == windowDecl.ChainSeq {
+				firstPrev = r.PrevHash
+				break
+			}
+		}
+		classified = append([]api.SectionRecord{*windowDecl}, inRange...)
+	}
+
+	sec := api.Section{
+		Type:          api.SectionResidency,
+		Anchor:        domain.AnchorWithPrev(classified, firstPrev),
+		Records:       classified,
+		Complete:      true,
+		RecordsDigest: domain.RecordsDigest(classified),
+	}
+
+	// A truncated read makes the honest answer a truncation gap, not silence
+	// arithmetic: the declaration history's unread tail may hold the pinning
+	// actually in force, and the facts' unread tail may hold reports that
+	// close an interval. Neither may be guessed.
+	switch {
+	case declTruncated:
+		sec.Gaps = append(sec.Gaps, api.SectionGap{
+			From: pack.RangeFrom, To: pack.RangeTo, Reason: api.GapReadTruncated,
+		})
+	case factsTruncated:
+		gapFrom := pack.RangeFrom
+		if len(factRecords) > 0 {
+			gapFrom = factRecords[len(factRecords)-1].OccurredAt
+		}
+		sec.Gaps = append(sec.Gaps, api.SectionGap{
+			From: gapFrom, To: pack.RangeTo, Reason: api.GapReadTruncated,
+		})
+	default:
+		sec.Gaps = append(sec.Gaps, domain.SilenceGaps(inRange, windowDecl,
+			pack.RangeFrom, pack.RangeTo, s.maxReportInterval)...)
+	}
+	if len(sec.Gaps) > 0 {
+		sec.Complete = false
+	}
+	return sec, nil
 }
 
 // degradedAccessSection is the access-changes section when its source surface

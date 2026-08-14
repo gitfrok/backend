@@ -86,10 +86,10 @@ type TrailStore interface {
 // Evidence pack sections
 // ---------------------------------------------------------------------------
 
-// SectionType names the four control sections a pack always carries
-// (SPEC-0031 AC1). The labelled appendix is deliberately not a member: it is a
-// distinct shape, so a section type can never be widened to render attested
-// history as a control.
+// SectionType names the five control sections a pack always carries
+// (SPEC-0031 AC1, SPEC-0040 AC4). The labelled appendix is deliberately not a
+// member: it is a distinct shape, so a section type can never be widened to
+// render attested history as a control.
 type SectionType int
 
 const (
@@ -102,6 +102,12 @@ const (
 	SectionScanGates
 	// SectionAccessChanges: access changes witnessed by Identity & Access.
 	SectionAccessChanges
+	// SectionResidency: the residency facts witnessed by the Residency
+	// context (T-0033, SPEC-0040 AC4) — the declarations in force and the
+	// observed placement of every data plane that served the tenant.
+	// First-party only: a customer attestation can never enter a control
+	// section (SPEC-0040 AC7, SPEC-0032 AC2).
+	SectionResidency
 )
 
 // String renders the section name used in events and status counts — the same
@@ -116,13 +122,15 @@ func (s SectionType) String() string {
 		return "scan_gates"
 	case SectionAccessChanges:
 		return "access_changes"
+	case SectionResidency:
+		return "residency"
 	default:
 		return "unspecified"
 	}
 }
 
 // AllSectionTypes is the closed set, in assembly order.
-var AllSectionTypes = []SectionType{SectionApprovals, SectionPolicyDecisions, SectionScanGates, SectionAccessChanges}
+var AllSectionTypes = []SectionType{SectionApprovals, SectionPolicyDecisions, SectionScanGates, SectionAccessChanges, SectionResidency}
 
 // PackState is the lifecycle of an asynchronous assembly (SPEC-0031
 // non-functional: observable per section; a large range does not block
@@ -188,6 +196,13 @@ const (
 	// dedicated value; Complete=false plus the gap is the machine-checkable
 	// marker either way.
 	GapRecordsExcluded
+	// GapPlacementSilent: the residency section's AC5 gap (SPEC-0040) — an
+	// interval in which a data plane's placement reporting was silent past
+	// the configured reporting interval, or a range with a declaration in
+	// force but no observed placement at all. Silence renders as a gap,
+	// never as compliance: absence of contradiction is not evidence of
+	// pinning (SPEC-0031 AC10 applied to residency).
+	GapPlacementSilent
 )
 
 // SectionGap marks the parts of a section's range that could not be assembled.
@@ -247,6 +262,48 @@ type AccessChangeDetail struct {
 	GrantID           string
 }
 
+// ResidencyFactKind names which residency fact one ResidencyDetail carries —
+// the in-process mirror of the contract's closed ResidencyFactKind enum
+// (contracts/proto/audit/v1, T-0033). The set is exhaustive and pairwise
+// distinguishable: a consumer tells a pinning from an observation, and a
+// refused placement from a contradiction, without guessing.
+type ResidencyFactKind string
+
+const (
+	// ResidencyFactPinning: a declaration taking effect, with its effective
+	// time (SPEC-0040 AC1, AC6).
+	ResidencyFactPinning ResidencyFactKind = "PINNING"
+	// ResidencyFactPlacement: a placement observed for a data plane and
+	// admitted under the declaration in force (SPEC-0040 AC4).
+	ResidencyFactPlacement ResidencyFactKind = "PLACEMENT"
+	// ResidencyFactPlacementRefused: a placement attempt outside the
+	// declaration, refused with both placements on the record (SPEC-0040
+	// AC2).
+	ResidencyFactPlacementRefused ResidencyFactKind = "PLACEMENT_REFUSED"
+	// ResidencyFactPlacementContradiction: a declaration taking effect
+	// against an already-observed placement — the visible violation state
+	// (SPEC-0040 AC3).
+	ResidencyFactPlacementContradiction ResidencyFactKind = "PLACEMENT_CONTRADICTION"
+)
+
+// ResidencyDetail is one residency fact witnessed by the Residency context —
+// always a control-plane-observed, first-party record (SPEC-0040 AC7). It
+// carries BOTH placements the fact relates: the pinned half is the
+// declaration in force (empty for an observation of an undeclared tenant),
+// the observed half is the placement reported or attempted. It has no field
+// capable of carrying a customer claim — no provenance, no import reference,
+// no attested handle — mirroring the contract's ResidencyRecord, so a
+// customer attestation is representable only in the appendix (SPEC-0032
+// AC2, applied to residency).
+type ResidencyDetail struct {
+	FactKind       ResidencyFactKind
+	DataPlaneID    string
+	PinnedCloud    string
+	PinnedRegion   string
+	ObservedCloud  string
+	ObservedRegion string
+}
+
 // SectionRecord is one cited record of a control section: the chain position,
 // actor, resource, action, outcome and timestamp the platform witnessed, plus
 // exactly one section-specific detail.
@@ -270,9 +327,10 @@ type SectionRecord struct {
 	PolicyDecision *PolicyDecisionDetail
 	ScanGate       *ScanGateDetail
 	AccessChange   *AccessChangeDetail
+	Residency      *ResidencyDetail
 }
 
-// Section is one of the four sections a pack always carries. It embeds its
+// Section is one of the five sections a pack always carries. It embeds its
 // records — a self-contained snapshot, not a view (ADR-0055 rule 3) — with the
 // anchors tying them to the chain and explicit gaps where the source was
 // incomplete.
@@ -366,7 +424,7 @@ const AppendixLabel = "attested imported history — display-only, no control-ef
 // ---------------------------------------------------------------------------
 
 // Pack is the full self-contained snapshot (ADR-0055 rule 3): identity, the
-// closed range it covers, the four control sections and the labelled
+// closed range it covers, the five control sections and the labelled
 // appendix. Sections embed their records and anchors; nothing references the
 // chain without embedding what it cites.
 type Pack struct {
@@ -381,7 +439,7 @@ type Pack struct {
 	RequestedBy string
 	DecisionID  string
 	GeneratedAt time.Time
-	// Sections is always four, one per SectionType, in assembly order.
+	// Sections is always five, one per SectionType, in assembly order.
 	Sections []Section
 	// Appendix is always present, possibly empty of records.
 	Appendix Appendix

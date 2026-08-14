@@ -25,6 +25,15 @@ import (
 const (
 	actionReviewApproved = "codereview.review.approved"
 	actionScanIngested   = "findings.scan_ingested"
+
+	// The residency actions the Residency context witnesses through its own
+	// trail port (T-0033, SPEC-0040). They classify into the residency
+	// section — first-party, control-plane-observed facts only (SPEC-0040
+	// AC7).
+	actionResidencyDeclarationSet        = "residency.declaration.set"
+	actionResidencyPlacementObserved     = "residency.placement.observed"
+	actionResidencyPlacementRefused      = "residency.placement.refused"
+	actionResidencyPlacementContradicted = "residency.placement.contradiction"
 )
 
 // policyModeEnforced is the only decision mode the policy-decisions section
@@ -48,11 +57,19 @@ const (
 	detailProtectionRuleID = "protection_rule_id"
 	detailReliedUponTriage = "relied_upon_triage_ids"
 	detailRepositoryID     = "repository_id"
+
+	// Residency detail keys, written by the Residency context's witness
+	// adapter (T-0033): the pinned half is the declaration in force, the
+	// observed half the placement reported or attempted.
+	detailPinnedCloud    = "pinned_cloud"
+	detailPinnedRegion   = "pinned_region"
+	detailObservedCloud  = "observed_cloud"
+	detailObservedRegion = "observed_region"
 )
 
 // Classify maps one witnessed trail record to the control-section record it is
 // evidence for, or reports that it is none. ok is false for records no section
-// cites — the trail carries more than the four control sections, and a record
+// cites — the trail carries more than the five control sections, and a record
 // that belongs to none is simply not evidence, never forced into one.
 //
 // The classification is the server-determined half of assembly (SPEC-0032):
@@ -81,6 +98,28 @@ func Classify(r api.Record) (api.SectionRecord, api.SectionType, bool) {
 			ReliedUponTriageIDs: splitCSV(r.Detail[detailReliedUponTriage]),
 		}
 		return base, api.SectionScanGates, true
+
+	case actionResidencyDeclarationSet:
+		base.Residency = &api.ResidencyDetail{
+			FactKind:     api.ResidencyFactPinning,
+			PinnedCloud:  r.Detail[detailPinnedCloud],
+			PinnedRegion: r.Detail[detailPinnedRegion],
+		}
+		return base, api.SectionResidency, true
+
+	case actionResidencyPlacementObserved, actionResidencyPlacementRefused, actionResidencyPlacementContradicted:
+		// One shape for the three placement facts; the fact kind is what
+		// distinguishes them, and each carries BOTH placements the fact
+		// relates (SPEC-0040 AC2, AC4).
+		base.Residency = &api.ResidencyDetail{
+			FactKind:       residencyFactKindOf(r.Action),
+			DataPlaneID:    resourceID(r.Resource),
+			PinnedCloud:    r.Detail[detailPinnedCloud],
+			PinnedRegion:   r.Detail[detailPinnedRegion],
+			ObservedCloud:  r.Detail[detailObservedCloud],
+			ObservedRegion: r.Detail[detailObservedRegion],
+		}
+		return base, api.SectionResidency, true
 	}
 
 	// Policy decisions are classified by their provenance, not by the action
@@ -191,19 +230,24 @@ func AnchorWithPrev(records []api.SectionRecord, prevHash string) api.ChainAncho
 	}
 }
 
-// AssembleSections classifies witnessed records into the four control
+// AssembleSections classifies witnessed records into the trail-fed control
 // sections, in SectionType order, computing anchors and digests. records must
 // be tenant-scoped, range-filtered and in chain-sequence order — the trail
 // query's job. repositoryID, when non-empty, restricts membership to records
 // attributed to that repository or carrying no repository attribution.
 //
+// Two sections assemble separately and are passed in: access-changes from the
+// identity surface port, residency from its own reads plus the silence-gap
+// computation (T-0033). They are placed in SectionType order, never
+// classified here — residency facts are tenant-wide and repository scope must
+// not filter them, and silence gaps need the section's whole record set.
+//
 // truncation, when non-nil, says the trail read hit its bounded limit: the
 // records are the earliest prefix of the range and the tail is missing. Every
 // trail-fed section then renders Complete: false with that gap — a truncated
 // section says so, rather than presenting the prefix as the whole range
-// (SPEC-0031 AC10, SPEC-0032 AC8). The access-changes section is unaffected:
-// it assembles separately from the AccessChangesSource port; see Service for
-// its degraded shape when no such surface is wired.
+// (SPEC-0031 AC10, SPEC-0032 AC8). The separately-assembled sections are
+// unaffected: their own reads carry their own truncation handling.
 //
 // Exclusions are marked, never silent: an enforced policy decision lacking
 // its SPEC-0030 provenance cannot enter the policy-decisions section
@@ -211,7 +255,7 @@ func AnchorWithPrev(records []api.SectionRecord, prevHash string) api.ChainAncho
 // renders Complete: false with one point gap (From = To = the record's
 // witnessed time) per excluded record, ordered before any truncation gap
 // (wave-2 N6, SPEC-0031 AC10).
-func AssembleSections(records []api.Record, repositoryID string, truncation *api.SectionGap) []api.Section {
+func AssembleSections(records []api.Record, repositoryID string, truncation *api.SectionGap, residency *api.Section) []api.Section {
 	grouped := map[api.SectionType][]api.SectionRecord{}
 	firstPrev := map[api.SectionType]string{}
 	var excludedGaps []api.SectionGap
@@ -241,8 +285,14 @@ func AssembleSections(records []api.Record, repositoryID string, truncation *api
 
 	sections := make([]api.Section, 0, len(api.AllSectionTypes))
 	for _, st := range api.AllSectionTypes {
-		if st == api.SectionAccessChanges {
+		switch st {
+		case api.SectionAccessChanges:
 			continue // assembled from the identity surface port, not the trail
+		case api.SectionResidency:
+			if residency != nil {
+				sections = append(sections, *residency)
+			}
+			continue // a nil residency section lands where the caller appends it
 		}
 		recs := grouped[st]
 		sec := api.Section{
@@ -323,6 +373,14 @@ func writeCanonicalRecord(h interface{ Write([]byte) (int, error) }, r api.Secti
 		write("access.kind", r.AccessChange.AccessKind)
 		write("access.target_principal_id", r.AccessChange.TargetPrincipalID)
 		write("access.grant_id", r.AccessChange.GrantID)
+	case r.Residency != nil:
+		write("detail", "residency")
+		write("residency.fact_kind", string(r.Residency.FactKind))
+		write("residency.data_plane_id", r.Residency.DataPlaneID)
+		write("residency.pinned_cloud", r.Residency.PinnedCloud)
+		write("residency.pinned_region", r.Residency.PinnedRegion)
+		write("residency.observed_cloud", r.Residency.ObservedCloud)
+		write("residency.observed_region", r.Residency.ObservedRegion)
 	default:
 		write("detail", "unspecified")
 	}

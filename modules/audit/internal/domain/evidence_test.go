@@ -79,9 +79,9 @@ func TestAssembleSectionsMarksTruncatedSectionsIncomplete(t *testing.T) {
 		From: records[1].OccurredAt, To: evidenceNow.Add(24 * time.Hour), Reason: api.GapReadTruncated,
 	}
 
-	sections := AssembleSections(records, "", &gap)
+	sections := AssembleSections(records, "", &gap, nil)
 	if len(sections) != 3 {
-		t.Fatalf("trail-fed sections = %d, want 3 (access-changes assembles separately)", len(sections))
+		t.Fatalf("trail-fed sections = %d, want 3 (access-changes and residency assemble separately)", len(sections))
 	}
 	for _, sec := range sections {
 		if sec.Complete {
@@ -97,7 +97,7 @@ func TestAssembleSectionsMarksTruncatedSectionsIncomplete(t *testing.T) {
 	}
 
 	// Without truncation the same records assemble complete and gap-free.
-	for _, sec := range AssembleSections(records, "", nil) {
+	for _, sec := range AssembleSections(records, "", nil, nil) {
 		if !sec.Complete || len(sec.Gaps) != 0 {
 			t.Errorf("section %s: a full read must render complete without gaps, got %+v", sec.Type, sec)
 		}
@@ -118,7 +118,7 @@ func TestTruncatedReadEmitsTailOnlySectionTypesIncomplete(t *testing.T) {
 		From: records[0].OccurredAt, To: evidenceNow.Add(24 * time.Hour), Reason: api.GapReadTruncated,
 	}
 
-	sections := AssembleSections(records, "", &gap)
+	sections := AssembleSections(records, "", &gap, nil)
 	if len(sections) != 3 {
 		t.Fatalf("trail-fed sections = %d, want 3", len(sections))
 	}
@@ -175,7 +175,7 @@ func TestExcludedPolicyDecisionsMarkTheSectionIncomplete(t *testing.T) {
 	}
 
 	// Without truncation: the exclusion alone marks the section.
-	sec := policy(AssembleSections([]api.Record{admitted, excluded}, "", nil))
+	sec := policy(AssembleSections([]api.Record{admitted, excluded}, "", nil, nil))
 	if sec.Complete {
 		t.Error("a section with an excluded decision must not render Complete")
 	}
@@ -192,7 +192,7 @@ func TestExcludedPolicyDecisionsMarkTheSectionIncomplete(t *testing.T) {
 	}
 
 	// Other sections are untouched by the exclusion.
-	for _, s := range AssembleSections([]api.Record{admitted, excluded}, "", nil) {
+	for _, s := range AssembleSections([]api.Record{admitted, excluded}, "", nil, nil) {
 		if s.Type != api.SectionPolicyDecisions && (!s.Complete || len(s.Gaps) != 0) {
 			t.Errorf("section %s: the exclusion belongs to policy decisions only, got %+v", s.Type, s)
 		}
@@ -201,7 +201,7 @@ func TestExcludedPolicyDecisionsMarkTheSectionIncomplete(t *testing.T) {
 	// With truncation too: the exclusion gap renders first, then the
 	// truncation gap — chain order.
 	trunc := api.SectionGap{From: excluded.OccurredAt, To: evidenceNow.Add(24 * time.Hour), Reason: api.GapReadTruncated}
-	sec = policy(AssembleSections([]api.Record{admitted, excluded}, "", &trunc))
+	sec = policy(AssembleSections([]api.Record{admitted, excluded}, "", &trunc, nil))
 	if len(sec.Gaps) != 2 || sec.Gaps[0] != wantGap || sec.Gaps[1] != trunc || sec.Complete {
 		t.Fatalf("truncated section gaps = %+v, want [%+v, %+v] and Complete=false", sec.Gaps, wantGap, trunc)
 	}
@@ -306,7 +306,7 @@ func TestExclusionMarkerCoversModelessAndUnknownModes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := trailRecord(1, api.Action("auditor.grant.issued"), tc.detail)
-			sec := policy(AssembleSections([]api.Record{rec}, "", nil))
+			sec := policy(AssembleSections([]api.Record{rec}, "", nil, nil))
 			gapped := len(sec.Gaps) > 0
 			if gapped != tc.wantGap {
 				t.Fatalf("gaps = %+v, want a gap: %v", sec.Gaps, tc.wantGap)
