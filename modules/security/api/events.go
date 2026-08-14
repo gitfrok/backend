@@ -18,10 +18,11 @@ import "time"
 // The names are the protobuf full names: the bus routing key and the future
 // topic key are the same string.
 const (
-	EventScanIngested    = "gitsaas.events.security.v1.ScanIngested"
-	EventFindingOpened   = "gitsaas.events.security.v1.FindingOpened"
-	EventFindingResolved = "gitsaas.events.security.v1.FindingResolved"
-	EventFindingTriaged  = "gitsaas.events.security.v1.FindingTriaged"
+	EventScanIngested       = "gitsaas.events.security.v1.ScanIngested"
+	EventFindingOpened      = "gitsaas.events.security.v1.FindingOpened"
+	EventFindingResolved    = "gitsaas.events.security.v1.FindingResolved"
+	EventFindingTriaged     = "gitsaas.events.security.v1.FindingTriaged"
+	EventFindingsAttributed = "gitsaas.events.security.v1.FindingsAttributed"
 )
 
 // Event is the contract a Security/Findings event satisfies. It is
@@ -130,9 +131,39 @@ func (FindingTriaged) EventName() string { return EventFindingTriaged }
 // Tenant reports the owning tenant; the bus refuses to publish without one (invariant 1).
 func (e FindingTriaged) Tenant() string { return e.TenantID }
 
+// FindingsAttributed records that attribution was (re)computed for a merge
+// request (SPEC-0028): the two revisions compared and the counts of
+// ATTRIBUTED findings by severity. It is emitted once per (merge request,
+// head revision, merge base) triple the first time the comparison succeeds;
+// a recomputation for a moved head or base is a new triple. BaseRevision is
+// empty when no merge base exists — the attributed counts are then all zero
+// and the read surface reports attribution unavailable. Like every event
+// here it carries opaque identifiers and severity counts — never finding
+// identities, provenance bytes, source code, or a policy outcome.
+type FindingsAttributed struct {
+	EventID           string
+	TenantID          string
+	RepositoryID      string
+	MergeRequestID    string
+	HeadRevision      string
+	BaseRevision      string
+	AttributedLow     int64
+	AttributedMedium  int64
+	AttributedHigh    int64
+	AttributedCritical int64
+	OccurredAt        time.Time
+}
+
+// EventName is the routing key, matching the contracts/events message full name.
+func (FindingsAttributed) EventName() string { return EventFindingsAttributed }
+
+// Tenant reports the owning tenant; the bus refuses to publish without one (invariant 1).
+func (e FindingsAttributed) Tenant() string { return e.TenantID }
+
 var (
 	_ Event = ScanIngested{}
 	_ Event = FindingOpened{}
 	_ Event = FindingResolved{}
 	_ Event = FindingTriaged{}
+	_ Event = FindingsAttributed{}
 )

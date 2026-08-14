@@ -240,6 +240,16 @@ func applyLifecycle(ctx context.Context, tx pgx.Tx, p app.IngestParams, nextID f
 			p.ScanID, st.provenance, st.mediaType).Scan(&id, &inserted); err != nil {
 			return nil, nil, fmt.Errorf("upsert finding: %w", err)
 		}
+		// The scan's reported set is a durable fact of the scan (SPEC-0028):
+		// recorded in the same transaction, so a later scan re-reporting the
+		// identity never rewrites what this scan reported.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO security.scan_report (tenant_id, scan_id, identity, finding_id)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (tenant_id, scan_id, identity) DO NOTHING`,
+			p.TenantID, p.ScanID, st.identity, id); err != nil {
+			return nil, nil, fmt.Errorf("record scan report: %w", err)
+		}
 		if !inserted {
 			continue
 		}
@@ -701,4 +711,71 @@ func (s *Store) GetTriage(ctx context.Context, tenantID, findingID string, versi
 		return api.TriageRecord{}, false, err
 	}
 	return rec, found, nil
+}
+
+// ScanReportAt returns the reported set of the latest COMPLETE scan the
+// tenant ran at the repository's revision (SPEC-0028). The reported set is
+// the durable scan_report recorded when the scan completed — not a
+// derivation from last_seen_scan_id, which a later scan moves on. Found is
+// false when no completed scan exists at the revision: attribution renders
+// that as UNAVAILABLE, never as an empty reported set (SPEC-0028 AC7).
+func (s *Store) ScanReportAt(ctx context.Context, tenantID, repositoryID, revision string) (app.ScanReport, bool, error) {
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(tenantID))
+	var out app.ScanReport
+	var found bool
+	err := s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var scanID string
+		err := tx.QueryRow(ctx,
+			`SELECT id FROM security.scans
+			  WHERE repository_id = $1 AND revision = $2 AND state = 'COMPLETE'
+			  ORDER BY completed_at DESC NULLS LAST, started_at DESC, id DESC
+			  LIMIT 1`, repositoryID, revision).Scan(&scanID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("scan at revision: %w", err)
+		}
+		found = true
+		out.ScanID = scanID
+		rows, err := tx.Query(ctx,
+			`SELECT r.identity, f.id, f.tenant_id, f.repository_id, f.scanner_class,
+			        f.tool_name, f.tool_version, f.rule_id, f.severity, f.artifact_path,
+			        f.enclosing_content, f.component, f.component_version, f.lifecycle,
+			        f.first_seen_scan_id, f.last_seen_scan_id, f.provenance,
+			        f.provenance_media_type
+			   FROM security.scan_report r
+			   JOIN security.findings f ON f.id = r.finding_id
+			  WHERE r.scan_id = $1
+			  ORDER BY f.id`, scanID)
+		if err != nil {
+			return fmt.Errorf("scan report: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var rf app.ReportedFinding
+			var scannerClass, severity, lifecycle string
+			if err := rows.Scan(&rf.Identity, &rf.Finding.ID, &rf.Finding.TenantID,
+				&rf.Finding.RepositoryID, &scannerClass, &rf.Finding.ToolName,
+				&rf.Finding.ToolVersion, &rf.Finding.RuleID, &severity,
+				&rf.Finding.Location.ArtifactPath, &rf.Finding.Location.EnclosingContent,
+				&rf.Finding.Location.Component, &rf.Finding.Location.ComponentVersion,
+				&lifecycle, &rf.Finding.FirstSeenScanID, &rf.Finding.LastSeenScanID,
+				&rf.Finding.Provenance, &rf.Finding.ProvenanceMediaType); err != nil {
+				return fmt.Errorf("scan report row: %w", err)
+			}
+			rf.Finding.ScannerClass = api.ScannerClass(scannerClass)
+			rf.Finding.Severity = api.Severity(severity)
+			rf.Finding.Lifecycle = api.Lifecycle(lifecycle)
+			out.Findings = append(out.Findings, rf)
+		}
+		if out.Findings == nil {
+			out.Findings = []app.ReportedFinding{}
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return app.ScanReport{}, false, err
+	}
+	return out, found, nil
 }

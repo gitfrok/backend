@@ -276,9 +276,10 @@ type ListPage struct {
 }
 
 // Findings is the context's full in-process surface: ingestion of completed
-// scans, tenant-scoped reads, triage, and dashboard reads (SPEC-0024,
-// SPEC-0025, SPEC-0026, SPEC-0027). Every operation is a PDP decision with
-// server-derived context; identity and lifecycle are server-computed.
+// scans, tenant-scoped reads, triage, dashboard reads, and merge-request
+// attribution reads (SPEC-0024, SPEC-0025, SPEC-0026, SPEC-0027, SPEC-0028).
+// Every operation is a PDP decision with server-derived context; identity,
+// lifecycle, and attribution are server-computed.
 type Findings interface {
 	Triage
 	// IngestScanResults ingests one chunk of a completed scan's batch.
@@ -290,4 +291,11 @@ type Findings interface {
 	GetFinding(ctx context.Context, c Context, findingID string) (Finding, error)
 	// ListFindings pages a tenant-scoped, filtered list of findings.
 	ListFindings(ctx context.Context, req ListRequest) (ListPage, error)
+	// ListMergeRequestFindings pages the findings attributable to one merge
+	// request (SPEC-0028). The merge request is known to this context only
+	// through Code Review's events; naming one it has not been told about —
+	// or one in another tenant or repository — is the same coarse denial as
+	// a policy refusal (SPEC-0001). An UNAVAILABLE summary with an empty
+	// list is still UNAVAILABLE, never "no findings" (SPEC-0028 AC7).
+	ListMergeRequestFindings(ctx context.Context, req MergeRequestFindingsRequest) (MergeRequestFindingsPage, error)
 }

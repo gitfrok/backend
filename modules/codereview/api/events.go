@@ -6,6 +6,7 @@ import "time"
 // test in this package fails if the two drift.
 const (
 	EventMergeRequestOpened      = "gitsaas.events.codereview.v1.MergeRequestOpened"
+	EventMergeRequestUpdated     = "gitsaas.events.codereview.v1.MergeRequestUpdated"
 	EventReviewSubmitted         = "gitsaas.events.codereview.v1.ReviewSubmitted"
 	EventMergeRequestMerged      = "gitsaas.events.codereview.v1.MergeRequestMerged"
 	EventBranchProtectionChanged = "gitsaas.events.codereview.v1.BranchProtectionChanged"
@@ -22,6 +23,18 @@ type MergeRequestOpened struct {
 
 func (MergeRequestOpened) EventName() string { return EventMergeRequestOpened }
 func (e MergeRequestOpened) Tenant() string  { return e.TenantID }
+
+// MergeRequestUpdated records that an open merge request moved: a push to its
+// source ref advanced the head revision. Security/Findings consumes it to
+// recompute attribution against the new head (SPEC-0028).
+type MergeRequestUpdated struct {
+	EventID, MergeRequestID, TenantID, RepositoryID string
+	ActorID, HeadRevision, SourceRef, TargetRef     string
+	OccurredAt                                      time.Time
+}
+
+func (MergeRequestUpdated) EventName() string { return EventMergeRequestUpdated }
+func (e MergeRequestUpdated) Tenant() string  { return e.TenantID }
 
 // ReviewSubmitted announces one actor's current disposition and the revision it
 // was made against. The review comment is deliberately absent.

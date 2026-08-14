@@ -22,6 +22,7 @@ import (
 	codereviewv1 "github.com/gitfrok/backend/gen/proto/codereview/v1"
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
+	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
 	securityv1 "github.com/gitfrok/backend/gen/proto/security/v1"
 	"github.com/gitfrok/backend/modules/ci"
 	"github.com/gitfrok/backend/modules/codereview"
@@ -203,6 +204,11 @@ func main() {
 	// composed at all, rather than composed with a merge path that cannot work.
 	if doors.storageClient != nil {
 		dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
+		// Security/Findings attribution resolves the merge base over the same
+		// route to Git storage: git-storaged serves the RepositoryReader
+		// contract, and a plane without storage reports attribution as
+		// unavailable rather than guessing (SPEC-0028).
+		security.AttachMergeBaseResolver(dp.findings, security.NewMergeBaseResolver(repositoryv1.NewRepositoryReaderClient(doors.conn)))
 		// Ref updates cross the process boundary in the other direction: the
 		// receive-pack path announces RefUpdated on git-storaged's bus, and this
 		// plane subscribes and republishes so the repository projection, search,

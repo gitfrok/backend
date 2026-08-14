@@ -235,6 +235,35 @@ func (s *Server) GetDiff(req *repositoryv1.GetDiffRequest, stream repositoryv1.R
 	})
 }
 
+// GetMergeBase computes the best common ancestor of two refs or commits under
+// the same preflight and PDP decision as every other read. No common ancestor
+// is an answered question, not a failure: the response says so and the caller
+// decides what that means (SPEC-0028). A refused context, an invalid ref, or
+// an unreadable repository is the same coarse unavailability as everywhere
+// else (SPEC-0001).
+func (s *Server) GetMergeBase(ctx context.Context, req *repositoryv1.GetMergeBaseRequest) (*repositoryv1.GetMergeBaseResponse, error) {
+	op, err := s.prepareRead(ctx, req.GetContext())
+	if err != nil || !validRevision(req.GetRefA()) || !validRevision(req.GetRefB()) {
+		return nil, unavailable()
+	}
+	command := s.command(ctx, "git", "-C", op.path, "merge-base", req.GetRefA(), req.GetRefB())
+	output, err := command.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			// Git exits 1 when the refs share no common ancestor: that is
+			// the answer, reported honestly rather than as an error.
+			return &repositoryv1.GetMergeBaseResponse{Found: false}, nil
+		}
+		return nil, unavailable()
+	}
+	base := strings.TrimSpace(string(output))
+	if base == "" {
+		return nil, unavailable()
+	}
+	return &repositoryv1.GetMergeBaseResponse{Found: true, MergeBase: base}, nil
+}
+
 // UploadPack executes git-upload-pack after the tenant-scoped handle and PDP decision pass.
 func (s *Server) UploadPack(stream gitv1.GitStorage_UploadPackServer) error {
 	first, err := stream.Recv()

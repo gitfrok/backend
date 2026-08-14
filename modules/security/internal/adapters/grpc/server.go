@@ -13,6 +13,7 @@ import (
 	"github.com/gitfrok/backend/platform/tenancy"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Server is the gRPC adapter for the Findings port.
@@ -254,5 +255,138 @@ func toFindingProto(f api.Finding) *securityv1.Finding {
 		Lifecycle: toLifecycleProto(f.Lifecycle),
 		FirstSeenScanId: f.FirstSeenScanID, LastSeenScanId: f.LastSeenScanID,
 		Provenance: f.Provenance, ProvenanceMediaType: f.ProvenanceMediaType,
+	}
+}
+
+// ListMergeRequestFindings pages the findings attributable to one merge
+// request (SPEC-0028). The summary is always present: an UNAVAILABLE
+// summary with an empty list is still UNAVAILABLE, never "no findings".
+func (s *Server) ListMergeRequestFindings(ctx context.Context, req *securityv1.ListMergeRequestFindingsRequest) (*securityv1.ListMergeRequestFindingsResponse, error) {
+	ctx, c, err := intoContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	page, err := s.findings.ListMergeRequestFindings(ctx, api.MergeRequestFindingsRequest{
+		Context:            c,
+		MergeRequestID:     req.GetMergeRequestId(),
+		ScannerClassFilter: fromScannerClassProto(req.GetScannerClassFilter()),
+		SeverityFilter:     fromSeverityProto(req.GetSeverityFilter()),
+		AttributionFilter:  fromAttributionProto(req.GetAttributionFilter()),
+		PageSize:           int(req.GetPageSize()),
+		PageToken:          req.GetPageToken(),
+	})
+	if err != nil {
+		if errors.Is(err, api.ErrMalformed) {
+			return nil, errMalformed
+		}
+		return nil, denial()
+	}
+	out := &securityv1.ListMergeRequestFindingsResponse{
+		NextPageToken: page.NextPageToken,
+		Summary:       toAttributionSummaryProto(page.Summary),
+	}
+	for _, v := range page.Views {
+		out.Findings = append(out.Findings, toMergeRequestFindingViewProto(v))
+	}
+	return out, nil
+}
+
+func fromAttributionProto(a securityv1.AttributionStatus) api.AttributionStatus {
+	switch a {
+	case securityv1.AttributionStatus_ATTRIBUTION_STATUS_ATTRIBUTED:
+		return api.AttributionAttributed
+	case securityv1.AttributionStatus_ATTRIBUTION_STATUS_PRE_EXISTING:
+		return api.AttributionPreExisting
+	case securityv1.AttributionStatus_ATTRIBUTION_STATUS_UNAVAILABLE:
+		return api.AttributionUnavailable
+	default:
+		return api.AttributionStatusUnspecified // unspecified means "no filter"
+	}
+}
+
+func toAttributionProto(a api.AttributionStatus) securityv1.AttributionStatus {
+	switch a {
+	case api.AttributionAttributed:
+		return securityv1.AttributionStatus_ATTRIBUTION_STATUS_ATTRIBUTED
+	case api.AttributionPreExisting:
+		return securityv1.AttributionStatus_ATTRIBUTION_STATUS_PRE_EXISTING
+	case api.AttributionUnavailable:
+		return securityv1.AttributionStatus_ATTRIBUTION_STATUS_UNAVAILABLE
+	default:
+		return securityv1.AttributionStatus_ATTRIBUTION_STATUS_UNSPECIFIED
+	}
+}
+
+func toAttributionReasonProto(r api.AttributionUnavailableReason) securityv1.AttributionUnavailableReason {
+	switch r {
+	case api.AttributionUnavailableBaseNotScanned:
+		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_BASE_NOT_SCANNED
+	case api.AttributionUnavailableHeadScanFailed:
+		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_HEAD_SCAN_FAILED
+	case api.AttributionUnavailableHeadScanTimedOut:
+		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_HEAD_SCAN_TIMED_OUT
+	case api.AttributionUnavailableHeadScanNotRun:
+		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_HEAD_SCAN_NOT_RUN
+	case api.AttributionUnavailableNoMergeBase:
+		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_NO_MERGE_BASE
+	default:
+		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_UNSPECIFIED
+	}
+}
+
+func toTriageStateProto(s api.TriageState) securityv1.TriageState {
+	switch s {
+	case api.TriageAccept:
+		return securityv1.TriageState_TRIAGE_STATE_ACCEPT
+	case api.TriageFalsePositive:
+		return securityv1.TriageState_TRIAGE_STATE_FALSE_POSITIVE
+	case api.TriageFix:
+		return securityv1.TriageState_TRIAGE_STATE_FIX
+	case api.TriageDefer:
+		return securityv1.TriageState_TRIAGE_STATE_DEFER
+	default:
+		return securityv1.TriageState_TRIAGE_STATE_UNSPECIFIED
+	}
+}
+
+func toTriageRecordProto(r api.TriageRecord) *securityv1.TriageRecord {
+	return &securityv1.TriageRecord{
+		TriageId: r.TriageID, FindingId: r.FindingID,
+		TenantId: r.TenantID, RepositoryId: r.RepositoryID,
+		State: toTriageStateProto(r.State), Justification: r.Justification,
+		Version: r.Version, ActorId: r.ActorID,
+		OccurredAt: timestamppb.New(r.OccurredAt),
+	}
+}
+
+func toMergeRequestFindingViewProto(v api.MergeRequestFindingView) *securityv1.MergeRequestFindingView {
+	out := &securityv1.MergeRequestFindingView{
+		Finding: toFindingProto(v.Finding),
+		HeadLocation: &securityv1.FindingLocation{
+			ArtifactPath:     v.HeadLocation.ArtifactPath,
+			EnclosingContent: v.HeadLocation.EnclosingContent,
+			Component:        v.HeadLocation.Component,
+			ComponentVersion: v.HeadLocation.ComponentVersion,
+		},
+		Attribution:       toAttributionProto(v.Attribution),
+		UnavailableReason: toAttributionReasonProto(v.UnavailableReason),
+	}
+	if v.Triage != nil {
+		out.Triage = toTriageRecordProto(*v.Triage)
+	}
+	return out
+}
+
+func toAttributionSummaryProto(s api.AttributionSummary) *securityv1.AttributionSummary {
+	return &securityv1.AttributionSummary{
+		Status:              toAttributionProto(s.Status),
+		UnavailableReason:   toAttributionReasonProto(s.UnavailableReason),
+		HeadRevision:        s.HeadRevision,
+		MergeBaseRevision:   s.MergeBaseRevision,
+		Stale:               s.Stale,
+		AttributedLow:       s.AttributedLow,
+		AttributedMedium:    s.AttributedMedium,
+		AttributedHigh:      s.AttributedHigh,
+		AttributedCritical:  s.AttributedCritical,
 	}
 }

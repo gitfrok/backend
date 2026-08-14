@@ -20,6 +20,7 @@ func TestCodeReviewEventShapesMirrorContracts(t *testing.T) {
 		message proto.Message
 	}{
 		{api.MergeRequestOpened{}, (*coderevieweventsv1.MergeRequestOpened)(nil)},
+		{api.MergeRequestUpdated{}, (*coderevieweventsv1.MergeRequestUpdated)(nil)},
 		{api.ReviewSubmitted{}, (*coderevieweventsv1.ReviewSubmitted)(nil)},
 		{api.MergeRequestMerged{}, (*coderevieweventsv1.MergeRequestMerged)(nil)},
 		{api.BranchProtectionChanged{}, (*coderevieweventsv1.BranchProtectionChanged)(nil)},
@@ -39,7 +40,7 @@ func TestCodeReviewEventShapesMirrorContracts(t *testing.T) {
 // results a consumer could act on directly (SPEC-0019, G9).
 func TestCodeReviewEventsCarryNoPolicyOutcomeOrReviewText(t *testing.T) {
 	for _, event := range []any{
-		api.MergeRequestOpened{}, api.ReviewSubmitted{},
+		api.MergeRequestOpened{}, api.MergeRequestUpdated{}, api.ReviewSubmitted{},
 		api.MergeRequestMerged{}, api.BranchProtectionChanged{},
 	} {
 		fields := goFieldNames(reflect.TypeOf(event))

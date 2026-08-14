@@ -111,6 +111,74 @@ func TestRepositoryReaderPaginatesTreeAndStreamsFileAndDiff(t *testing.T) {
 	}
 }
 
+func TestRepositoryReaderGetMergeBase(t *testing.T) {
+	root, tenantID, repositoryID, head := seededRepository(t)
+	bare := filepath.Join(root, tenantID, repositoryID+".git")
+	work := t.TempDir()
+	mustRunGit(t, work, "clone", "--branch", "main", bare, ".")
+	mustRunGit(t, work, "config", "user.email", "dev@gitsaas.test")
+	mustRunGit(t, work, "config", "user.name", "GitFrok test")
+
+	// A feature branch advancing away from main: the merge base is main's head.
+	mustRunGit(t, work, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(work, "FEATURE.md"), []byte("feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, work, "add", "FEATURE.md")
+	mustRunGit(t, work, "commit", "-m", "feature")
+	mustRunGit(t, work, "push", "origin", "HEAD:refs/heads/feature")
+
+	// An orphan branch sharing no history with main.
+	mustRunGit(t, work, "checkout", "main")
+	mustRunGit(t, work, "checkout", "--orphan", "lonely")
+	mustRunGit(t, work, "rm", "-rf", ".")
+	if err := os.WriteFile(filepath.Join(work, "LONELY.md"), []byte("lonely\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustRunGit(t, work, "add", "LONELY.md")
+	mustRunGit(t, work, "commit", "-m", "lonely")
+	mustRunGit(t, work, "push", "origin", "HEAD:refs/heads/lonely")
+
+	client, closeClient := newReaderClient(t, root, allowPDP{})
+	defer closeClient()
+	ctx := readContext(tenantID, repositoryID)
+
+	// The common ancestor of feature and main is main's head.
+	resp, err := client.GetMergeBase(t.Context(), &repositoryv1.GetMergeBaseRequest{Context: ctx, RefA: "refs/heads/feature", RefB: "refs/heads/main"})
+	if err != nil || !resp.GetFound() || resp.GetMergeBase() != head {
+		t.Fatalf("merge base = %#v, %v, want found=%t base=%s", resp, err, true, head)
+	}
+
+	// No common ancestor is an answered question, not an error.
+	resp, err = client.GetMergeBase(t.Context(), &repositoryv1.GetMergeBaseRequest{Context: ctx, RefA: "refs/heads/lonely", RefB: "refs/heads/main"})
+	if err != nil || resp.GetFound() || resp.GetMergeBase() != "" {
+		t.Fatalf("unrelated merge base = %#v, %v, want found=false", resp, err)
+	}
+
+	// An invalid ref is refused before Git starts, with the coarse refusal.
+	if _, err := client.GetMergeBase(t.Context(), &repositoryv1.GetMergeBaseRequest{Context: ctx, RefA: "refs/heads/main", RefB: "refs/heads/../escape"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("invalid ref error = %v", err)
+	}
+	// A ref that does not exist reads as unavailable, same as every other refusal.
+	if _, err := client.GetMergeBase(t.Context(), &repositoryv1.GetMergeBaseRequest{Context: ctx, RefA: "refs/heads/absent", RefB: "refs/heads/main"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("absent ref error = %v", err)
+	}
+}
+
+func TestRepositoryReaderGetMergeBaseWrongTenantNeverStartsGit(t *testing.T) {
+	root, _, repositoryID, head := seededRepository(t)
+	called := false
+	client, closeClient := newReaderClientWithConfig(t, Config{RepositoryRoot: root, PDP: allowPDP{}, Events: bus.NewInProcess(), command: func(context.Context, string, ...string) *exec.Cmd {
+		called = true
+		return exec.Command("false")
+	}})
+	defer closeClient()
+	_, err := client.GetMergeBase(t.Context(), &repositoryv1.GetMergeBaseRequest{Context: readContext("tenant-b", repositoryID), RefA: head, RefB: head})
+	if status.Code(err) != codes.NotFound || called {
+		t.Fatalf("wrong-tenant error=%v command-started=%t", err, called)
+	}
+}
+
 func TestRepositoryReaderWrongTenantSendsNoContent(t *testing.T) {
 	root, _, repositoryID, head := seededRepository(t)
 	called := false

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gitfrok/backend/modules/security/api"
@@ -36,6 +37,16 @@ type Service struct {
 	newID     func() string
 	now       func() time.Time
 	cursorKey [cursorKeyBytes]byte
+
+	// Attribution engine state (SPEC-0028): the event-fed, tenant-scoped
+	// merge-request projection, the materialized comparisons keyed per
+	// (tenant, merge request, head, merge base) triple, and the
+	// Repository/Git route merge bases resolve through. attrMu guards all
+	// three and nothing else.
+	attrMu        sync.Mutex
+	mergeRequests map[string]map[string]mergeRequestProjection
+	attributions  map[string]*attributionRecord
+	mergeBase     api.MergeBaseResolver
 }
 
 // Option configures the service for tests and composition.
@@ -64,7 +75,11 @@ func New(store Store, pdp policyapi.DecisionPoint, events bus.Bus, opts ...Optio
 	if pdp == nil {
 		panic("security: no PDP — every ingest and read needs a decision (invariant 2)")
 	}
-	s := &Service{store: store, pdp: pdp, bus: events, newID: ids.NewULID, now: time.Now}
+	s := &Service{
+		store: store, pdp: pdp, bus: events, newID: ids.NewULID, now: time.Now,
+		mergeRequests: map[string]map[string]mergeRequestProjection{},
+		attributions:  map[string]*attributionRecord{},
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -72,6 +87,9 @@ func New(store Store, pdp policyapi.DecisionPoint, events bus.Bus, opts ...Optio
 		if _, err := rand.Read(s.cursorKey[:]); err != nil {
 			panic("security: no entropy for cursor signing: " + err.Error())
 		}
+	}
+	if events != nil {
+		s.subscribeAttributionEvents(events)
 	}
 	return s
 }
@@ -618,4 +636,35 @@ func splitToken(token string) (payload, mac string, ok bool) {
 		}
 	}
 	return "", "", false
+}
+
+// signToken renders a payload with its HMAC signature: base64(payload) "."
+// base64(mac). Both cursor families share the one signing key.
+func signToken(payload, key []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(payload)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." +
+		base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// verifyToken returns the payload of a correctly signed token.
+func verifyToken(token string, key []byte) ([]byte, bool) {
+	payloadB64, macB64, ok := splitToken(token)
+	if !ok {
+		return nil, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	if err != nil {
+		return nil, false
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(macB64)
+	if err != nil {
+		return nil, false
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write(payload)
+	if !hmac.Equal(mac.Sum(nil), sig) {
+		return nil, false
+	}
+	return payload, true
 }

@@ -516,3 +516,44 @@ func (m *MemoryStore) SetRepositoryOwningTeam(_ context.Context, tenantID, repos
 	m.ownership[tenantID][repositoryID] = owningTeam
 	return nil
 }
+
+// ScanReportAt returns the reported set of the latest COMPLETE scan at the
+// repository's revision. The reported set is the scan's own accumulated
+// identities — nothing ever removes from it, so a later scan re-reporting an
+// identity leaves the earlier scan's set intact (SPEC-0028 attribution
+// rule). Each identity joins to the finding row recorded for it; a row
+// always exists, because ingestion creates one for every reported identity
+// and never deletes.
+func (m *MemoryStore) ScanReportAt(_ context.Context, tenantID, repositoryID, revision string) (ScanReport, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best *scanRecord
+	for _, rec := range m.scans {
+		if rec.state != scanComplete {
+			continue
+		}
+		p := rec.params
+		if p.TenantID != tenantID || p.RepositoryID != repositoryID || p.Revision != revision {
+			continue
+		}
+		if best == nil || p.Scan.StartedAt.After(best.params.Scan.StartedAt) ||
+			(p.Scan.StartedAt.Equal(best.params.Scan.StartedAt) && p.ScanID > best.params.ScanID) {
+			best = rec
+		}
+	}
+	if best == nil {
+		return ScanReport{}, false, nil
+	}
+	tenant := m.finds[tenantID]
+	identityIndex := m.byIdentity[tenantID]
+	out := []ReportedFinding{}
+	for identity := range best.prepared {
+		findingID, ok := identityIndex[identity]
+		if !ok {
+			continue
+		}
+		out = append(out, ReportedFinding{Identity: identity, Finding: tenant[findingID].finding})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Finding.ID < out[j].Finding.ID })
+	return ScanReport{ScanID: best.params.ScanID, Findings: out}, true, nil
+}

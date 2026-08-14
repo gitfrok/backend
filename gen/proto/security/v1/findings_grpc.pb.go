@@ -5,8 +5,9 @@
 // source: proto/security/v1/findings.proto
 
 // Internal Security/Findings surface for ingesting completed scan results,
-// reading findings, triaging findings, and reading dashboard summaries
-// (SPEC-0024, SPEC-0025, SPEC-0026, SPEC-0027).
+// reading findings, triaging findings, reading dashboard summaries, and
+// reading findings attributed to a merge request (SPEC-0024, SPEC-0025,
+// SPEC-0026, SPEC-0027, SPEC-0028).
 //
 // Security/Findings owns findings, their identities, scan records, provenance
 // blobs, triage records and their history, and idempotency keys. A finding's
@@ -34,12 +35,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	FindingsService_IngestScanResults_FullMethodName  = "/gitsaas.security.v1.FindingsService/IngestScanResults"
-	FindingsService_GetFinding_FullMethodName         = "/gitsaas.security.v1.FindingsService/GetFinding"
-	FindingsService_ListFindings_FullMethodName       = "/gitsaas.security.v1.FindingsService/ListFindings"
-	FindingsService_SetTriage_FullMethodName          = "/gitsaas.security.v1.FindingsService/SetTriage"
-	FindingsService_GetTriage_FullMethodName          = "/gitsaas.security.v1.FindingsService/GetTriage"
-	FindingsService_GetFindingsSummary_FullMethodName = "/gitsaas.security.v1.FindingsService/GetFindingsSummary"
+	FindingsService_IngestScanResults_FullMethodName        = "/gitsaas.security.v1.FindingsService/IngestScanResults"
+	FindingsService_GetFinding_FullMethodName               = "/gitsaas.security.v1.FindingsService/GetFinding"
+	FindingsService_ListFindings_FullMethodName             = "/gitsaas.security.v1.FindingsService/ListFindings"
+	FindingsService_SetTriage_FullMethodName                = "/gitsaas.security.v1.FindingsService/SetTriage"
+	FindingsService_GetTriage_FullMethodName                = "/gitsaas.security.v1.FindingsService/GetTriage"
+	FindingsService_GetFindingsSummary_FullMethodName       = "/gitsaas.security.v1.FindingsService/GetFindingsSummary"
+	FindingsService_ListMergeRequestFindings_FullMethodName = "/gitsaas.security.v1.FindingsService/ListMergeRequestFindings"
 )
 
 // FindingsServiceClient is the client API for FindingsService service.
@@ -77,6 +79,17 @@ type FindingsServiceClient interface {
 	// that exists only in a repository the caller may not read is absent,
 	// not zero (SPEC-0026 AC6, SPEC-0027 AC4).
 	GetFindingsSummary(ctx context.Context, in *GetFindingsSummaryRequest, opts ...grpc.CallOption) (*GetFindingsSummaryResponse, error)
+	// ListMergeRequestFindings pages the findings a merge request introduced,
+	// keyed by an opaque merge-request identifier (SPEC-0028). Attribution is
+	// the set difference between the scan at the MR's head revision and the
+	// scan at the merge base, compared by SPEC-0024 identity; it is derived
+	// state, recomputed when the head or base moves, and never a stored claim
+	// that outlives its inputs. If either side of the comparison is missing —
+	// an unscanned base, a failed or timed-out head scan — the response says
+	// attribution is UNAVAILABLE with a reason; it never degrades to an empty
+	// finding set (SPEC-0028 AC7). Tenant scoping, permission filtering and
+	// signed cursors are the same as ListFindings (SPEC-0025, SPEC-0027).
+	ListMergeRequestFindings(ctx context.Context, in *ListMergeRequestFindingsRequest, opts ...grpc.CallOption) (*ListMergeRequestFindingsResponse, error)
 }
 
 type findingsServiceClient struct {
@@ -147,6 +160,16 @@ func (c *findingsServiceClient) GetFindingsSummary(ctx context.Context, in *GetF
 	return out, nil
 }
 
+func (c *findingsServiceClient) ListMergeRequestFindings(ctx context.Context, in *ListMergeRequestFindingsRequest, opts ...grpc.CallOption) (*ListMergeRequestFindingsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMergeRequestFindingsResponse)
+	err := c.cc.Invoke(ctx, FindingsService_ListMergeRequestFindings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FindingsServiceServer is the server API for FindingsService service.
 // All implementations must embed UnimplementedFindingsServiceServer
 // for forward compatibility.
@@ -182,6 +205,17 @@ type FindingsServiceServer interface {
 	// that exists only in a repository the caller may not read is absent,
 	// not zero (SPEC-0026 AC6, SPEC-0027 AC4).
 	GetFindingsSummary(context.Context, *GetFindingsSummaryRequest) (*GetFindingsSummaryResponse, error)
+	// ListMergeRequestFindings pages the findings a merge request introduced,
+	// keyed by an opaque merge-request identifier (SPEC-0028). Attribution is
+	// the set difference between the scan at the MR's head revision and the
+	// scan at the merge base, compared by SPEC-0024 identity; it is derived
+	// state, recomputed when the head or base moves, and never a stored claim
+	// that outlives its inputs. If either side of the comparison is missing —
+	// an unscanned base, a failed or timed-out head scan — the response says
+	// attribution is UNAVAILABLE with a reason; it never degrades to an empty
+	// finding set (SPEC-0028 AC7). Tenant scoping, permission filtering and
+	// signed cursors are the same as ListFindings (SPEC-0025, SPEC-0027).
+	ListMergeRequestFindings(context.Context, *ListMergeRequestFindingsRequest) (*ListMergeRequestFindingsResponse, error)
 	mustEmbedUnimplementedFindingsServiceServer()
 }
 
@@ -209,6 +243,9 @@ func (UnimplementedFindingsServiceServer) GetTriage(context.Context, *GetTriageR
 }
 func (UnimplementedFindingsServiceServer) GetFindingsSummary(context.Context, *GetFindingsSummaryRequest) (*GetFindingsSummaryResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetFindingsSummary not implemented")
+}
+func (UnimplementedFindingsServiceServer) ListMergeRequestFindings(context.Context, *ListMergeRequestFindingsRequest) (*ListMergeRequestFindingsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListMergeRequestFindings not implemented")
 }
 func (UnimplementedFindingsServiceServer) mustEmbedUnimplementedFindingsServiceServer() {}
 func (UnimplementedFindingsServiceServer) testEmbeddedByValue()                         {}
@@ -339,6 +376,24 @@ func _FindingsService_GetFindingsSummary_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FindingsService_ListMergeRequestFindings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMergeRequestFindingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FindingsServiceServer).ListMergeRequestFindings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FindingsService_ListMergeRequestFindings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FindingsServiceServer).ListMergeRequestFindings(ctx, req.(*ListMergeRequestFindingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // FindingsService_ServiceDesc is the grpc.ServiceDesc for FindingsService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -369,6 +424,10 @@ var FindingsService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetFindingsSummary",
 			Handler:    _FindingsService_GetFindingsSummary_Handler,
+		},
+		{
+			MethodName: "ListMergeRequestFindings",
+			Handler:    _FindingsService_ListMergeRequestFindings_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

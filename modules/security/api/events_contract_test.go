@@ -35,6 +35,7 @@ var eventPairs = []struct {
 	{"FindingOpened", api.FindingOpened{}, (*securityeventsv1.FindingOpened)(nil)},
 	{"FindingResolved", api.FindingResolved{}, (*securityeventsv1.FindingResolved)(nil)},
 	{"FindingTriaged", api.FindingTriaged{}, (*securityeventsv1.FindingTriaged)(nil)},
+	{"FindingsAttributed", api.FindingsAttributed{}, (*securityeventsv1.FindingsAttributed)(nil)},
 }
 
 // TestEventNameIsTheProtoFullName: the bus routing key and the Redpanda topic

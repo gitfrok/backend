@@ -61,6 +61,9 @@ type Store interface {
 	// OpenForTarget returns the open merge requests in one tenant and repository
 	// whose target ref is targetRef.
 	OpenForTarget(ctx context.Context, tenantID, repositoryID, targetRef string) ([]api.MergeRequest, error)
+	// OpenForSource returns the open merge requests in one tenant and repository
+	// whose source ref is sourceRef.
+	OpenForSource(ctx context.Context, tenantID, repositoryID, sourceRef string) ([]api.MergeRequest, error)
 	// SaveRefRevision records where Repository/Git last announced a ref to be.
 	SaveRefRevision(ctx context.Context, tenantID, repositoryID, ref, revision string) error
 	// RefRevision returns the last announced revision for a ref, empty when this
@@ -125,6 +128,39 @@ func (s *Service) onRefUpdated(ctx context.Context, event repoapi.RefUpdated) er
 		if err := s.store.Save(ctx, mr); err != nil {
 			return err
 		}
+		// The merge base can move when the target moves, so attribution
+		// consumers must recompute (SPEC-0028): the event names both sides of
+		// what can move, repeating the head a retarget did not change.
+		if err := s.bus.Publish(ctx, api.MergeRequestUpdated{
+			EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
+			ActorID: event.ActorID, HeadRevision: mr.HeadRevision,
+			SourceRef: mr.SourceRef, TargetRef: mr.TargetRef, OccurredAt: s.now().UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	// A push to a source ref advances the head of every open merge request
+	// reviewing it; attribution consumers recompute against the new head
+	// (SPEC-0028).
+	sourced, err := s.store.OpenForSource(ctx, event.TenantID, event.RepoID, event.Ref)
+	if err != nil {
+		return err
+	}
+	for _, mr := range sourced {
+		if mr.HeadRevision == event.NewSha {
+			continue
+		}
+		mr.HeadRevision = event.NewSha
+		if err := s.store.Save(ctx, mr); err != nil {
+			return err
+		}
+		if err := s.bus.Publish(ctx, api.MergeRequestUpdated{
+			EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
+			ActorID: event.ActorID, HeadRevision: mr.HeadRevision,
+			SourceRef: mr.SourceRef, TargetRef: mr.TargetRef, OccurredAt: s.now().UTC(),
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -174,6 +210,16 @@ func (s *Service) Open(ctx context.Context, req api.OpenRequest) (api.MergeReque
 	if err := s.bus.Publish(ctx, api.MergeRequestOpened{
 		EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
 		SourceRef: mr.SourceRef, TargetRef: mr.TargetRef, CreatorID: mr.CreatorID, OccurredAt: now,
+	}); err != nil {
+		return api.MergeRequest{}, err
+	}
+	// MergeRequestOpened carries no head revision, and attribution consumers
+	// need the (head, target) pair the moment the request exists: the update
+	// event follows the open event on the same path (SPEC-0028).
+	if err := s.bus.Publish(ctx, api.MergeRequestUpdated{
+		EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
+		ActorID: mr.CreatorID, HeadRevision: mr.HeadRevision,
+		SourceRef: mr.SourceRef, TargetRef: mr.TargetRef, OccurredAt: now,
 	}); err != nil {
 		return api.MergeRequest{}, err
 	}
@@ -506,6 +552,18 @@ func (m *memoryStore) OpenForTarget(_ context.Context, tenantID, repositoryID, t
 	var out []api.MergeRequest
 	for _, mr := range m.requests {
 		if mr.State == api.StateOpen && mr.TenantID == tenantID && mr.RepositoryID == repositoryID && mr.TargetRef == targetRef {
+			out = append(out, mr)
+		}
+	}
+	return out, nil
+}
+
+func (m *memoryStore) OpenForSource(_ context.Context, tenantID, repositoryID, sourceRef string) ([]api.MergeRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []api.MergeRequest
+	for _, mr := range m.requests {
+		if mr.State == api.StateOpen && mr.TenantID == tenantID && mr.RepositoryID == repositoryID && mr.SourceRef == sourceRef {
 			out = append(out, mr)
 		}
 	}

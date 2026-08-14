@@ -137,6 +137,24 @@ type SetTriageResult struct {
 	Mismatch bool
 }
 
+// ReportedFinding is one finding of a scan's reported set: the SPEC-0024
+// identity the scan reported plus the finding row recorded for it. The
+// identity is the attribution join key (SPEC-0028); the row carries the
+// rendering facts (severity, location, lifecycle) as they stand now.
+type ReportedFinding struct {
+	Identity string
+	Finding  api.Finding
+}
+
+// ScanReport is the reported set of one completed scan at a revision:
+// everything the scan reported, keyed by identity. The set is a durable
+// server fact of the scan — a later scan re-reporting an identity never
+// rewrites an earlier scan's reported set (SPEC-0028 attribution rule).
+type ScanReport struct {
+	ScanID   string
+	Findings []ReportedFinding
+}
+
 // Store persists scans, findings, and triage records. Implementations: the
 // in-memory store for dev and tests, and the Postgres adapter under
 // adapters/postgres. Both are tenant-scoped; the Postgres one additionally
@@ -177,4 +195,9 @@ type Store interface {
 	// lives here because Security/Findings owns the attribution it derives
 	// (SPEC-0026 data owned), never by reading another context's tables.
 	SetRepositoryOwningTeam(ctx context.Context, tenantID, repositoryID, owningTeam string) error
+	// ScanReportAt returns the reported set of the latest COMPLETE scan the
+	// tenant ran at the repository's revision. Found is false when no
+	// completed scan exists at that revision: attribution renders that as
+	// UNAVAILABLE, never as an empty reported set (SPEC-0028 AC7).
+	ScanReportAt(ctx context.Context, tenantID, repositoryID, revision string) (ScanReport, bool, error)
 }

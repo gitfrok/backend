@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RepositoryReader_GetTree_FullMethodName = "/gitsaas.repository.v1.RepositoryReader/GetTree"
-	RepositoryReader_GetFile_FullMethodName = "/gitsaas.repository.v1.RepositoryReader/GetFile"
-	RepositoryReader_GetDiff_FullMethodName = "/gitsaas.repository.v1.RepositoryReader/GetDiff"
+	RepositoryReader_GetTree_FullMethodName      = "/gitsaas.repository.v1.RepositoryReader/GetTree"
+	RepositoryReader_GetFile_FullMethodName      = "/gitsaas.repository.v1.RepositoryReader/GetFile"
+	RepositoryReader_GetDiff_FullMethodName      = "/gitsaas.repository.v1.RepositoryReader/GetDiff"
+	RepositoryReader_GetMergeBase_FullMethodName = "/gitsaas.repository.v1.RepositoryReader/GetMergeBase"
 )
 
 // RepositoryReaderClient is the client API for RepositoryReader service.
@@ -33,6 +34,12 @@ type RepositoryReaderClient interface {
 	GetTree(ctx context.Context, in *GetTreeRequest, opts ...grpc.CallOption) (*GetTreeResponse, error)
 	GetFile(ctx context.Context, in *GetFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileChunk], error)
 	GetDiff(ctx context.Context, in *GetDiffRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DiffChunk], error)
+	// GetMergeBase computes the merge base of two refs or commits. Additive for
+	// SPEC-0028: introduction attribution is the set difference between the
+	// scan at an MR's head revision and the scan at the merge base of its
+	// target branch, and nothing on this surface computed a merge base before.
+	// Authorization stays server-side exactly as for the other reads.
+	GetMergeBase(ctx context.Context, in *GetMergeBaseRequest, opts ...grpc.CallOption) (*GetMergeBaseResponse, error)
 }
 
 type repositoryReaderClient struct {
@@ -91,6 +98,16 @@ func (c *repositoryReaderClient) GetDiff(ctx context.Context, in *GetDiffRequest
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RepositoryReader_GetDiffClient = grpc.ServerStreamingClient[DiffChunk]
 
+func (c *repositoryReaderClient) GetMergeBase(ctx context.Context, in *GetMergeBaseRequest, opts ...grpc.CallOption) (*GetMergeBaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetMergeBaseResponse)
+	err := c.cc.Invoke(ctx, RepositoryReader_GetMergeBase_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RepositoryReaderServer is the server API for RepositoryReader service.
 // All implementations must embed UnimplementedRepositoryReaderServer
 // for forward compatibility.
@@ -100,6 +117,12 @@ type RepositoryReaderServer interface {
 	GetTree(context.Context, *GetTreeRequest) (*GetTreeResponse, error)
 	GetFile(*GetFileRequest, grpc.ServerStreamingServer[FileChunk]) error
 	GetDiff(*GetDiffRequest, grpc.ServerStreamingServer[DiffChunk]) error
+	// GetMergeBase computes the merge base of two refs or commits. Additive for
+	// SPEC-0028: introduction attribution is the set difference between the
+	// scan at an MR's head revision and the scan at the merge base of its
+	// target branch, and nothing on this surface computed a merge base before.
+	// Authorization stays server-side exactly as for the other reads.
+	GetMergeBase(context.Context, *GetMergeBaseRequest) (*GetMergeBaseResponse, error)
 	mustEmbedUnimplementedRepositoryReaderServer()
 }
 
@@ -118,6 +141,9 @@ func (UnimplementedRepositoryReaderServer) GetFile(*GetFileRequest, grpc.ServerS
 }
 func (UnimplementedRepositoryReaderServer) GetDiff(*GetDiffRequest, grpc.ServerStreamingServer[DiffChunk]) error {
 	return status.Errorf(codes.Unimplemented, "method GetDiff not implemented")
+}
+func (UnimplementedRepositoryReaderServer) GetMergeBase(context.Context, *GetMergeBaseRequest) (*GetMergeBaseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetMergeBase not implemented")
 }
 func (UnimplementedRepositoryReaderServer) mustEmbedUnimplementedRepositoryReaderServer() {}
 func (UnimplementedRepositoryReaderServer) testEmbeddedByValue()                          {}
@@ -180,6 +206,24 @@ func _RepositoryReader_GetDiff_Handler(srv interface{}, stream grpc.ServerStream
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RepositoryReader_GetDiffServer = grpc.ServerStreamingServer[DiffChunk]
 
+func _RepositoryReader_GetMergeBase_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMergeBaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryReaderServer).GetMergeBase(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepositoryReader_GetMergeBase_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryReaderServer).GetMergeBase(ctx, req.(*GetMergeBaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RepositoryReader_ServiceDesc is the grpc.ServiceDesc for RepositoryReader service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -190,6 +234,10 @@ var RepositoryReader_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTree",
 			Handler:    _RepositoryReader_GetTree_Handler,
+		},
+		{
+			MethodName: "GetMergeBase",
+			Handler:    _RepositoryReader_GetMergeBase_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

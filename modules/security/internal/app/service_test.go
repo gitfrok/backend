@@ -37,9 +37,11 @@ type harness struct {
 	svc      *app.Service
 	pdp      *fakePDP
 	store    *app.MemoryStore
+	bus      bus.Bus
 	opened   []api.FindingOpened
 	resolved []api.FindingResolved
 	scans    []api.ScanIngested
+	attributed []api.FindingsAttributed
 	audits   []platformaudit.FindingsScanIngested
 }
 
@@ -47,7 +49,7 @@ func newHarness(allow bool) *harness {
 	pdp := &fakePDP{allow: allow}
 	store := app.NewMemoryStore()
 	events := bus.NewInProcess()
-	h := &harness{pdp: pdp, store: store}
+	h := &harness{pdp: pdp, store: store, bus: events}
 	events.Subscribe(api.EventFindingOpened, func(_ context.Context, e bus.Event) error {
 		h.opened = append(h.opened, e.(api.FindingOpened))
 		return nil
@@ -58,6 +60,10 @@ func newHarness(allow bool) *harness {
 	})
 	events.Subscribe(api.EventScanIngested, func(_ context.Context, e bus.Event) error {
 		h.scans = append(h.scans, e.(api.ScanIngested))
+		return nil
+	})
+	events.Subscribe(api.EventFindingsAttributed, func(_ context.Context, e bus.Event) error {
+		h.attributed = append(h.attributed, e.(api.FindingsAttributed))
 		return nil
 	})
 	events.Subscribe(platformaudit.EventAudit, func(_ context.Context, e bus.Event) error {
