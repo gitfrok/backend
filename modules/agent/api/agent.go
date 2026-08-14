@@ -70,6 +70,18 @@ type EnrolmentRefused struct{ Reason RefusalReason }
 
 func (e *EnrolmentRefused) Error() string { return "enrolment refused" }
 
+// PlacementGate is the residency enforcement port the enrolment path consults before a
+// data plane joins its tenant's fleet (T-0033, SPEC-0040 AC2). It is declared here in the
+// Agent context's own terms so the module graph stays acyclic (invariant 14): the
+// composition root adapts the Residency context onto it, and this context never imports
+// it. Any error refuses the placement — an explicit residency refusal and an unreachable
+// gate are one coarse DENIED enrolment (SPEC-0001), and the gate observes the placement
+// fact either way when it admits. nil means no gate is attached: placement is
+// unconstrained, which is exactly an undeclared tenant's semantics.
+type PlacementGate interface {
+	CheckPlacement(ctx context.Context, tenantID, dataPlaneID, cloud, region string) error
+}
+
 // ErrNotFound reports that no record exists for the caller's tenant. Cross-tenant reads
 // yield the same shape (SPEC-0038 AC9, SPEC-0001): a caller cannot distinguish another
 // tenant's record from a nonexistent one.

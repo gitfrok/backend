@@ -35,6 +35,11 @@ func NewPostgresTrail(pool *db.Pool) api.TrailStore { return auditpg.New(pool) }
 // trail instead.
 func NewMemoryTrail() api.TrailStore { return memory.New() }
 
+// EvidenceService is the composed evidence pack service, aliased so cmd/ can chain its
+// builders (WithResidencyWindow) without naming a package under internal/ (ADR-0025).
+// It implements api.PackService.
+type EvidenceService = app.Service
+
 // NewEvidenceService assembles the evidence pack surface (T-0026, SPEC-0031,
 // SPEC-0032): generation and retrieval are PDP decisions with server-derived
 // context, themselves audited, and sections assemble through contract
@@ -45,7 +50,7 @@ func NewMemoryTrail() api.TrailStore { return memory.New() }
 // evidence.pack.read decision; nil fails every auditor read closed.
 func NewEvidenceService(pdp policyapi.DecisionPoint, events bus.Bus, trail api.TrailStore,
 	attested api.AttestedHistorySource, access api.AccessChangesSource,
-	grants identityapi.AuditorGrants) api.PackService {
+	grants identityapi.AuditorGrants) *EvidenceService {
 	return app.New(pdp, events, trail, attested, access, grants)
 }
 

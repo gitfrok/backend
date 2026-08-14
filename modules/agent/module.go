@@ -46,6 +46,21 @@ func NewDevCA(commonName string, now func() time.Time) (*DevCA, error) {
 	return pki.NewDevCA(commonName, now)
 }
 
+// AttachPlacementGate wires the residency placement gate the enrolment path consults
+// before a data plane joins its tenant's fleet (T-0033, SPEC-0040 AC2). Post-construction
+// because the Residency context is composed after the agent surface; the gate is a port
+// in this context's own terms, so the module graph stays acyclic (invariant 14). It
+// reports false when the surface has no gate sink to attach to.
+func AttachPlacementGate(svc *Service, gate api.PlacementGate) bool {
+	type gateSink interface{ SetPlacementGate(api.PlacementGate) }
+	sink, ok := any(svc).(gateSink)
+	if !ok {
+		return false
+	}
+	sink.SetPlacementGate(gate)
+	return true
+}
+
 // NewGRPCServer adapts the Gateway port to the AgentGateway contract. poll bounds how late
 // a lapsed certificate can go unnoticed; one second is ample for hour-long certificates.
 func NewGRPCServer(gw api.Gateway, poll time.Duration, now func() time.Time, logf func(format string, args ...any)) *GRPCServer {

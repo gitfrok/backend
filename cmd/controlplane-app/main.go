@@ -21,7 +21,11 @@ import (
 	"github.com/gitfrok/backend/cmd/internal/health"
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
 	"github.com/gitfrok/backend/modules/agent"
+	"github.com/gitfrok/backend/modules/audit"
+	auditapi "github.com/gitfrok/backend/modules/audit/api"
 	"github.com/gitfrok/backend/modules/policy"
+	"github.com/gitfrok/backend/modules/residency"
+	residencyapi "github.com/gitfrok/backend/modules/residency/api"
 	"github.com/gitfrok/backend/platform/auditsink"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/db"
@@ -99,6 +103,33 @@ func startAgentDoor(cfg agentConfig) (*agentDoor, error) {
 	}
 
 	svc := agent.New(pdp, b, ca, cfg.enrolment, logf)
+
+	// Residency composition (T-0033, SPEC-0040): the witnessed placement facts the
+	// evidence pack's residency section cites live on the tenant's audit trail. With
+	// GITFROK_DATABASE_URL the residency witness writes the Postgres trail the audit
+	// sink above feeds; without it an in-memory trail fed from the same bus. The gate
+	// is attached post-construction (the Attach* pattern): a surface this binary
+	// cannot attach it to fails the rollout rather than admitting placements
+	// unwitnessed.
+	var trail auditapi.TrailStore
+	if pool != nil {
+		trail = audit.NewPostgresTrail(pool)
+	} else {
+		trail = audit.NewMemoryTrail()
+		auditsink.NewLogSink(trail).Subscribe(b)
+	}
+	residencySvc := residency.New(pdp, residencyTrailWitness{trail}, residencyapi.Config{
+		DetectionWindow:   residencyDuration(os.Getenv, residencyDetectionWindowEnv),
+		MaxReportInterval: residencyDuration(os.Getenv, residencyReportIntervalEnv),
+		Now:               time.Now,
+	}, logf)
+	if !agent.AttachPlacementGate(svc, residencyPlacementGate{svc: residencySvc}) {
+		if pool != nil {
+			pool.Close()
+		}
+		return nil, fmt.Errorf("agent surface has no placement gate sink: residency cannot be composed")
+	}
+
 	gateway := agent.NewGRPCServer(svc, time.Second, time.Now, logf)
 
 	serverCert, err := ca.IssueServer("agent-gateway", cfg.serverNames, time.Now(), 24*time.Hour)

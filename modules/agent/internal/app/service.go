@@ -72,9 +72,22 @@ type Service struct {
 	registry RegistryStore
 	cfg      api.Config
 	logf     func(format string, args ...any)
+	// gate is the residency enforcement port consulted at enrolment (T-0033,
+	// SPEC-0040 AC2); nil until the composition root attaches one. Reads and
+	// writes go through mu: attachment is post-construction.
+	gate api.PlacementGate
 
 	mu      sync.Mutex
 	streams map[api.Identity]*streamSession
+}
+
+// SetPlacementGate attaches the residency gate post-construction (the Attach* pattern):
+// the Residency context is composed after the agent surface, and the module graph stays
+// acyclic because the gate is a port in this context's own terms (invariant 14).
+func (s *Service) SetPlacementGate(g api.PlacementGate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gate = g
 }
 
 // New wires the service. A nil PDP, bus or issuer is refused: an agent surface without a
@@ -252,8 +265,33 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 		return api.Enrolment{}, &api.EnrolmentRefused{Reason: reason}
 	}
 
-	// Spend first. From this line on the token is spent whatever happens next.
 	dataPlaneID := ids.NewULID()
+
+	// Residency gate BEFORE token spend: a placement refused at the declared boundary
+	// costs the tenant nothing — the token stays presentable so the operator can retry
+	// from an allowed placement (T-0033, SPEC-0040 AC2). The gate is consulted under the
+	// token's own tenancy scope, and every gate error is one coarse DENIED enrolment: an
+	// explicit residency refusal and an unreachable gate are indistinguishable from
+	// outside (SPEC-0001). No gate attached means the tenant has declared no residency
+	// constraints — placement is admitted unwitnessed.
+	s.mu.Lock()
+	gate := s.gate
+	s.mu.Unlock()
+	if gate != nil {
+		gctx := tenancy.WithTenant(ctx, tenancy.ID(tok.TenantID))
+		if err := gate.CheckPlacement(gctx, tok.TenantID, dataPlaneID, req.Cloud, req.Region); err != nil {
+			if perr := s.publish(ctx, platformaudit.AgentEnrolment{
+				TenantID: tok.TenantID, DataPlaneID: dataPlaneID, TokenID: tok.ID,
+				Reason: "residency_placement_refused", Outcome: "DENIED", OccurredAt: now,
+			}); perr != nil {
+				return api.Enrolment{}, perr
+			}
+			s.logf("agent: enrolment refused: residency placement")
+			return api.Enrolment{}, &api.EnrolmentRefused{Reason: api.RefusalDenied}
+		}
+	}
+
+	// Spend first. From this line on the token is spent whatever happens next.
 	if _, claimed, err := s.tokens.ClaimToken(ctx, hash, dataPlaneID, now); err != nil {
 		return api.Enrolment{}, err
 	} else if !claimed {

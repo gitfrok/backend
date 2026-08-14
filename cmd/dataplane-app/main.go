@@ -362,7 +362,11 @@ func main() {
 	// The grants surface is also the decision-time facts source for auditor
 	// pack reads (SPEC-0033 AC7): the evidence service reads grant validity
 	// fresh from it on every evidence.pack.read decision an auditor makes.
-	dp.evidence = audit.NewEvidenceService(dp.policy, dp.bus, trail, attested, audit.NewAccessChangesSource(grants), grants)
+	// The residency section's silence bound is per-environment configuration
+	// (T-0033, SPEC-0040 AC5); unset reads zero and renders every interval as
+	// a gap rather than reading silence as compliance.
+	dp.evidence = audit.NewEvidenceService(dp.policy, dp.bus, trail, attested, audit.NewAccessChangesSource(grants), grants).
+		WithResidencyWindow(residencyReportInterval(os.Getenv))
 
 	// OIDC login, when this environment has an identity provider. Built before the
 	// doors open so a misconfigured one fails the rollout rather than the first login.
