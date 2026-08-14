@@ -73,11 +73,11 @@ func parseSource(raw string) (source, bool) {
 	path := raw
 	if !strings.Contains(raw, "://") {
 		// scp-like ssh shorthand: [user@]host:group/project.
-		colon := strings.Index(raw, ":")
-		if colon < 0 {
+		_, rest, ok := strings.Cut(raw, ":")
+		if !ok {
 			return source{}, false
 		}
-		path = raw[colon+1:]
+		path = rest
 	} else {
 		u, err := url.Parse(raw)
 		if err != nil || u.Host == "" {

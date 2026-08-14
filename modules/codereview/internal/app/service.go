@@ -7,6 +7,7 @@ package app
 import (
 	"context"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"sync"
@@ -457,9 +458,7 @@ func (s *Service) mergeGateContext(ctx context.Context, mr api.MergeRequest, act
 	if err != nil {
 		return base
 	}
-	for key, value := range facts.Context() {
-		base[key] = value
-	}
+	maps.Copy(base, facts.Context())
 	return base
 }
 

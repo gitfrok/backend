@@ -1,11 +1,13 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -456,8 +458,8 @@ func (s *ImportService) ListImportedHistory(ctx context.Context, req api.ListImp
 	// The page is keyed on the merge request ID rather than on an offset: an
 	// import is append-only, so a key that names the last record read cannot
 	// skip or repeat one the way an offset into a growing set can.
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].MergeRequestID < records[j].MergeRequestID
+	slices.SortFunc(records, func(a, b api.ImportedMergeRequest) int {
+		return cmp.Compare(a.MergeRequestID, b.MergeRequestID)
 	})
 	if req.PageToken != "" {
 		records = after(records, req.PageToken)
@@ -467,9 +469,7 @@ func (s *ImportService) ListImportedHistory(ctx context.Context, req api.ListImp
 	if size <= 0 {
 		size = api.DefaultImportedHistoryPageSize
 	}
-	if size > api.MaxImportedHistoryPageSize {
-		size = api.MaxImportedHistoryPageSize
-	}
+	size = min(size, api.MaxImportedHistoryPageSize)
 	page := api.ImportedHistoryPage{}
 	if len(records) > size {
 		page.MergeRequests = records[:size]
@@ -521,7 +521,7 @@ func manifestDigest(imp api.Import, setDigest string) string {
 	for k := range imp.RecordCounts {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	for _, k := range keys {
 		fmt.Fprintf(h, "%d:%s%d", len(k), k, imp.RecordCounts[k])
 	}
@@ -542,8 +542,8 @@ func manifestDigest(imp api.Import, setDigest string) string {
 // is the source's own attestation of the fetched object, so altering it is
 // itself a mutation the manifest must catch.
 func recordsDigest(records []api.ImportedMergeRequest) string {
-	sorted := append([]api.ImportedMergeRequest(nil), records...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].MergeRequestID < sorted[j].MergeRequestID })
+	sorted := slices.Clone(records)
+	slices.SortFunc(sorted, func(a, b api.ImportedMergeRequest) int { return cmp.Compare(a.MergeRequestID, b.MergeRequestID) })
 
 	h := sha256.New()
 	write := func(parts ...string) {
@@ -563,13 +563,13 @@ func recordsDigest(records []api.ImportedMergeRequest) string {
 			record.Description, record.State, record.DeclaredCreator)
 		writeProvenance(record.Provenance)
 
-		threads := append([]api.ImportedThread(nil), record.Threads...)
-		sort.Slice(threads, func(i, j int) bool { return threads[i].ThreadID < threads[j].ThreadID })
+		threads := slices.Clone(record.Threads)
+		slices.SortFunc(threads, func(a, b api.ImportedThread) int { return cmp.Compare(a.ThreadID, b.ThreadID) })
 		for _, thread := range threads {
 			write(thread.ThreadID, thread.MergeRequestID, thread.Path, thread.Anchor)
 			writeProvenance(thread.Provenance)
-			comments := append([]api.ImportedComment(nil), thread.Comments...)
-			sort.Slice(comments, func(i, j int) bool { return comments[i].CommentID < comments[j].CommentID })
+			comments := slices.Clone(thread.Comments)
+			slices.SortFunc(comments, func(a, b api.ImportedComment) int { return cmp.Compare(a.CommentID, b.CommentID) })
 			for _, comment := range comments {
 				write(comment.CommentID, comment.DeclaredActor, comment.Body)
 				fmt.Fprintf(h, "%d", comment.DeclaredAt.UTC().UnixNano())
@@ -577,8 +577,8 @@ func recordsDigest(records []api.ImportedMergeRequest) string {
 			}
 		}
 
-		approvals := append([]api.ImportedApproval(nil), record.Approvals...)
-		sort.Slice(approvals, func(i, j int) bool { return approvals[i].ApprovalID < approvals[j].ApprovalID })
+		approvals := slices.Clone(record.Approvals)
+		slices.SortFunc(approvals, func(a, b api.ImportedApproval) int { return cmp.Compare(a.ApprovalID, b.ApprovalID) })
 		for _, approval := range approvals {
 			write(approval.ApprovalID, approval.MergeRequestID, approval.DeclaredActor)
 			fmt.Fprintf(h, "%d", approval.DeclaredAt.UTC().UnixNano())
@@ -785,6 +785,6 @@ func (m *memoryRecordStore) ListMappings(_ context.Context, importID string) ([]
 	for _, mapping := range m.mappings[importID] {
 		out = append(out, mapping)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].MappingID < out[j].MappingID })
+	slices.SortFunc(out, func(a, b api.DeclaredActorMapping) int { return cmp.Compare(a.MappingID, b.MappingID) })
 	return out, nil
 }
