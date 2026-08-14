@@ -81,6 +81,34 @@ type Service struct {
 	// one audit record and publishes exactly one event, whatever read path
 	// observed it first in this process.
 	expiryMu sync.Mutex
+
+	// issueMu guards issueKeys: the in-process reservation that serializes
+	// concurrent duplicates of one issue request, the same shape the
+	// evidence pack idempotency uses (SPEC-0032 AC1, mirrored here for
+	// SPEC-0033 AC4).
+	issueMu   sync.Mutex
+	issueKeys map[string]*issueReservation
+}
+
+// issueReservation is one issue request's in-flight or recorded outcome. The
+// first writer reserves it under issueMu before the durable side effects;
+// concurrent duplicates block on done and replay the first writer's outcome
+// — never a second decision, a second audit record or a second grant.
+// Unlike the evidence pack reservation, a completed one is released when its
+// last waiter has observed the outcome: the DURABLE replay record is the
+// store row plus its witnessed ISSUED transition, not an in-process entry
+// that would grow uncapped (the map exists only to serialize concurrent
+// duplicates).
+type issueReservation struct {
+	done chan struct{}
+	// grant is final once done is closed with no err.
+	grant api.AuditorGrant
+	// err is set when the attempt rolled back (denied decision, failed
+	// insert or failed audit append): waiters see the same coarse failure.
+	err error
+	// waiters counts requests still holding the reservation, exactly as the
+	// evidence pack reservation counts them.
+	waiters int
 }
 
 // New assembles the service on a decision point, an event bus, the witness
@@ -99,11 +127,12 @@ func New(pdp policyapi.DecisionPoint, events bus.Bus, trail api.GrantWitness, st
 		panic("identity grants: no store")
 	}
 	return &Service{
-		pdp:    pdp,
-		events: events,
-		trail:  trail,
-		store:  store,
-		now:    func() time.Time { return time.Now().UTC() },
+		pdp:       pdp,
+		events:    events,
+		trail:     trail,
+		store:     store,
+		now:       func() time.Time { return time.Now().UTC() },
+		issueKeys: map[string]*issueReservation{},
 	}
 }
 
@@ -116,13 +145,63 @@ func (s *Service) IssueGrant(ctx context.Context, c api.GrantContext, req api.Gr
 
 	// Idempotent replay: the same tenant and request ID return the grant the
 	// first request created — no second decision, no second audit record.
+	// Only a grant whose ISSUED transition was witnessed replays: a store
+	// row from an attempt that rolled back before auditing is not an issued
+	// grant, and the chain must never state otherwise (SPEC-0033 AC4).
 	if c.RequestID != "" {
 		if existing, ok, err := s.store.FindByRequest(ctx, tenant, c.RequestID); err == nil && ok {
-			existing.State = domain.DeriveState(existing, s.now())
-			return existing, nil
+			if issued, tErr := s.store.TransitionRecorded(ctx, tenant, existing.GrantID, api.GrantIssued); tErr == nil && issued {
+				existing.State = domain.DeriveState(existing, s.now())
+				return existing, nil
+			}
 		}
+
+		// Concurrent duplicates serialize on one reservation: the key is
+		// reserved under the mutex before any side effect, waiters replay the
+		// first writer's outcome, and the reservation leaves the map once
+		// its last holder has observed the outcome.
+		idKey := tenant + "|" + c.RequestID
+		s.issueMu.Lock()
+		if res, ok := s.issueKeys[idKey]; ok {
+			res.waiters++
+			s.issueMu.Unlock()
+			<-res.done
+			grant, resErr := res.grant, res.err
+			s.releaseIssue(idKey, res)
+			return grant, resErr
+		}
+		res := &issueReservation{done: make(chan struct{}), waiters: 1}
+		s.issueKeys[idKey] = res
+		s.issueMu.Unlock()
+
+		grant, issueErr := s.issueAttempt(ctx, tenant, principal, c, req)
+		s.issueMu.Lock()
+		if issueErr != nil {
+			res.err = issueErr
+		} else {
+			res.grant = grant
+		}
+		s.releaseIssueLocked(idKey, res)
+		close(res.done)
+		s.issueMu.Unlock()
+		return grant, issueErr
 	}
 
+	// A request without an ID cannot replay, only issue.
+	return s.issueAttempt(ctx, tenant, principal, c, req)
+}
+
+// issueAttempt performs one grant issuance. Its ordering is the M9 fix: the
+// grant is stored BEFORE its immutable audit record is appended, so the
+// chain never states that a grant which does not exist was issued — a failed
+// insert leaves no issued record. The store row is the reservation of the
+// request-ID slot; when the audit append fails afterwards, the row stays
+// (the store carries no delete path, by design) but it is NOT issued — no
+// audit record, no ISSUED transition, no event — and a retry with the same
+// request ID completes it rather than issuing a second grant. An unaudited
+// grant is still a worse failure than a refused one: the caller gets the
+// coarse refusal either way.
+func (s *Service) issueAttempt(ctx context.Context, tenant string, principal api.Principal, c api.GrantContext, req api.GrantIssue) (api.AuditorGrant, error) {
 	now := s.now()
 	if err := domain.ValidateIssue(req, now); err != nil {
 		return api.AuditorGrant{}, api.ErrGrantUnavailable
@@ -158,10 +237,32 @@ func (s *Service) IssueGrant(ctx context.Context, c api.GrantContext, req api.Gr
 		State:              api.GrantActive,
 	}
 
-	// Issuance appends exactly one immutable audit record naming the
-	// granting admin and the auditor principal (SPEC-0033 AC4), correlated
-	// to the decision. If the witness cannot take it, the grant is not
-	// created: an unrecorded grant is a worse failure than a refused one.
+	// STORE FIRST: the grant exists durably under its request-ID slot before
+	// the immutable record claiming its issuance is appended.
+	if err := s.store.Insert(ctx, grant, c.RequestID); err != nil {
+		if c.RequestID != "" {
+			if existing, ok, findErr := s.store.FindByRequest(ctx, tenant, c.RequestID); findErr == nil && ok {
+				if issued, tErr := s.store.TransitionRecorded(ctx, tenant, existing.GrantID, api.GrantIssued); tErr == nil && issued {
+					// Another attempt completed the issuance: replay it.
+					existing.State = domain.DeriveState(existing, s.now())
+					return existing, nil
+				}
+				// A rolled-back attempt's leftover row holds the slot: this
+				// attempt completes it under the same grant identity.
+				grant = existing
+				grant.State = api.GrantActive
+			} else {
+				return api.AuditorGrant{}, api.ErrGrantUnavailable
+			}
+		} else {
+			return api.AuditorGrant{}, api.ErrGrantUnavailable
+		}
+	}
+
+	// THEN AUDIT: exactly one immutable record naming the granting admin and
+	// the auditor principal (SPEC-0033 AC4), correlated to the decision. If
+	// the witness cannot take it, the grant is not issued: the row above
+	// stays unissued (no record cites it) and the caller sees the refusal.
 	record, err := s.append(ctx, grant.TenantID, platformaudit.ActionAuditorGrantIssued, principal.ActorID, grant, map[string]string{
 		"grant_id":             grant.GrantID,
 		"auditor_principal_id": grant.AuditorPrincipalID,
@@ -178,15 +279,8 @@ func (s *Service) IssueGrant(ctx context.Context, c api.GrantContext, req api.Gr
 		return api.AuditorGrant{}, api.ErrGrantUnavailable
 	}
 
-	if err := s.store.Insert(ctx, grant, c.RequestID); err != nil {
-		// A concurrent replay of the same request ID raced us: honour the
-		// first writer's grant rather than registering a second.
-		if existing, ok, findErr := s.store.FindByRequest(ctx, tenant, c.RequestID); findErr == nil && ok {
-			existing.State = domain.DeriveState(existing, s.now())
-			return existing, nil
-		}
-		return api.AuditorGrant{}, api.ErrGrantUnavailable
-	}
+	// The ISSUED transition cites the record just appended; the store's
+	// uniqueness keeps it exactly one. Only now is the grant issued.
 	if err := s.recordTransition(ctx, api.GrantTransition{
 		Kind: api.GrantIssued, ChainSeq: record.Seq, RecordHash: record.Hash,
 		GrantID: grant.GrantID, ActorID: principal.ActorID, GrantedBy: grant.GrantedBy,
@@ -204,6 +298,24 @@ func (s *Service) IssueGrant(ctx context.Context, c api.GrantContext, req api.Gr
 		DecisionID: decision.DecisionID, OccurredAt: now,
 	})
 	return cloneGrant(grant), nil
+}
+
+// releaseIssue drops the caller's hold on a reservation after it observed
+// the outcome.
+func (s *Service) releaseIssue(idKey string, res *issueReservation) {
+	s.issueMu.Lock()
+	s.releaseIssueLocked(idKey, res)
+	s.issueMu.Unlock()
+}
+
+// releaseIssueLocked drops one hold on a reservation; the caller owns
+// s.issueMu. When no holder is left the reservation leaves issueKeys — the
+// durable replay record is the store, not this map.
+func (s *Service) releaseIssueLocked(idKey string, res *issueReservation) {
+	res.waiters--
+	if res.waiters == 0 && s.issueKeys[idKey] == res {
+		delete(s.issueKeys, idKey)
+	}
 }
 
 // RevokeGrant implements api.AuditorGrants.
@@ -292,6 +404,7 @@ func (s *Service) ListGrants(ctx context.Context, c api.GrantContext, auditorPri
 	if err != nil {
 		return nil, api.ErrGrantUnavailable
 	}
+	grants = s.issuedOnly(ctx, tenant, grants)
 	now := s.now()
 	out := make([]api.AuditorGrant, 0, len(grants))
 	for _, g := range grants {
@@ -316,6 +429,7 @@ func (s *Service) GrantFacts(ctx context.Context, auditorPrincipalID, packID str
 	if err != nil {
 		return api.GrantDecisionFacts{}, false, api.ErrGrantUnavailable
 	}
+	grants = s.issuedOnly(ctx, string(tenant), grants)
 	if len(grants) == 0 {
 		return api.GrantDecisionFacts{}, false, nil
 	}
@@ -350,7 +464,11 @@ func (s *Service) GrantFacts(ctx context.Context, auditorPrincipalID, packID str
 		ExpiresAt: pick.ExpiresAt,
 		RangeFrom: pick.RangeFrom,
 		RangeTo:   pick.RangeTo,
-		Packs:     append([]string(nil), pick.PackIDs...),
+		// The grant's repository scope travels with the facts (SPEC-0033
+		// AC1/AC8) so the policy can compare scopes; the reviewed bundle
+		// does not consume the fact yet — a governance follow-up wires it.
+		RepositoryID: pick.RepositoryID,
+		Packs:        append([]string(nil), pick.PackIDs...),
 	}, true, nil
 }
 
@@ -429,6 +547,24 @@ func (s *Service) recordTransition(ctx context.Context, t api.GrantTransition) e
 		return err
 	}
 	return nil
+}
+
+// issuedOnly keeps only the grants whose ISSUED transition was witnessed.
+// A store row from an attempt whose audit append failed is stored but NOT
+// issued (the M9 ordering keeps it as the request-ID slot's leftover): it
+// must not list, must not serve decision facts, must not authorize anything
+// until a retry completes it and the chain witnesses the issuance. A facts
+// lookup that cannot verify issuance fails closed by dropping the row.
+func (s *Service) issuedOnly(ctx context.Context, tenant string, grants []api.AuditorGrant) []api.AuditorGrant {
+	out := make([]api.AuditorGrant, 0, len(grants))
+	for _, g := range grants {
+		issued, err := s.store.TransitionRecorded(ctx, tenant, g.GrantID, api.GrantIssued)
+		if err != nil || !issued {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
 }
 
 // recognizeExpiry records a grant's expiry the first time any read path

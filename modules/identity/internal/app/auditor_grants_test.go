@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -214,9 +215,112 @@ func TestIssueGrantWithoutAuditTrailIsRefused(t *testing.T) {
 	if _, err := f.service.IssueGrant(ownerCtx("tenant-a", "admin-a"), api.GrantContext{RequestID: "req-1"}, validIssue()); !errors.Is(err, api.ErrGrantUnavailable) {
 		t.Fatalf("error = %v, want %v — an unrecorded grant is worse than a refused one", err, api.ErrGrantUnavailable)
 	}
+	// M9: the chain never states the grant was issued — no audit record, no
+	// ISSUED transition, no event. The store row that holds the request-ID
+	// slot is stored but NOT issued.
+	if len(f.trail.records) != 0 || len(f.events.events) != 0 {
+		t.Fatalf("an unaudited issue witnessed %d records and %d events", len(f.trail.records), len(f.events.events))
+	}
+	transitions, _ := f.store.Transitions(context.Background(), "tenant-a", time.Time{}, time.Time{}, "")
+	if len(transitions) != 0 {
+		t.Fatalf("an unaudited issue recorded transitions: %+v", transitions)
+	}
+	// And the unissued row must never authorize: facts are absent and the
+	// grant never lists.
+	if _, ok, err := f.service.GrantFacts(tenancy.WithTenant(context.Background(), "tenant-a"), "auditor-1", "pack-1"); err != nil || ok {
+		t.Fatalf("an unissued row served facts: ok=%v err=%v", ok, err)
+	}
+	if listed, _ := f.service.ListGrants(ownerCtx("tenant-a", "admin-a"), api.GrantContext{}, ""); len(listed) != 0 {
+		t.Fatalf("an unissued row listed: %+v", listed)
+	}
+
+	// A retry with the same request ID completes the leftover row — exactly
+	// one grant, exactly one issued record, never a second grant.
+	f.trail.fail = false
+	completed, err := f.service.IssueGrant(ownerCtx("tenant-a", "admin-a"), api.GrantContext{RequestID: "req-1"}, validIssue())
+	if err != nil {
+		t.Fatalf("retry after healing: %v", err)
+	}
+	if len(f.trail.records) != 1 || len(f.events.events) != 1 {
+		t.Fatalf("completion issued %d records and %d events, want one each", len(f.trail.records), len(f.events.events))
+	}
 	grants, _ := f.store.List(context.Background(), "tenant-a", "")
-	if len(grants) != 0 {
-		t.Fatalf("a grant was stored without an audit record")
+	if len(grants) != 1 || grants[0].GrantID != completed.GrantID {
+		t.Fatalf("store rows = %+v, want exactly the completed grant", grants)
+	}
+}
+
+// failingInsertStore lets a test fail the durable insert: the M9 guarantee
+// is that a failed insert leaves no immutable auditor.grant.issued record.
+type failingInsertStore struct {
+	*memory.GrantStore
+	fail bool
+}
+
+func (s *failingInsertStore) Insert(ctx context.Context, g api.AuditorGrant, requestID string) error {
+	if s.fail {
+		return errors.New("store unavailable")
+	}
+	return s.GrantStore.Insert(ctx, g, requestID)
+}
+
+func TestFailedInsertLeavesNoIssuedRecord(t *testing.T) {
+	pdp := &fakePDP{decision: policyapi.Decision{Allowed: true, DecisionID: "dec-1"}}
+	trail := &fakeTrail{}
+	events := &recordingBus{}
+	store := &failingInsertStore{GrantStore: memory.NewGrantStore(), fail: true}
+	svc := New(pdp, events, trail, store)
+	svc.now = func() time.Time { return testNow }
+
+	if _, err := svc.IssueGrant(ownerCtx("tenant-a", "admin-a"), api.GrantContext{RequestID: "req-1"}, validIssue()); !errors.Is(err, api.ErrGrantUnavailable) {
+		t.Fatalf("error = %v, want %v", err, api.ErrGrantUnavailable)
+	}
+	if len(trail.records) != 0 || len(events.events) != 0 {
+		t.Fatalf("a failed insert left %d audit records and %d events", len(trail.records), len(events.events))
+	}
+	if transitions, _ := store.Transitions(context.Background(), "tenant-a", time.Time{}, time.Time{}, ""); len(transitions) != 0 {
+		t.Fatalf("a failed insert recorded transitions: %+v", transitions)
+	}
+	if grants, _ := store.List(context.Background(), "tenant-a", ""); len(grants) != 0 {
+		t.Fatalf("a failed insert stored %d grants", len(grants))
+	}
+
+	// Once the store heals, the same request ID issues cleanly — and the
+	// chain then shows exactly one issued record for it.
+	store.fail = false
+	if _, err := svc.IssueGrant(ownerCtx("tenant-a", "admin-a"), api.GrantContext{RequestID: "req-1"}, validIssue()); err != nil {
+		t.Fatalf("issue after healing: %v", err)
+	}
+	if len(trail.records) != 1 || len(events.events) != 1 {
+		t.Fatalf("healed issue witnessed %d records and %d events, want one each", len(trail.records), len(events.events))
+	}
+}
+
+// Concurrent duplicates of one request ID serialize on one reservation: one
+// decision, one audit record, one grant — every caller sees the same grant.
+func TestConcurrentDuplicateIssueSerializesOnOneReservation(t *testing.T) {
+	f := newFixture(t)
+	const n = 8
+	grants := make([]api.AuditorGrant, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			grants[i], errs[i] = f.service.IssueGrant(ownerCtx("tenant-a", "admin-a"),
+				api.GrantContext{RequestID: "req-race"}, validIssue())
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if errs[i] != nil || grants[i].GrantID != grants[0].GrantID || grants[0].GrantID == "" {
+			t.Fatalf("caller %d saw grant %q err %v, want the one shared grant", i, grants[i].GrantID, errs[i])
+		}
+	}
+	if len(f.pdp.requests) != 1 || len(f.trail.records) != 1 || len(f.events.events) != 1 {
+		t.Fatalf("concurrent duplicates decided/audited/announced more than once: pdp=%d trail=%d events=%d",
+			len(f.pdp.requests), len(f.trail.records), len(f.events.events))
 	}
 }
 
@@ -385,6 +489,38 @@ func TestGrantFactsPreferAnActiveGrantAndFailClosedOnAbsence(t *testing.T) {
 	// Another tenant never sees the grant.
 	if _, ok, err := f.service.GrantFacts(tenancy.WithTenant(context.Background(), "tenant-b"), "auditor-1", "pack-1"); err != nil || ok {
 		t.Fatalf("cross-tenant facts = ok=%v err=%v, want absent", ok, err)
+	}
+}
+
+// SPEC-0033 AC1/AC8 (L16): the grant's repository scope travels with the
+// facts so the policy CAN compare a grant's scope against the pack's. The
+// reviewed rego bundle does not consume the fact yet — wiring a rule is a
+// governance-first contract change — but the fact itself must be complete.
+func TestGrantFactsCarryTheRepositoryScope(t *testing.T) {
+	f := newFixture(t)
+	req := validIssue()
+	req.RepositoryID = "repo-7"
+	if _, err := f.service.IssueGrant(ownerCtx("tenant-a", "admin-a"), api.GrantContext{RequestID: "req-1"}, req); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	facts, ok, err := f.service.GrantFacts(tenancy.WithTenant(context.Background(), "tenant-a"), "auditor-1", "pack-1")
+	if err != nil || !ok {
+		t.Fatalf("facts: %v ok=%v", err, ok)
+	}
+	if facts.RepositoryID != "repo-7" {
+		t.Fatalf("facts.RepositoryID = %q, want the grant's issued scope", facts.RepositoryID)
+	}
+
+	// A tenant-wide grant with the later expiry governs and reports the
+	// empty scope as issued.
+	req2 := validIssue()
+	req2.ExpiresAt = testNow.Add(2 * time.Hour)
+	if _, err := f.service.IssueGrant(ownerCtx("tenant-a", "admin-a"), api.GrantContext{RequestID: "req-2"}, req2); err != nil {
+		t.Fatalf("issue tenant-wide grant: %v", err)
+	}
+	facts, ok, err = f.service.GrantFacts(tenancy.WithTenant(context.Background(), "tenant-a"), "auditor-1", "pack-1")
+	if err != nil || !ok || facts.RepositoryID != "" {
+		t.Fatalf("tenant-wide facts = %+v ok=%v err=%v, want empty repository scope", facts, ok, err)
 	}
 }
 

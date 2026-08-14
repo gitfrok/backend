@@ -132,7 +132,10 @@ func activeFacts(packID string) identityapi.GrantDecisionFacts {
 		ExpiresAt: factsNow.Add(time.Hour),
 		RangeFrom: factsNow.Add(-2 * time.Hour),
 		RangeTo:   factsNow.Add(2 * time.Hour),
-		Packs:     []string{packID},
+		// The grant's repository scope (SPEC-0033 AC1) travels additively;
+		// the reviewed bundle does not consume it yet.
+		RepositoryID: "repo-9",
+		Packs:        []string{packID},
 	}
 }
 
@@ -162,14 +165,15 @@ func TestAuditorPackReadComposesActiveGrantFactsIntoTheDecision(t *testing.T) {
 		t.Fatalf("decision asked = %+v", req)
 	}
 	want := map[string]string{
-		"auditor_grant_id":         "grant-1",
-		"auditor_grant_state":      "ACTIVE",
-		"auditor_grant_tenant":     "tenant-a",
-		"auditor_grant_expires_at": factsNow.Add(time.Hour).UTC().Format(time.RFC3339Nano),
-		"auditor_grant_range_from": factsNow.Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano),
-		"auditor_grant_range_to":   factsNow.Add(2 * time.Hour).UTC().Format(time.RFC3339Nano),
-		"auditor_grant_packs":      packID,
-		"decision_time":            factsNow.UTC().Format(time.RFC3339Nano),
+		"auditor_grant_id":            "grant-1",
+		"auditor_grant_state":         "ACTIVE",
+		"auditor_grant_tenant":        "tenant-a",
+		"auditor_grant_expires_at":    factsNow.Add(time.Hour).UTC().Format(time.RFC3339Nano),
+		"auditor_grant_range_from":    factsNow.Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano),
+		"auditor_grant_range_to":      factsNow.Add(2 * time.Hour).UTC().Format(time.RFC3339Nano),
+		"auditor_grant_repository_id": "repo-9",
+		"auditor_grant_packs":         packID,
+		"decision_time":               factsNow.UTC().Format(time.RFC3339Nano),
 	}
 	for k, v := range want {
 		if req.Context[k] != v {

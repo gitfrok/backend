@@ -442,6 +442,11 @@ func (s *Service) composeGrantFacts(ctx context.Context, c api.Context, packID s
 		composed["auditor_grant_expires_at"] = facts.ExpiresAt.UTC().Format(time.RFC3339Nano)
 		composed["auditor_grant_range_from"] = facts.RangeFrom.UTC().Format(time.RFC3339Nano)
 		composed["auditor_grant_range_to"] = facts.RangeTo.UTC().Format(time.RFC3339Nano)
+		// The grant's repository scope (SPEC-0033 AC1) travels additively:
+		// the reviewed bundle does not consume it yet, so the conjuncts are
+		// unaffected, but the fact is present for the governance follow-up
+		// that lets the policy compare grant scope against pack scope.
+		composed["auditor_grant_repository_id"] = facts.RepositoryID
 		composed["auditor_grant_packs"] = strings.Join(facts.Packs, ",")
 	}
 	return composed, true

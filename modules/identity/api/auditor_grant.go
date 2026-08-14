@@ -185,7 +185,15 @@ type GrantDecisionFacts struct {
 	ExpiresAt time.Time
 	RangeFrom time.Time
 	RangeTo   time.Time
-	Packs     []string
+	// RepositoryID is the grant's repository scope as issued (SPEC-0033
+	// AC1): empty covers the tenant's repositories, non-empty narrows them.
+	// It travels to the decision additively so the policy CAN compare a
+	// grant's scope against the pack's; the reviewed rego bundle does not
+	// consume it yet — wiring it into a rule is a governance-first contract
+	// change (SPEC-0033 AC8 forbids widening in the meantime, and AC1
+	// describes this scope).
+	RepositoryID string
+	Packs        []string
 }
 
 // AuditorGrants is the Identity&Access auditor grant surface in-process,
