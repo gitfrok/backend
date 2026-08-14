@@ -8,10 +8,17 @@
 // Realizes ADR-0011 (outbound-only agent) and ADR-0017 (gRPC bidi streaming over mTLS).
 //
 // Transport : a SINGLE long-lived gRPC bidirectional stream, dialed OUTBOUND by the agent.
-// AuthN     : mTLS. The trusted cluster identity is the SPIFFE ID from the verified client
-//             cert, so NO credentials are carried in-band.
+// AuthN     : mTLS. The agent's identity comes from a client certificate ISSUED BY THE
+//             CONTROL PLANE (ADR-0060): a one-time enrolment token bootstraps the first
+//             Connect (see Enrol/EnrolmentAck below), the control plane then issues and
+//             rotates short-lived client certificates ON this channel, and the certificate
+//             names the tenant and the data plane. Nothing the agent asserts in a payload
+//             field overrides the certificate's identity (invariant 2 on the agent wire).
 // Invariant : source code and secrets NEVER traverse this stream. Only control, telemetry,
-//             usage metering, and SIGNED release references.
+//             usage metering, and SIGNED release references. (The enrolment handshake below
+//             is the one deliberate exception for credentials: the issued client certificate
+//             traverses the channel it authenticates. The token and certificates are never
+//             logged, echoed into errors, or used as metric labels — SPEC-0038 AC2.)
 
 package agentv1
 
