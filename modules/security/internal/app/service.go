@@ -26,18 +26,35 @@ import (
 // cursorKeyBytes is the HMAC key length for signed list cursors.
 const cursorKeyBytes = 32
 
-// reservedRequestIDPrefix is the namespace the store reserves for ingest-audit
-// claim markers: the marker is recorded as a scan_chunks row whose request ID
-// is this prefix joined to the ingest's own. A caller-supplied request ID
+// reservedRequestIDPrefixes are the namespaces the plane reserves for its own
+// in-process ingest paths. "audit:" names the store's ingest-audit claim
+// markers: the marker is recorded as a scan_chunks row whose request ID is
+// this prefix joined to the ingest's own, so a caller-supplied request ID
 // carrying the prefix would share the marker's key namespace — one crafted ID
 // could suppress a pending backfill or answer as a forged replay (wave-2 N2)
-// — so the boundary refuses it outright.
-const reservedRequestIDPrefix = "audit:"
+// — and the boundary refuses it outright. "ci:" is the namespace the CI scan
+// subscriber derives its request IDs in (SPEC-0037 AC6): a wire caller
+// squatting it could pre-empt or impersonate the subscriber's idempotent
+// ingest, so it is refused exactly the same way. Only the plane's own
+// in-process core — which never enters through this boundary — may mint IDs
+// in these namespaces.
+var reservedRequestIDPrefixes = []string{"audit:", "ci:"}
+
+// hasReservedRequestIDPrefix reports whether id sits in a namespace only the
+// plane itself may write.
+func hasReservedRequestIDPrefix(id string) bool {
+	for _, prefix := range reservedRequestIDPrefixes {
+		if strings.HasPrefix(id, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // validRequestID admits a caller request ID: non-empty, and outside the
-// reserved marker namespace.
+// reserved namespaces.
 func validRequestID(id string) bool {
-	return id != "" && !strings.HasPrefix(id, reservedRequestIDPrefix)
+	return id != "" && !hasReservedRequestIDPrefix(id)
 }
 
 // Service is the Security/Findings application service (SPEC-0024,
@@ -152,13 +169,14 @@ func New(store Store, pdp policyapi.DecisionPoint, events bus.Bus, opts ...Optio
 //     events; a completed replay whose audit marker is missing backfills
 //     the record instead (SPEC-0025 AC1/AC5).
 func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) (api.IngestResult, error) {
-	// A request ID in the reserved marker namespace is a malformed request,
-	// refused whole before any decision or write: admitting it would let a
-	// caller squat or forge the audit claim markers the store keys by
-	// "audit:"+request_id (wave-2 N2). The chunk's request ID is the
-	// embedded context's; an ABSENT one stays the coarse context denial
+	// A request ID in a reserved namespace is a malformed request, refused
+	// whole before any decision or write: admitting it would let a caller
+	// squat or forge the audit claim markers the store keys by
+	// "audit:"+request_id (wave-2 N2), or pre-empt the CI subscriber's
+	// derived "ci:" request IDs (SPEC-0037 AC6). The chunk's request ID is
+	// the embedded context's; an ABSENT one stays the coarse context denial
 	// below, unchanged.
-	if strings.HasPrefix(chunk.RequestID, reservedRequestIDPrefix) {
+	if hasReservedRequestIDPrefix(chunk.RequestID) {
 		return api.IngestResult{}, api.ErrMalformed
 	}
 	if !validContext(chunk.Context) || chunk.Revision == "" {
