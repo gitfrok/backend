@@ -81,7 +81,9 @@ func (s *stubTrail) Verify(context.Context) (api.VerifyResult, error) {
 	return api.VerifyResult{Checked: s.seq, OK: true}, nil
 }
 
-func (s *stubTrail) Query(context.Context, api.TrailQuery) ([]api.Record, error) { return nil, nil }
+func (s *stubTrail) Query(context.Context, api.TrailQuery) ([]api.Record, bool, error) {
+	return nil, false, nil
+}
 
 type stubBus struct{}
 

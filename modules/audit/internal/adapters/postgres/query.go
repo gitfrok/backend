@@ -20,12 +20,17 @@ import (
 const defaultQueryLimit = 10_000
 
 // Query returns the tenant's records matching q, in chain-sequence order.
+// truncated reports whether the matching range holds more records than the
+// effective limit: the read fetches one row beyond the limit to know, and
+// returns only the limit-many earliest (SPEC-0031 AC10 — a truncated range
+// must say so, never present its prefix as complete).
 //
 // Tenant isolation is inherited from the pool's row-level security: the
 // surrounding transaction is scoped before this runs, so one tenant's read
 // cannot see another's chain (SPEC-0001) — the same inheritance Append gets.
-func (s *Store) Query(ctx context.Context, q api.TrailQuery) ([]api.Record, error) {
+func (s *Store) Query(ctx context.Context, q api.TrailQuery) ([]api.Record, bool, error) {
 	var out []api.Record
+	var truncated bool
 	err := s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		// Filters compose additively; every bound is a parameter, never text.
 		var conds []string
@@ -66,7 +71,8 @@ func (s *Store) Query(ctx context.Context, q api.TrailQuery) ([]api.Record, erro
 		if len(conds) > 0 {
 			query += " WHERE " + strings.Join(conds, " AND ")
 		}
-		query += fmt.Sprintf(" ORDER BY tenant_seq ASC LIMIT %d", limit)
+		// One row beyond the limit: its existence is the truncation signal.
+		query += fmt.Sprintf(" ORDER BY tenant_seq ASC LIMIT %d", limit+1)
 
 		rows, err := tx.Query(ctx, query, args...)
 		if err != nil {
@@ -89,7 +95,11 @@ func (s *Store) Query(ctx context.Context, q api.TrailQuery) ([]api.Record, erro
 			}
 			out = append(out, r)
 		}
+		if len(out) > limit {
+			out = out[:limit]
+			truncated = true
+		}
 		return rows.Err()
 	})
-	return out, err
+	return out, truncated, err
 }

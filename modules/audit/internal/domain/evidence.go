@@ -91,7 +91,8 @@ func Classify(r api.Record) (api.SectionRecord, api.SectionType, bool) {
 	if mode != policyModeEnforced {
 		return api.SectionRecord{}, 0, false
 	}
-	if r.Detail[detailDecisionID] == "" || r.Detail[detailPolicyRevision] == "" {
+	if r.Detail[detailDecisionID] == "" || r.Detail[detailPolicyRevision] == "" ||
+		r.Detail[detailInputDigest] == "" {
 		return api.SectionRecord{}, 0, false
 	}
 	base.PolicyDecision = &api.PolicyDecisionDetail{
@@ -152,10 +153,14 @@ func AnchorWithPrev(records []api.SectionRecord, prevHash string) api.ChainAncho
 // query's job. repositoryID, when non-empty, restricts membership to records
 // attributed to that repository or carrying no repository attribution.
 //
-// The access-changes section is assembled separately from the
-// AccessChangesSource port; see Service for its degraded shape when no such
-// surface is wired.
-func AssembleSections(records []api.Record, repositoryID string) []api.Section {
+// truncation, when non-nil, says the trail read hit its bounded limit: the
+// records are the earliest prefix of the range and the tail is missing. Every
+// trail-fed section then renders Complete: false with that gap — a truncated
+// section says so, rather than presenting the prefix as the whole range
+// (SPEC-0031 AC10, SPEC-0032 AC8). The access-changes section is unaffected:
+// it assembles separately from the AccessChangesSource port; see Service for
+// its degraded shape when no such surface is wired.
+func AssembleSections(records []api.Record, repositoryID string, truncation *api.SectionGap) []api.Section {
 	grouped := map[api.SectionType][]api.SectionRecord{}
 	firstPrev := map[api.SectionType]string{}
 	for _, r := range records {
@@ -182,13 +187,21 @@ func AssembleSections(records []api.Record, repositoryID string) []api.Section {
 			continue // assembled from the identity surface port, not the trail
 		}
 		recs := grouped[st]
-		sections = append(sections, api.Section{
+		sec := api.Section{
 			Type:          st,
 			Anchor:        AnchorWithPrev(recs, firstPrev[st]),
 			Records:       recs,
 			Complete:      true,
 			RecordsDigest: RecordsDigest(recs),
-		})
+		}
+		if truncation != nil {
+			// The unread tail may hold records of ANY section: the honest
+			// shape marks every trail-fed section incomplete, whether or not
+			// it cited records from the prefix it did read.
+			sec.Complete = false
+			sec.Gaps = []api.SectionGap{*truncation}
+		}
+		sections = append(sections, sec)
 	}
 	return sections
 }
@@ -276,6 +289,10 @@ func AppendixDigest(groups []api.AttestedGroup) string {
 // first, then control sections in SectionType order, then the appendix, then
 // the closing chunk. Nothing of the pack is authoritative until the final
 // chunk.
+//
+// The header chunk carries the pack's identity ONLY — sections and appendix
+// cleared. They arrive in their own chunks; embedding the whole pack in
+// chunk 0 would defeat the bounded-chunk streaming shape entirely.
 func Chunks(p api.Pack) []api.PackChunk {
 	chunks := make([]api.PackChunk, 0, len(p.Sections)+3)
 	idx := int64(0)
@@ -285,6 +302,8 @@ func Chunks(p api.Pack) []api.PackChunk {
 		chunks = append(chunks, c)
 	}
 	header := p
+	header.Sections = nil
+	header.Appendix = api.Appendix{}
 	push(api.PackChunk{Header: &header})
 	for i := range p.Sections {
 		s := p.Sections[i]

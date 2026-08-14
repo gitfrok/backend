@@ -509,14 +509,27 @@ func (s *Service) assemble(packID string) {
 // explicit gap when no such surface is wired; the appendix reads the
 // attested-history port, empty when the plane has no import surface.
 func (s *Service) assembleSections(ctx context.Context, entry *packEntry, pack api.Pack) ([]api.Section, api.Appendix, int64, string) {
-	records, err := s.trail.Query(ctx, api.TrailQuery{
+	records, truncated, err := s.trail.Query(ctx, api.TrailQuery{
 		From: pack.RangeFrom, To: pack.RangeTo, RepositoryID: pack.RepositoryID,
 	})
 	if err != nil {
 		return nil, api.Appendix{}, 0, fmt.Sprintf("trail query failed: %v", err)
 	}
 
-	sections := domain.AssembleSections(records, pack.RepositoryID)
+	// A trail read that hit its bounded limit returned only the earliest
+	// prefix of the range. The sections must say so — Complete: false with a
+	// truncation gap over the unread tail — rather than present the prefix
+	// as the whole range (SPEC-0031 AC10, SPEC-0032 AC8).
+	var truncation *api.SectionGap
+	if truncated {
+		gapFrom := pack.RangeFrom
+		if len(records) > 0 {
+			gapFrom = records[len(records)-1].OccurredAt
+		}
+		truncation = &api.SectionGap{From: gapFrom, To: pack.RangeTo, Reason: api.GapReadTruncated}
+	}
+
+	sections := domain.AssembleSections(records, pack.RepositoryID, truncation)
 
 	// Access changes: Identity & Access's own surface, or the honest degraded
 	// shape — a gap over the whole range, SOURCE_UNAVAILABLE. A section that

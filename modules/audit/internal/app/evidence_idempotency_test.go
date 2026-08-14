@@ -63,8 +63,8 @@ func (t *countingTrail) Verify(context.Context) (api.VerifyResult, error) {
 	return api.VerifyResult{OK: true}, nil
 }
 
-func (t *countingTrail) Query(context.Context, api.TrailQuery) ([]api.Record, error) {
-	return nil, nil
+func (t *countingTrail) Query(context.Context, api.TrailQuery) ([]api.Record, bool, error) {
+	return nil, false, nil
 }
 
 func (t *countingTrail) appended() int {

@@ -66,8 +66,12 @@ type TrailQuery struct {
 type TrailReader interface {
 	// Query returns the tenant's records matching q, in chain-sequence order.
 	// The ctx carries the tenant scope (SPEC-0001); an unscoped query is an
-	// error, not a cross-tenant read.
-	Query(ctx context.Context, q TrailQuery) ([]Record, error)
+	// error, not a cross-tenant read. truncated is true when the matching
+	// range holds more records than the effective limit: the returned slice
+	// is the EARLIEST prefix, and whatever follows it is missing from the
+	// answer. A reader that cannot say it truncated would present a partial
+	// range as complete — the precise failure SPEC-0031 AC10 forbids.
+	Query(ctx context.Context, q TrailQuery) (records []Record, truncated bool, err error)
 }
 
 // TrailStore is the audit trail with its Phase 2 read port: append, verify and
@@ -165,6 +169,14 @@ const (
 	// GapAssemblyFailed: assembly of the section's records failed; nothing is
 	// guessed or substituted for the missing part.
 	GapAssemblyFailed
+	// GapReadTruncated: the trail read hit its bounded limit, so the tail of
+	// the range is missing from the section (SPEC-0031 AC10, SPEC-0032 AC8:
+	// a truncated section says so instead of presenting the earliest prefix
+	// as complete). The wire enum in contracts/proto/audit/v1 predates this
+	// reason and renders it as GAP_REASON_UNSPECIFIED until a governance
+	// contract change adds a dedicated value; Complete=false plus the gap is
+	// the machine-checkable marker either way.
+	GapReadTruncated
 )
 
 // SectionGap marks the parts of a section's range that could not be assembled.

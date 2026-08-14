@@ -99,11 +99,14 @@ func (s *Store) Verify(ctx context.Context) (api.VerifyResult, error) {
 
 // Query returns the tenant's records matching q, in chain-sequence order. The
 // tenant comes from the ctx scope, not the query: a caller cannot read a
-// chain it is not scoped to (SPEC-0001).
-func (s *Store) Query(ctx context.Context, q api.TrailQuery) ([]api.Record, error) {
+// chain it is not scoped to (SPEC-0001). truncated reports whether the
+// matching range holds more records than the effective limit: the earliest
+// limit-many are returned and the tail is missing (SPEC-0031 AC10 — a
+// truncated range must say so, never present its prefix as complete).
+func (s *Store) Query(ctx context.Context, q api.TrailQuery) ([]api.Record, bool, error) {
 	tenant, ok := tenancy.FromContext(ctx)
 	if !ok {
-		return nil, fmt.Errorf("audit: query without tenant scope")
+		return nil, false, fmt.Errorf("audit: query without tenant scope")
 	}
 
 	s.mu.Lock()
@@ -119,28 +122,39 @@ func (s *Store) Query(ctx context.Context, q api.TrailQuery) ([]api.Record, erro
 		actions[a] = struct{}{}
 	}
 
-	out := make([]api.Record, 0, len(chain))
-	for _, r := range chain {
+	matches := func(r api.Record) bool {
 		if !q.From.IsZero() && r.OccurredAt.Before(q.From) {
-			continue
+			return false
 		}
 		if !q.To.IsZero() && r.OccurredAt.After(q.To) {
-			continue
+			return false
 		}
 		if len(actions) > 0 {
 			if _, ok := actions[r.Action]; !ok {
-				continue
+				return false
 			}
 		}
 		if q.RepositoryID != "" {
 			if repo, ok := r.Detail["repository_id"]; ok && repo != q.RepositoryID {
-				continue
+				return false
 			}
 		}
-		out = append(out, r)
-		if len(out) >= limit {
-			break
-		}
+		return true
 	}
-	return out, nil
+
+	var out []api.Record
+	truncated := false
+	for _, r := range chain {
+		if !matches(r) {
+			continue
+		}
+		if len(out) < limit {
+			out = append(out, r)
+			continue
+		}
+		// The limit is full and one more record matches: the tail exists.
+		truncated = true
+		break
+	}
+	return out, truncated, nil
 }

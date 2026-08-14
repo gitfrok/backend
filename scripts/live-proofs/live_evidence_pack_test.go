@@ -169,8 +169,13 @@ func TestLiveEvidencePackProof(t *testing.T) {
 	if header == nil || header.PackID != packID || header.RequestedBy != "u-owner" || header.DecisionID == "" {
 		t.Fatalf("header chunk malformed: %+v", chunks[0])
 	}
-	if header.Appendix.Label != auditapi.AppendixLabel || len(header.Appendix.Groups) != 0 {
-		t.Fatalf("appendix must be empty and carry the server-set label, got %+v", header.Appendix)
+	// The header chunk carries identity only: sections and appendix arrive in
+	// their own bounded chunks, never embedded in chunk 0.
+	if len(header.Sections) != 0 || header.Appendix.Label != "" || len(header.Appendix.Groups) != 0 {
+		t.Fatalf("header chunk must carry no sections or appendix, got %+v", header)
+	}
+	if chunks[5].Appendix == nil || chunks[5].Appendix.Label != auditapi.AppendixLabel || len(chunks[5].Appendix.Groups) != 0 {
+		t.Fatalf("appendix chunk must be empty and carry the server-set label, got %+v", chunks[5])
 	}
 	if !chunks[6].Final || chunks[6].Header != nil || chunks[6].Section != nil || chunks[6].Appendix != nil {
 		t.Fatalf("closing chunk must carry no content: %+v", chunks[6])
