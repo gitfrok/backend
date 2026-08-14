@@ -15,8 +15,9 @@
 package app
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -370,7 +371,7 @@ func (s *Service) GrantTransitions(ctx context.Context, tenantID string, from, t
 		return nil, api.ErrGrantUnavailable
 	}
 	out := append([]api.GrantTransition(nil), transitions...)
-	sort.SliceStable(out, func(i, j int) bool { return out[i].ChainSeq < out[j].ChainSeq })
+	slices.SortStableFunc(out, func(a, b api.GrantTransition) int { return cmp.Compare(a.ChainSeq, b.ChainSeq) })
 	return out, nil
 }
 

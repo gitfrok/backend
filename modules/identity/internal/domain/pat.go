@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -204,7 +204,7 @@ func (s *Service) ListPATs(tenant, actor string) []PAT {
 			out = append(out, s.public(*p))
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	slices.SortFunc(out, func(a, b PAT) int { return a.CreatedAt.Compare(b.CreatedAt) })
 	return out
 }
 func hashWithKey(key []byte, value string) string {

@@ -4,8 +4,9 @@
 package memory
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -107,11 +108,11 @@ func (s *GrantStore) List(_ context.Context, tenantID, auditorPrincipalID string
 		}
 		out = append(out, clone(g))
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].IssuedAt.Equal(out[j].IssuedAt) {
-			return out[i].IssuedAt.Before(out[j].IssuedAt)
+	slices.SortFunc(out, func(a, b api.AuditorGrant) int {
+		if c := a.IssuedAt.Compare(b.IssuedAt); c != 0 {
+			return c
 		}
-		return out[i].GrantID < out[j].GrantID
+		return cmp.Compare(a.GrantID, b.GrantID)
 	})
 	return out, nil
 }
@@ -131,11 +132,11 @@ func (s *GrantStore) FindForRead(_ context.Context, tenantID, auditorPrincipalID
 		}
 		out = append(out, clone(g))
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].IssuedAt.Equal(out[j].IssuedAt) {
-			return out[i].IssuedAt.Before(out[j].IssuedAt)
+	slices.SortFunc(out, func(a, b api.AuditorGrant) int {
+		if c := a.IssuedAt.Compare(b.IssuedAt); c != 0 {
+			return c
 		}
-		return out[i].GrantID < out[j].GrantID
+		return cmp.Compare(a.GrantID, b.GrantID)
 	})
 	return out, nil
 }
