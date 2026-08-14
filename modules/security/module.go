@@ -20,6 +20,7 @@ import (
 	"github.com/gitfrok/backend/modules/security/api"
 	securitygrpc "github.com/gitfrok/backend/modules/security/internal/adapters/grpc"
 	secpg "github.com/gitfrok/backend/modules/security/internal/adapters/postgres"
+	"github.com/gitfrok/backend/modules/security/internal/adapters/scanners"
 	"github.com/gitfrok/backend/modules/security/internal/app"
 	platformaudit "github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
@@ -191,4 +192,39 @@ func (r grpcMergeBaseResolver) MergeBase(ctx context.Context, tenantID, reposito
 		return "", false, err
 	}
 	return resp.GetMergeBase(), resp.GetFound(), nil
+}
+
+// The CI scan report ingester (SPEC-0037, ADR-0059 Option C): the Security
+// side of the CI-to-findings handoff. The job and report shapes are aliased
+// for the same reason the rest of this surface is — cmd/ wires the ports
+// without naming a package under this module's internal/ tree — and they are
+// defined HERE, not imported from the CI context: the composition root
+// adapts CI's job API and report store onto them, and neither module imports
+// the other (SPEC-0037 G5).
+type (
+	CIScanJob          = app.CIScanJob
+	CIScanJobSource    = app.CIScanJobSource
+	CIScanReport       = app.CIScanReport
+	CIScanReportAddr   = app.CIScanReportAddr
+	CIScanReportSource = app.CIScanReportSource
+	CIScanJobFinished  = app.CIScanJobFinished
+	CIScanIngester     = app.CIScanIngester
+)
+
+// ErrCIScanJobUnknown is the correlation port's answer for a job that does
+// not exist under the given tenant and repository.
+var ErrCIScanJobUnknown = app.ErrCIScanJobUnknown
+
+// NewCIScanIngester builds the CI scan report ingester over the plane's
+// Findings surface and the two composed ports: the job correlation (the
+// plane's route to the CI context's Jobs API) and the report source (its
+// route to the CI context's report store). The scanner adapter registry is
+// this module's own. A Findings surface without the ingest core returns an
+// error — the composition root treats that as a startup failure.
+func NewCIScanIngester(findings api.Findings, jobs CIScanJobSource, reports CIScanReportSource, now func() time.Time) (*CIScanIngester, error) {
+	svc, ok := findings.(*app.Service)
+	if !ok {
+		return nil, fmt.Errorf("security: the findings surface has no CI scan ingest core")
+	}
+	return app.NewCIScanIngester(svc, jobs, reports, scanners.All(), now), nil
 }

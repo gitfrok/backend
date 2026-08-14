@@ -228,6 +228,24 @@ func main() {
 	}
 	defer doors.Close()
 
+	// The CI scan report handoff (T-0029, SPEC-0037, ADR-0059): CIJobFinished
+	// drives Security's ingester over the reports the runner persisted, and
+	// the findings land under the job's own principal. The report tier is the
+	// plane's object tier when it has one, the in-process tier otherwise; the
+	// size limit, retention and sweep interval are per-environment
+	// configuration with the defaults named in ciingest.go (invariant 13). A
+	// plane whose ingest path cannot compose fails the rollout rather than
+	// recording scans it will never take in.
+	scanReportConfig, err := loadCIScanReportConfig(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dataplane CI scan reports: %v\n", err)
+		os.Exit(1)
+	}
+	if err := wireCIScanIngest(ctx, dp, frontCfg.objects, scanReportConfig); err != nil {
+		fmt.Fprintf(os.Stderr, "dataplane CI scan ingest: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Code Review needs a route to Git storage to complete a merge, and the plane
 	// only has one when the Git doors are configured. Without it the context is not
 	// composed at all, rather than composed with a merge path that cannot work.
