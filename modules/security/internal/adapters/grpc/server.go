@@ -68,7 +68,7 @@ func (s *Server) GetFinding(ctx context.Context, req *securityv1.GetFindingReque
 
 // ListFindings pages a tenant-scoped, filtered listing.
 func (s *Server) ListFindings(ctx context.Context, req *securityv1.ListFindingsRequest) (*securityv1.ListFindingsResponse, error) {
-	ctx, c, err := intoContext(ctx, req.GetContext())
+	ctx, c, err := intoTenantContext(ctx, req.GetContext())
 	if err != nil {
 		return nil, err
 	}
@@ -78,6 +78,9 @@ func (s *Server) ListFindings(ctx context.Context, req *securityv1.ListFindingsR
 		ScannerClassFilter: fromScannerClassProto(req.GetScannerClassFilter()),
 		SeverityFilter:     fromSeverityProto(req.GetSeverityFilter()),
 		LifecycleFilter:    fromLifecycleProto(req.GetLifecycleFilter()),
+		MinAgeDays:         int(req.GetMinAgeDays()),
+		MaxAgeDays:         int(req.GetMaxAgeDays()),
+		OwningTeamFilter:   req.GetOwningTeamFilter(),
 		PageSize:           int(req.GetPageSize()),
 		PageToken:          req.GetPageToken(),
 	})
@@ -91,11 +94,28 @@ func (s *Server) ListFindings(ctx context.Context, req *securityv1.ListFindingsR
 	return out, nil
 }
 
+// intoContext validates a single-repository operation's context: every
+// field, repository included, is mandatory (SPEC-0025).
 func intoContext(ctx context.Context, c *securityv1.FindingsContext) (context.Context, api.Context, error) {
 	if c == nil || c.GetTenantId() == "" || c.GetRepositoryId() == "" ||
 		c.GetActorId() == "" || c.GetRequestId() == "" {
 		return ctx, api.Context{}, errMalformed
 	}
+	return withAPIContext(ctx, c)
+}
+
+// intoTenantContext validates the tenant-wide read paths (SPEC-0026 AC6):
+// the repository scope is SERVER-DERIVED for them — the BFF never sends
+// repository_id on a dashboard or merge-request findings read — so it is
+// optional here while tenant, actor, and request ID remain mandatory.
+func intoTenantContext(ctx context.Context, c *securityv1.FindingsContext) (context.Context, api.Context, error) {
+	if c == nil || c.GetTenantId() == "" || c.GetActorId() == "" || c.GetRequestId() == "" {
+		return ctx, api.Context{}, errMalformed
+	}
+	return withAPIContext(ctx, c)
+}
+
+func withAPIContext(ctx context.Context, c *securityv1.FindingsContext) (context.Context, api.Context, error) {
 	in := api.Context{
 		TenantID: c.GetTenantId(), RepositoryID: c.GetRepositoryId(),
 		ActorID: c.GetActorId(), ActorRoles: append([]string(nil), c.GetActorRoles()...),
@@ -262,7 +282,7 @@ func toFindingProto(f api.Finding) *securityv1.Finding {
 // request (SPEC-0028). The summary is always present: an UNAVAILABLE
 // summary with an empty list is still UNAVAILABLE, never "no findings".
 func (s *Server) ListMergeRequestFindings(ctx context.Context, req *securityv1.ListMergeRequestFindingsRequest) (*securityv1.ListMergeRequestFindingsResponse, error) {
-	ctx, c, err := intoContext(ctx, req.GetContext())
+	ctx, c, err := intoTenantContext(ctx, req.GetContext())
 	if err != nil {
 		return nil, err
 	}
@@ -347,6 +367,105 @@ func toTriageStateProto(s api.TriageState) securityv1.TriageState {
 	default:
 		return securityv1.TriageState_TRIAGE_STATE_UNSPECIFIED
 	}
+}
+
+func fromTriageStateProto(s securityv1.TriageState) api.TriageState {
+	switch s {
+	case securityv1.TriageState_TRIAGE_STATE_ACCEPT:
+		return api.TriageAccept
+	case securityv1.TriageState_TRIAGE_STATE_FALSE_POSITIVE:
+		return api.TriageFalsePositive
+	case securityv1.TriageState_TRIAGE_STATE_FIX:
+		return api.TriageFix
+	case securityv1.TriageState_TRIAGE_STATE_DEFER:
+		return api.TriageDefer
+	default:
+		return api.TriageStateUnspecified // unspecified is invalid; the service refuses it
+	}
+}
+
+// SetTriage records a triage decision on a finding identity (SPEC-0026,
+// SPEC-0027). The request shape carries no severity, no lifecycle, and no
+// authorization flag; an unspecified state surfaces as the service's
+// boundary refusal.
+func (s *Server) SetTriage(ctx context.Context, req *securityv1.SetTriageRequest) (*securityv1.SetTriageResponse, error) {
+	ctx, c, err := intoContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.findings.SetTriage(ctx, api.TriageTransition{
+		Context:         c,
+		FindingID:       req.GetFindingId(),
+		State:           fromTriageStateProto(req.GetState()),
+		Justification:   req.GetJustification(),
+		ExpectedVersion: req.GetExpectedVersion(),
+	})
+	if err != nil {
+		if errors.Is(err, api.ErrMalformed) {
+			return nil, errMalformed
+		}
+		return nil, denial()
+	}
+	return &securityv1.SetTriageResponse{Record: toTriageRecordProto(out.Record)}, nil
+}
+
+// GetTriage reads a finding's triage record (SPEC-0027 AC6). Absence and
+// denial are the same coarse shape: the response simply carries no record.
+func (s *Server) GetTriage(ctx context.Context, req *securityv1.GetTriageRequest) (*securityv1.GetTriageResponse, error) {
+	ctx, c, err := intoContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	rec, found, err := s.findings.GetTriage(ctx, c, req.GetFindingId(), req.GetVersion())
+	if err != nil {
+		return nil, denial()
+	}
+	out := &securityv1.GetTriageResponse{}
+	if found {
+		out.Record = toTriageRecordProto(rec)
+	}
+	return out, nil
+}
+
+// GetFindingsSummary returns counts and facet values computed under the
+// caller's authorization (SPEC-0026 AC6). The context's repository is
+// server-derived scope: the BFF does not send it, and an org-wide summary
+// is the same request with no repository filter (SPEC-0026 AC1).
+func (s *Server) GetFindingsSummary(ctx context.Context, req *securityv1.GetFindingsSummaryRequest) (*securityv1.GetFindingsSummaryResponse, error) {
+	ctx, c, err := intoTenantContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	summary, err := s.findings.GetFindingsSummary(ctx, api.SummaryRequest{
+		Context:            c,
+		RepositoryFilter:   req.GetRepositoryFilter(),
+		ScannerClassFilter: fromScannerClassProto(req.GetScannerClassFilter()),
+		SeverityFilter:     fromSeverityProto(req.GetSeverityFilter()),
+		LifecycleFilter:    fromLifecycleProto(req.GetLifecycleFilter()),
+		MinAgeDays:         int(req.GetMinAgeDays()),
+		MaxAgeDays:         int(req.GetMaxAgeDays()),
+		OwningTeamFilter:   req.GetOwningTeamFilter(),
+		FacetDimensions:    append([]string(nil), req.GetFacetDimensions()...),
+	})
+	if err != nil {
+		if errors.Is(err, api.ErrMalformed) {
+			return nil, errMalformed
+		}
+		return nil, denial()
+	}
+	out := &securityv1.GetFindingsSummaryResponse{TotalCount: summary.TotalCount}
+	for _, facet := range summary.Facets {
+		out.Facets = append(out.Facets, toSummaryFacetProto(facet))
+	}
+	return out, nil
+}
+
+func toSummaryFacetProto(f api.SummaryFacet) *securityv1.SummaryFacet {
+	out := &securityv1.SummaryFacet{Dimension: f.Dimension}
+	for _, v := range f.Values {
+		out.Values = append(out.Values, &securityv1.SummaryFacetValue{Value: v.Value, Count: v.Count})
+	}
+	return out
 }
 
 func toTriageRecordProto(r api.TriageRecord) *securityv1.TriageRecord {

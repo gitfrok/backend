@@ -296,22 +296,24 @@ func attributionKey(tenantID, mergeRequestID, head, base string) string {
 
 // ListMergeRequestFindings pages the findings attributable to one merge
 // request (SPEC-0028). The order of operations is the security statement:
-// the merge request must exist in this context's own event-fed projection
-// and match the request's repository — unknown, cross-tenant, and
-// cross-repository are the same coarse denial (SPEC-0001); the PDP decides
-// findings.read on the merge request with server-derived context; and the
-// comparison is a server fact, materialized per (MR, head, base) triple. An
-// UNAVAILABLE comparison is reported with its reason and an empty list,
-// never as "no findings" (SPEC-0028 AC7).
+// the merge request must exist in this context's own event-fed projection —
+// unknown and cross-tenant are the same coarse denial (SPEC-0001); a
+// caller-supplied repository must match the projection's, but an EMPTY one
+// is accepted because the repository is server-derived state of the
+// projection (SPEC-0026 AC6); the PDP decides findings.read on the merge
+// request with server-derived context; and the comparison is a server fact,
+// materialized per (MR, head, base) triple. An UNAVAILABLE comparison is
+// reported with its reason and an empty list, never as "no findings"
+// (SPEC-0028 AC7).
 func (s *Service) ListMergeRequestFindings(ctx context.Context, req api.MergeRequestFindingsRequest) (api.MergeRequestFindingsPage, error) {
-	if !validContext(req.Context) || req.MergeRequestID == "" {
+	if !validTenantContext(req.Context) || req.MergeRequestID == "" {
 		return api.MergeRequestFindingsPage{}, api.ErrDenied
 	}
 	if req.AttributionFilter != api.AttributionStatusUnspecified && !req.AttributionFilter.Valid() {
 		return api.MergeRequestFindingsPage{}, api.ErrMalformed
 	}
 	mr, ok := s.projectionFor(req.TenantID, req.MergeRequestID)
-	if !ok || mr.RepositoryID != req.RepositoryID {
+	if !ok || (req.RepositoryID != "" && mr.RepositoryID != req.RepositoryID) {
 		return api.MergeRequestFindingsPage{}, api.ErrDenied
 	}
 	attrs := map[string]string{"repository": mr.RepositoryID}

@@ -56,10 +56,37 @@ type Service struct {
 
 	mu    sync.Mutex
 	packs map[string]*packEntry
-	// idempotency keys (tenant|requestID|range|scope) onto pack IDs: replaying
-	// a request returns the same pack and creates no second pack or audit
-	// record (SPEC-0032 AC1).
-	byIDKey map[string]string
+	// idempotency keys (tenant|requestID|range|scope) onto reservations: the
+	// key is RESERVED under the mutex before any side effect, so concurrent
+	// duplicates wait on the first writer and replay its result instead of
+	// each taking a PDP decision and appending an audit record (SPEC-0032
+	// AC1) — a rolled-back reservation replays its failure to every
+	// concurrent duplicate. A completed reservation stays registered as the
+	// replay record forever; a rolled-back one leaves the map when its last
+	// waiter has observed the failure — that is when the key is released
+	// for a fresh attempt.
+	byIDKey map[string]*packReservation
+}
+
+// packReservation is one idempotency key's in-flight or recorded state. The
+// first writer reserves it under the service mutex before the PDP decision
+// and the trail append; concurrent duplicates block on done and replay the
+// first writer's outcome — never a second decision or audit record
+// (SPEC-0032 AC1). done is closed exactly once, after packID/registered or
+// err is final.
+type packReservation struct {
+	done chan struct{}
+	// packID and registered are final once done is closed with no err.
+	packID     string
+	registered bool
+	// err is set when the reservation rolled back (decision denied or append
+	// failed): waiters see the same coarse failure, and the key is released
+	// once no waiter is left holding it.
+	err error
+	// waiters counts requests still holding the reservation: the reservation
+	// itself plus every duplicate queued on it. When it reaches zero the
+	// reservation leaves byIDKey — the key's release point.
+	waiters int
 }
 
 // packEntry is one pack under assembly or assembled. The header fields are
@@ -94,7 +121,7 @@ func New(pdp policyapi.DecisionPoint, events bus.Bus, trail api.TrailStore,
 		access:   access,
 		grants:   grants,
 		packs:    map[string]*packEntry{},
-		byIDKey:  map[string]string{},
+		byIDKey:  map[string]*packReservation{},
 	}
 }
 
@@ -107,25 +134,42 @@ func (s *Service) RequestPack(ctx context.Context, c api.Context, req api.PackRe
 		return "", 0, fmt.Errorf("%w: the range is closed — both bounds required, from not after to", api.ErrInvalidPackRequest)
 	}
 
-	// Idempotent replay: the same tenant, request ID, range and scope return
-	// the pack the first request created — no second pack, no second PDP
-	// decision, no second audit record (SPEC-0032 AC1).
+	// Idempotent replay, race-proof (SPEC-0032 AC1): the key is RESERVED
+	// under the mutex before any side effect. A completed reservation
+	// replays the first writer's pack; an in-flight one blocks its
+	// duplicates until the first writer finishes, then serves that outcome —
+	// no second pack, no second PDP decision, no second audit record.
 	idKey := fmt.Sprintf("%s|%s|%s|%s|%s", c.TenantID, c.RequestID,
 		req.RangeFrom.UTC().Format(time.RFC3339Nano), req.RangeTo.UTC().Format(time.RFC3339Nano), req.RepositoryID)
 	s.mu.Lock()
-	if packID, ok := s.byIDKey[idKey]; ok {
-		entry := s.packs[packID]
-		state := entry.state
+	if res, ok := s.byIDKey[idKey]; ok {
+		res.waiters++
 		s.mu.Unlock()
-		return packID, state, nil
+		<-res.done
+		if res.err != nil {
+			// The first writer rolled back; its failure is the answer, and
+			// this duplicate releases the key when it was the last holder.
+			err := res.err
+			s.releaseReservation(idKey, res)
+			return "", 0, err
+		}
+		s.mu.Lock()
+		state := s.packs[res.packID].state
+		s.mu.Unlock()
+		// A completed reservation stays registered: later duplicates replay
+		// it forever — that is the idempotency of SPEC-0032 AC1.
+		return res.packID, state, nil
 	}
+	res := &packReservation{done: make(chan struct{}), waiters: 1}
+	s.byIDKey[idKey] = res
 	s.mu.Unlock()
 
 	// Generation is a PDP decision asked about the tenant, with the range
 	// bounds and repository scope as server-derived context (SPEC-0032
 	// vocabulary table). A denial or an unreachable PDP is the same coarse
 	// shape as every other failed pack operation: the denial itself is
-	// audited by the policy surface, never by a second record here.
+	// audited by the policy surface, never by a second record here. The
+	// reservation rolls back: a later retry may ask again.
 	decision, err := s.decide(ctx, c, platformaudit.ActionEvidencePackGenerate,
 		policyapi.Resource{Type: "tenant", ID: c.TenantID}, map[string]string{
 			"range_from":    req.RangeFrom.UTC().Format(time.RFC3339Nano),
@@ -133,6 +177,7 @@ func (s *Service) RequestPack(ctx context.Context, c api.Context, req api.PackRe
 			"repository_id": req.RepositoryID,
 		})
 	if err != nil || !decision.Allowed {
+		s.rollbackReservation(idKey, res, api.ErrPackUnavailable)
 		return "", 0, api.ErrPackUnavailable
 	}
 
@@ -158,6 +203,8 @@ func (s *Service) RequestPack(ctx context.Context, c api.Context, req api.PackRe
 	// Generation appends exactly one immutable audit record correlated to the
 	// decision ID (SPEC-0032 AC6). If the trail cannot take it, the pack is
 	// not created: an unaudited export is a worse failure than a refused one.
+	// The reservation rolls back with the failure, so no in-flight sentinel
+	// outlives the attempt.
 	if _, err := s.trail.Append(tenancy.WithTenant(ctx, tenancy.ID(c.TenantID)), api.Entry{
 		TenantID: c.TenantID,
 		Action:   api.Action(platformaudit.ActionEvidencePackGenerate),
@@ -175,19 +222,19 @@ func (s *Service) RequestPack(ctx context.Context, c api.Context, req api.PackRe
 		OccurredAt: now,
 		Provenance: api.ProvenanceFirstParty,
 	}); err != nil {
-		return "", 0, fmt.Errorf("audit: recording evidence pack generation: %w", err)
+		appendErr := fmt.Errorf("audit: recording evidence pack generation: %w", err)
+		s.rollbackReservation(idKey, res, appendErr)
+		return "", 0, appendErr
 	}
 
+	// Registration completes ONLY after the trail accepted the audit record:
+	// the pack becomes visible and the reservation becomes the PERMANENT
+	// replay record for this idempotency key (SPEC-0032 AC1).
 	s.mu.Lock()
-	// A concurrent replay of the same request ID raced us: honour the first
-	// writer's pack rather than registering a second.
-	if existing, ok := s.byIDKey[idKey]; ok {
-		state := s.packs[existing].state
-		s.mu.Unlock()
-		return existing, state, nil
-	}
 	s.packs[packID] = entry
-	s.byIDKey[idKey] = packID
+	res.packID = packID
+	res.registered = true
+	close(res.done)
 	s.mu.Unlock()
 
 	// The lifecycle events carry identifiers, scope, bounds and counts —
@@ -201,6 +248,38 @@ func (s *Service) RequestPack(ctx context.Context, c api.Context, req api.PackRe
 
 	go s.assemble(packID)
 	return packID, api.PackPending, nil
+}
+
+// rollbackReservation records one failed attempt on its reservation and
+// wakes every waiter with the same coarse failure. The reservation stays in
+// byIDKey until its last waiter has observed the outcome — that is when the
+// key is released and a later retry can become the first writer of a fresh
+// attempt. Releasing it here instead would let a concurrent duplicate sneak
+// a fresh attempt in while waiters are still blocked (SPEC-0032 AC1).
+func (s *Service) rollbackReservation(idKey string, res *packReservation, err error) {
+	s.mu.Lock()
+	res.err = err
+	s.releaseLocked(idKey, res)
+	close(res.done)
+	s.mu.Unlock()
+}
+
+// releaseReservation drops the caller's hold on a reservation after it
+// observed the outcome.
+func (s *Service) releaseReservation(idKey string, res *packReservation) {
+	s.mu.Lock()
+	s.releaseLocked(idKey, res)
+	s.mu.Unlock()
+}
+
+// releaseLocked drops one hold on a reservation; the caller owns s.mu. When
+// no holder is left the reservation leaves byIDKey: the idempotency key is
+// released.
+func (s *Service) releaseLocked(idKey string, res *packReservation) {
+	res.waiters--
+	if res.waiters == 0 && s.byIDKey[idKey] == res {
+		delete(s.byIDKey, idKey)
+	}
 }
 
 // PackStatus implements api.PackService.

@@ -325,38 +325,34 @@ func (s *Store) GetFinding(ctx context.Context, tenantID, findingID string) (api
 	return f, nil
 }
 
-// ListFindings returns one page of the tenant's findings in ID order.
-//
-// NOTE (T-0023 WIP): the authorization-derived RepositoryIDs set and the
-// age/owning-team filters the app.ListFilter now carries are enforced by the
-// MemoryStore and still awaiting this adapter's parity; the triage-dashboard
-// work that owns them lands the remaining clauses.
+// ListFindings returns one page of the tenant's findings in ID order. The
+// repository scoping and the age/owning-team filters ride the SAME
+// filterClause the summary aggregate runs under (SPEC-0026 AC2/AC6, SPEC-0027
+// AC4): the authorization-derived repository set is part of the query, never
+// a mask applied late.
 func (s *Store) ListFindings(ctx context.Context, tenantID string, f app.ListFilter) ([]api.Finding, error) {
 	ctx = tenancy.WithTenant(ctx, tenancy.ID(tenantID))
-	where := []string{"repository_id = $1"}
-	args := []any{f.RepositoryID}
-	if f.ScannerClass != "" {
-		args = append(args, string(f.ScannerClass))
-		where = append(where, fmt.Sprintf("scanner_class = $%d", len(args)))
+
+	// A non-nil empty repository set matches nothing, fail closed
+	// (SPEC-0026 AC6): no query runs at all.
+	if f.RepositoryIDs != nil && len(f.RepositoryIDs) == 0 {
+		return []api.Finding{}, nil
 	}
-	if f.Severity != "" {
-		args = append(args, string(f.Severity))
-		where = append(where, fmt.Sprintf("severity = $%d", len(args)))
-	}
-	if f.Lifecycle != "" {
-		args = append(args, string(f.Lifecycle))
-		where = append(where, fmt.Sprintf("lifecycle = $%d", len(args)))
-	}
+
+	where, args, join := filterClause(f)
 	if f.AfterID != "" {
 		args = append(args, f.AfterID)
-		where = append(where, fmt.Sprintf("id > $%d", len(args)))
+		where = append(where, fmt.Sprintf("f.id > $%d", len(args)))
 	}
-	query := `SELECT id, tenant_id, repository_id, scanner_class, tool_name, tool_version,
-	                 rule_id, severity, artifact_path, enclosing_content, component,
-	                 component_version, lifecycle, first_seen_scan_id, last_seen_scan_id,
-	                 provenance, provenance_media_type
-	            FROM security.findings WHERE ` + strings.Join(where, " AND ") + `
-	           ORDER BY id`
+	query := `SELECT f.id, f.tenant_id, f.repository_id, f.scanner_class, f.tool_name, f.tool_version,
+	                 f.rule_id, f.severity, f.artifact_path, f.enclosing_content, f.component,
+	                 f.component_version, f.lifecycle, f.first_seen_scan_id, f.last_seen_scan_id,
+	                 f.provenance, f.provenance_media_type
+	            FROM security.findings f` + join
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, " AND ")
+	}
+	query += ` ORDER BY f.id`
 	if f.Limit > 0 {
 		args = append(args, f.Limit)
 		query += fmt.Sprintf(" LIMIT $%d", len(args))

@@ -252,15 +252,19 @@ func (s *Service) GetFinding(ctx context.Context, c api.Context, findingID strin
 	return f, nil
 }
 
-// ListFindings pages a tenant-scoped, filtered listing (SPEC-0025). The
-// listing is always scoped to the verified context's repository: a filter
-// naming any other repository is a coarse denial, which is what stops a
-// listing from enumerating repositories the caller cannot name.
+// ListFindings pages a tenant-scoped, filtered listing (SPEC-0025,
+// SPEC-0026). Two shapes share the one surface:
+//
+//   - A context naming a repository is the single-repository read: a filter
+//     naming any other repository is a coarse denial, which is what stops a
+//     listing from enumerating repositories the caller cannot name.
+//   - A context naming NO repository is the tenant-wide dashboard read
+//     (SPEC-0026 AC1/AC6): the readable repository set is derived per
+//     request from PDP decisions over the repositories holding findings —
+//     the same pattern GetFindingsSummary runs — and applied inside the
+//     store's query, never as a mask over an unfiltered pre-aggregate.
 func (s *Service) ListFindings(ctx context.Context, req api.ListRequest) (api.ListPage, error) {
-	if !validContext(req.Context) {
-		return api.ListPage{}, api.ErrDenied
-	}
-	if req.RepositoryFilter != "" && req.RepositoryFilter != req.RepositoryID {
+	if !validTenantContext(req.Context) {
 		return api.ListPage{}, api.ErrDenied
 	}
 	attrs := map[string]string{}
@@ -273,8 +277,56 @@ func (s *Service) ListFindings(ctx context.Context, req api.ListRequest) (api.Li
 	if req.LifecycleFilter != "" {
 		attrs["lifecycle"] = string(req.LifecycleFilter)
 	}
-	if !s.allowed(ctx, req.Context, "findings.read", "repository", req.RepositoryID, attrs) {
-		return api.ListPage{}, api.ErrDenied
+
+	filter := ListFilter{
+		ScannerClass: req.ScannerClassFilter,
+		Severity:     req.SeverityFilter,
+		Lifecycle:    req.LifecycleFilter,
+		MinAgeDays:   req.MinAgeDays,
+		MaxAgeDays:   req.MaxAgeDays,
+		OwningTeam:   req.OwningTeamFilter,
+		Limit:        0, // set after the page size is clamped
+	}
+	if req.RepositoryID != "" {
+		// Single-repository path, validated as before (SPEC-0025).
+		if req.RepositoryFilter != "" && req.RepositoryFilter != req.RepositoryID {
+			return api.ListPage{}, api.ErrDenied
+		}
+		if !s.allowed(ctx, req.Context, "findings.read", "repository", req.RepositoryID, attrs) {
+			return api.ListPage{}, api.ErrDenied
+		}
+		filter.RepositoryID = req.RepositoryID
+	} else {
+		// Tenant-wide path (SPEC-0026 AC6): the readable set is derived
+		// server-side, per request, from PDP decisions over the repositories
+		// that hold findings. A named filter outside that set is the same
+		// coarse denial as naming a repository that does not exist.
+		candidates, err := s.store.RepositoriesWithFindings(ctx, req.TenantID)
+		if err != nil {
+			return api.ListPage{}, api.ErrDenied
+		}
+		readable := make([]string, 0, len(candidates))
+		for _, repoID := range candidates {
+			if s.allowed(ctx, req.Context, "findings.read", "repository", repoID, attrs) {
+				readable = append(readable, repoID)
+			}
+		}
+		if req.RepositoryFilter != "" {
+			inSet := false
+			for _, r := range readable {
+				if r == req.RepositoryFilter {
+					inSet = true
+					break
+				}
+			}
+			if !inSet {
+				return api.ListPage{}, api.ErrDenied
+			}
+			readable = []string{req.RepositoryFilter}
+		}
+		// A non-nil set, possibly empty, is applied inside the query and
+		// matches nothing when empty — fail closed (SPEC-0026 AC6).
+		filter.RepositoryIDs = readable
 	}
 
 	limit := req.PageSize
@@ -284,14 +336,8 @@ func (s *Service) ListFindings(ctx context.Context, req api.ListRequest) (api.Li
 	if limit > api.MaxPageSize {
 		limit = api.MaxPageSize
 	}
+	filter.Limit = limit + 1 // one extra row tells us a next page exists
 
-	filter := ListFilter{
-		RepositoryID: req.RepositoryID,
-		ScannerClass: req.ScannerClassFilter,
-		Severity:     req.SeverityFilter,
-		Lifecycle:    req.LifecycleFilter,
-		Limit:        limit + 1, // one extra row tells us a next page exists
-	}
 	if req.PageToken != "" {
 		cursor, ok := s.decodeCursor(req.PageToken, req)
 		if !ok {
@@ -499,6 +545,25 @@ func validContext(c api.Context) bool {
 	return c.TenantID != "" && c.RepositoryID != "" && c.ActorID != "" && c.RequestID != ""
 }
 
+// validTenantContext is the relaxed check the tenant-wide read paths apply
+// (SPEC-0026 AC6): the repository scope is derived server-side for them, so
+// a caller-supplied repository is OPTIONAL — tenant, actor, and request ID
+// remain mandatory. Single-repository paths keep validContext.
+func validTenantContext(c api.Context) bool {
+	return c.TenantID != "" && c.ActorID != "" && c.RequestID != ""
+}
+
+// listScope is the repository scope a list cursor is bound to: the named
+// filter when one is set, the context's repository otherwise. Both read
+// shapes agree on it, so a token issued by one listing stays inert under
+// another (SPEC-0025).
+func listScope(req api.ListRequest) string {
+	if req.RepositoryFilter != "" {
+		return req.RepositoryFilter
+	}
+	return req.RepositoryID
+}
+
 // validateChunk applies the boundary bounds: a malformed request is rejected
 // whole, before any decision or write, without partial ingest (SPEC-0025
 // AC6).
@@ -576,14 +641,19 @@ type cursor struct {
 	Class      api.ScannerClass
 	Severity   api.Severity
 	Lifecycle  api.Lifecycle
+	MinAgeDays int
+	MaxAgeDays int
+	OwningTeam string
 	AfterID    string
 }
 
 func (s *Service) encodeCursor(req api.ListRequest, lastID string) string {
 	c := cursor{
-		TenantID: req.TenantID, Repository: req.RepositoryID,
+		TenantID: req.TenantID, Repository: listScope(req),
 		Class: req.ScannerClassFilter, Severity: req.SeverityFilter,
-		Lifecycle: req.LifecycleFilter, AfterID: lastID,
+		Lifecycle: req.LifecycleFilter, MinAgeDays: req.MinAgeDays,
+		MaxAgeDays: req.MaxAgeDays, OwningTeam: req.OwningTeamFilter,
+		AfterID: lastID,
 	}
 	payload, err := json.Marshal(c)
 	if err != nil {
@@ -618,9 +688,11 @@ func (s *Service) decodeCursor(token string, req api.ListRequest) (cursor, bool)
 		return cursor{}, false
 	}
 	// Bound to the tenant and the filters that issued it.
-	if c.TenantID != req.TenantID || c.Repository != req.RepositoryID ||
+	if c.TenantID != req.TenantID || c.Repository != listScope(req) ||
 		c.Class != req.ScannerClassFilter || c.Severity != req.SeverityFilter ||
-		c.Lifecycle != req.LifecycleFilter || c.AfterID == "" {
+		c.Lifecycle != req.LifecycleFilter || c.MinAgeDays != req.MinAgeDays ||
+		c.MaxAgeDays != req.MaxAgeDays || c.OwningTeam != req.OwningTeamFilter ||
+		c.AfterID == "" {
 		return cursor{}, false
 	}
 	return c, true
