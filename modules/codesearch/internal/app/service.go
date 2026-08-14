@@ -53,6 +53,10 @@ type Config struct {
 	// BackfillPace is the interval a backfill yields between repositories, so backfill does not
 	// starve interactive indexing.
 	BackfillPace time.Duration
+	// JobTimeout bounds one indexing job. The single worker must never sit on one hung content
+	// fetch; a job that exceeds the bound is abandoned (and its lag reported) so the remaining
+	// repositories keep indexing (L15).
+	JobTimeout time.Duration
 }
 
 // DefaultConfig is the Phase-2 statement of the bounds.
@@ -65,6 +69,7 @@ func DefaultConfig() Config {
 		MaxContextLines:  10,
 		MaxFilesPerRepo:  20000,
 		MaxFileBytes:     1 << 20,
+		JobTimeout:       2 * time.Minute,
 	}
 }
 
@@ -138,6 +143,9 @@ func NewService(repos repoapi.Reader, pdp policyapi.DecisionPoint, events bus.Bu
 	}
 	if cfg.MaxFileBytes <= 0 {
 		cfg.MaxFileBytes = d.MaxFileBytes
+	}
+	if cfg.JobTimeout <= 0 {
+		cfg.JobTimeout = d.JobTimeout
 	}
 	s := &Service{
 		proj:        NewProjection(repos),
@@ -242,9 +250,12 @@ func (s *Service) indexOne(job indexJob) {
 
 	// Detached context, deliberately: indexOne runs from the absorb worker after the admitting
 	// request has returned, so there is no caller context to inherit. The work must outlive any
-	// single request; cancellation belongs to the plane, not to a query (SPEC-0036: comment-only
-	// clarification, no behavior change).
-	ctx := context.Background()
+	// single request; cancellation belongs to the plane, not to a query. The per-job timeout is
+	// the plane's own bound, not a caller's: one hung content fetch must not stall the single
+	// worker and every repository queued behind it. A timed-out job reports its lag and re-enters
+	// on the next admission or backfill (L15).
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.JobTimeout)
+	defer cancel()
 	entries, err := cs.ListFiles(ctx, job.tenant, job.repo, job.revision)
 	if err != nil {
 		s.reportLagIfBoundExceeded(key)
@@ -420,12 +431,14 @@ func (s *Service) Search(ctx context.Context, q csapi.Query) (csapi.Page, error)
 		return zero, csapi.ErrDenied
 	}
 
-	// A cursor is honoured only if it verifies, is bound to this tenant and query, and is not
-	// expired; anything else yields no content (SPEC-0035 AC1).
+	// A cursor is honoured only if it verifies, is bound to this tenant, this query, and the
+	// principal it was issued to, and is not expired; anything else yields no content
+	// (SPEC-0035 AC1, L17).
 	offset := 0
 	if q.PageToken != "" {
 		claims, ok := s.decodeCursor(q.PageToken)
-		if !ok || claims.Tenant != q.TenantID || claims.Text != q.Text || claims.Mode != int(q.Mode) ||
+		if !ok || claims.Tenant != q.TenantID || claims.Actor != q.ActorID ||
+			claims.Text != q.Text || claims.Mode != int(q.Mode) ||
 			time.Now().UTC().After(claims.Exp) {
 			return zero, nil
 		}
@@ -446,7 +459,7 @@ func (s *Service) Search(ctx context.Context, q csapi.Query) (csapi.Page, error)
 	var next string
 	if len(page) > int(limit) {
 		page = page[:limit]
-		next = s.encodeCursor(q.TenantID, q.Text, int(q.Mode), offset+int(limit),
+		next = s.encodeCursor(q.TenantID, q.ActorID, q.Text, int(q.Mode), offset+int(limit),
 			time.Now().UTC().Add(s.cfg.CursorLifetime))
 	}
 	return csapi.Page{Matches: page, NextPageToken: next}, nil

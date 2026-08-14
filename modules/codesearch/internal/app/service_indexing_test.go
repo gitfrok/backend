@@ -240,7 +240,7 @@ func TestCursorExpiryAndCrossTenantRefused(t *testing.T) {
 
 	// An expired token (the minting shape, a past deadline).
 	expired := idxQuery("t-1", "owner", "lifetoken")
-	expired.PageToken = svc.encodeCursor("t-1", "lifetoken", int(csapi.QueryModeSubstring), 2,
+	expired.PageToken = svc.encodeCursor("t-1", "owner", "lifetoken", int(csapi.QueryModeSubstring), 2,
 		time.Now().UTC().Add(-time.Minute))
 	if page, err := svc.Search(ctx, expired); err != nil || !reflect.DeepEqual(page, csapi.Page{}) {
 		t.Fatalf("expired token must yield the zero Page, got %+v err=%v", page, err)
@@ -248,7 +248,7 @@ func TestCursorExpiryAndCrossTenantRefused(t *testing.T) {
 
 	// A token minted for another tenant.
 	cross := idxQuery("t-1", "owner", "lifetoken")
-	cross.PageToken = svc.encodeCursor("other-tenant", "lifetoken", int(csapi.QueryModeSubstring), 0,
+	cross.PageToken = svc.encodeCursor("other-tenant", "owner", "lifetoken", int(csapi.QueryModeSubstring), 0,
 		time.Now().UTC().Add(time.Hour))
 	if page, err := svc.Search(ctx, cross); err != nil || !reflect.DeepEqual(page, csapi.Page{}) {
 		t.Fatalf("cross-tenant token must yield the zero Page, got %+v err=%v", page, err)
@@ -265,5 +265,94 @@ func TestCursorExpiryAndCrossTenantRefused(t *testing.T) {
 	second, err := svc.Search(ctx, live)
 	if err != nil || len(second.Matches) != 2 || second.NextPageToken != "" {
 		t.Fatalf("second page: %+v err=%v", second, err)
+	}
+}
+
+// Cursor principal binding (L17): a token is issued to one actor; a different actor in the same
+// tenant replaying it yields the zero Page — the same coarse shape as every other refusal.
+func TestCursorIsBoundToTheIssuingActor(t *testing.T) {
+	content := newIdxContent()
+	svc, b := newIdxService(t, Config{}, content)
+	ctx := context.Background()
+
+	content.put("repo-a", "rev-1", "a.go", strings.Repeat("actortoken\n", 4))
+	pushAdmission(t, b, svc, "t-1", "repo-a", "rev-1", time.Now().UTC())
+
+	first := idxQuery("t-1", "owner", "actortoken")
+	first.ResultLimit = 2
+	page, err := svc.Search(ctx, first)
+	if err != nil || len(page.Matches) != 2 || page.NextPageToken == "" {
+		t.Fatalf("first page: %+v err=%v", page, err)
+	}
+
+	// The issuing principal pages through.
+	next := idxQuery("t-1", "owner", "actortoken")
+	next.PageToken = page.NextPageToken
+	second, err := svc.Search(ctx, next)
+	if err != nil || len(second.Matches) != 2 {
+		t.Fatalf("the issuing actor must keep paging: %+v err=%v", second, err)
+	}
+
+	// A different actor in the same tenant reusing the same token gets nothing.
+	intruder := idxQuery("t-1", "intruder", "actortoken")
+	intruder.PageToken = page.NextPageToken
+	if page, err := svc.Search(ctx, intruder); err != nil || !reflect.DeepEqual(page, csapi.Page{}) {
+		t.Fatalf("a replayed token under another actor must yield the zero Page, got %+v err=%v", page, err)
+	}
+}
+
+// hungContent blocks ListFiles for one repository until the context is canceled: the shape of a
+// hung content fetch the worker must survive.
+type hungContent struct {
+	inner    *idxContent
+	hungRepo string
+}
+
+func (h *hungContent) ListFiles(ctx context.Context, tenant, repo, revision string) ([]csapi.FileEntry, error) {
+	if repo == h.hungRepo {
+		<-ctx.Done() // hang until the plane's per-job timeout cancels
+		return nil, ctx.Err()
+	}
+	return h.inner.ListFiles(ctx, tenant, repo, revision)
+}
+
+func (h *hungContent) ReadFile(ctx context.Context, tenant, repo, revision, path string) ([]byte, error) {
+	return h.inner.ReadFile(ctx, tenant, repo, revision, path)
+}
+
+// L15: one hung content fetch must not stall the single indexing worker. The hung job times out
+// under the per-job bound, reports nothing new by itself, and the repository queued behind it
+// still indexes.
+func TestAHungIndexingJobTimesOutAndTheWorkerMovesOn(t *testing.T) {
+	inner := newIdxContent()
+	inner.put("repo-ok", "rev-1", "a.go", "package a // afterhang\n")
+	content := &hungContent{inner: inner, hungRepo: "repo-hung"}
+	svc, b := newIdxService(t, Config{JobTimeout: 50 * time.Millisecond}, content)
+	ctx := context.Background()
+
+	// Admit the hung repository first, then a healthy one: without the per-job timeout the
+	// worker would sit on repo-hung forever and repo-ok would never index.
+	for _, repo := range []string{"repo-hung", "repo-ok"} {
+		if err := b.Publish(ctx, repoapi.RepositoryCreated{
+			EventID: "evt-created-" + repo, TenantID: "t-1", RepoID: repo, OccurredAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("publish created %s: %v", repo, err)
+		}
+		if err := b.Publish(ctx, repoapi.RefUpdated{
+			EventID: "evt-ref-" + repo, TenantID: "t-1", RepoID: repo,
+			Ref: "refs/heads/main", NewSha: "rev-1", OccurredAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("publish ref %s: %v", repo, err)
+		}
+	}
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := svc.Drain(dctx); err != nil {
+		t.Fatalf("the worker stalled on the hung job: %v", err)
+	}
+
+	page, err := svc.Search(ctx, idxQuery("t-1", "owner", "afterhang"))
+	if err != nil || len(page.Matches) != 1 || page.Matches[0].Revision != "rev-1" {
+		t.Fatalf("the repository queued behind the hung job never indexed: %+v err=%v", page, err)
 	}
 }
