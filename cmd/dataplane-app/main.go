@@ -433,6 +433,27 @@ func main() {
 		}
 	}
 
+	// Install-time self-registration (T-0031, SPEC-0039 AC1): when the install carried an
+	// enrolment token and a gateway address, the plane selects its per-cloud driver and dials
+	// the control plane OUTBOUND to register, then serves the channel. An unconfigured plane
+	// serves its own doors only. A configuration error fails the rollout; a runtime connection
+	// failure is reported, never fatal, because the plane's local doors still stand.
+	agentCfg, agentEnabled, err := loadAgentClientConfig(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dataplane agent configuration: %v\n", err)
+		os.Exit(1)
+	}
+	if agentEnabled {
+		go func() {
+			agentLogf := func(format string, args ...any) {
+				fmt.Fprintf(os.Stderr, "dataplane agent: "+format+"\n", args...)
+			}
+			if err := runAgent(ctx, agentCfg, agentLogf); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "dataplane agent: %v\n", err)
+			}
+		}()
+	}
+
 	fmt.Printf("gitfrok dataplane-app: repository + codesearch on the in-process bus, PDP on %s\n", bundleDir)
 	if err := health.Run(ctx, health.ListenAddr(os.Getenv(listenAddrEnv))); err != nil {
 		fmt.Fprintf(os.Stderr, "dataplane health server: %v\n", err)

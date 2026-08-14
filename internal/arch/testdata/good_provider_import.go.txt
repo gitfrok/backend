@@ -1,0 +1,8 @@
+// Fixture guarding against false positives: the same provider-specific import is legal when
+// it sits inside the cloud driver seam, because that is the one place per-cloud code may live
+// (SPEC-0039 AC2).
+package gke
+
+import (
+	_ "github.com/aws/aws-sdk-go-v2/service/s3"
+)

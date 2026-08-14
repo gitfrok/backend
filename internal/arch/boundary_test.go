@@ -113,6 +113,12 @@ func TestForbiddenEdgesAreRejected(t *testing.T) {
 			relDir:  "modules/audit/internal/adapters/postgres",
 			want:    RuleAuditImportsCodereview,
 		},
+		{
+			name:    "SPEC-0039 AC2 provider import outside the driver seam",
+			fixture: "bad_provider_import.go.txt",
+			relDir:  "modules/repository/internal/app",
+			want:    RuleProviderImportOutsideDriver,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,6 +144,7 @@ func TestLegitimateCodeIsAccepted(t *testing.T) {
 	}{
 		{"clean api surface", "good_api.go.txt", "modules/repository/api"},
 		{"domain using own module internal", "good_domain.go.txt", "modules/repository/internal/domain"},
+		{"provider import inside the driver seam", "good_provider_import.go.txt", "platform/clouddriver/provider"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

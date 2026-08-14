@@ -1,0 +1,8 @@
+// Fixture for T-0031 (SPEC-0039 AC2): a provider-specific import outside the cloud driver
+// seam is a boundary violation — a new cloud provider is a driver plus a matrix row, never
+// cloud SDK code reached for from module or application code.
+package app
+
+import (
+	_ "github.com/aws/aws-sdk-go-v2/service/s3"
+)

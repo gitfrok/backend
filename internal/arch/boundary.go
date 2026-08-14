@@ -37,6 +37,11 @@ const (
 	// the trail. The store rejects non-FIRST_PARTY at runtime (SPEC-0011 AC6/AC11); this rule
 	// makes that rejection structurally unreachable from the wrong direction.
 	RuleAuditImportsCodereview = "audit-imports-codereview"
+	// RuleProviderImportOutsideDriver enforces SPEC-0039 AC2 (T-0031): every cloud-specific
+	// dependency lives behind the cloud driver seam. Importing a provider SDK anywhere outside
+	// the seam means a new cloud is being added as scattered module code instead of as one
+	// driver plus one conformance-matrix row — the same structural refusal invariant 22 makes.
+	RuleProviderImportOutsideDriver = "provider-import-outside-driver"
 )
 
 // infraMarkers are import substrings a domain package must never pull in (invariant 16).
@@ -45,6 +50,20 @@ var infraMarkers = []string{
 	"net/http", "google.golang.org/grpc",
 	"redpanda", "twmb/franz-go", "opa", "open-policy-agent", "zitadel",
 }
+
+// providerMarkers are import prefixes that name a cloud provider's SDK or cloud-specific
+// client library. Anything matching one of these is per-cloud code and may only live behind
+// the driver seam (SPEC-0039 AC2, ADR-0010).
+var providerMarkers = []string{
+	"cloud.google.com/go",
+	"github.com/aws/aws-sdk-go",
+	"github.com/Azure/azure-sdk-for-go",
+	"github.com/Azure/go-autorest",
+	"k8s.io/legacy-cloud-providers",
+}
+
+// driverSeamPath marks the one tree allowed to import providerMarkers: the cloud driver seam.
+const driverSeamPath = "/platform/clouddriver/"
 
 // Split so this scanner does not classify its own rule implementation as a
 // production SQL query when walking the real tree.
@@ -86,7 +105,14 @@ func checkFile(file, owningModule string, imports []string) []Violation {
 	inDomain := strings.Contains(slash, "/internal/domain/")
 	inAPI := moduleAPIDirRe.MatchString(slash)
 	inAudit := strings.Contains(slash, "/modules/audit/")
+	inDriverSeam := strings.Contains(slash, driverSeamPath)
 	for _, imp := range imports {
+		// SPEC-0039 AC2: a provider-specific dependency may only appear behind the cloud
+		// driver seam. Outside it, a new cloud is being wired in as scattered code rather
+		// than as one driver plus one conformance-matrix row.
+		if isProviderImport(imp) && !inDriverSeam {
+			vs = append(vs, Violation{File: file, Import: imp, Rule: RuleProviderImportOutsideDriver})
+		}
 		if m := moduleInternalRe.FindStringSubmatch(imp); m != nil {
 			if owningModule == "" || m[1] != owningModule {
 				vs = append(vs, Violation{File: file, Import: imp, Rule: RuleCrossModuleInternal})
@@ -117,6 +143,17 @@ func checkFile(file, owningModule string, imports []string) []Violation {
 func isInfra(imp string) bool {
 	for _, marker := range infraMarkers {
 		if strings.Contains(imp, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// isProviderImport reports whether an import path names a cloud-provider SDK or client — the
+// per-cloud code that must stay behind the driver seam (SPEC-0039 AC2).
+func isProviderImport(imp string) bool {
+	for _, marker := range providerMarkers {
+		if strings.HasPrefix(imp, marker) {
 			return true
 		}
 	}
