@@ -1,10 +1,11 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -239,6 +240,10 @@ func (s *Service) indexOne(job indexJob) {
 		return
 	}
 
+	// Detached context, deliberately: indexOne runs from the absorb worker after the admitting
+	// request has returned, so there is no caller context to inherit. The work must outlive any
+	// single request; cancellation belongs to the plane, not to a query (SPEC-0036: comment-only
+	// clarification, no behavior change).
 	ctx := context.Background()
 	entries, err := cs.ListFiles(ctx, job.tenant, job.repo, job.revision)
 	if err != nil {
@@ -326,6 +331,10 @@ func (s *Service) reportLagIfBoundExceeded(key repoKey) {
 	s.lagReported[dedupe] = struct{}{}
 	s.mu.Unlock()
 
+	// Detached context, deliberately: lag reporting fires from measurement paths that hold no
+	// caller context (query-path callers must not pay for an out-of-band publish); the report
+	// must not be canceled by the request whose lag it describes (SPEC-0036: comment-only
+	// clarification, no behavior change).
 	_ = s.events.Publish(context.Background(), csapi.IndexLagged{
 		EventID:             ids.NewULID(),
 		TenantID:            key.tenant,
@@ -494,14 +503,14 @@ func (s *Service) collect(scope []string, q csapi.Query, re *regexp.Regexp, ctxL
 			})
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].RepositoryID != out[j].RepositoryID {
-			return out[i].RepositoryID < out[j].RepositoryID
+	slices.SortStableFunc(out, func(a, b csapi.Match) int {
+		if c := cmp.Compare(a.RepositoryID, b.RepositoryID); c != 0 {
+			return c
 		}
-		if out[i].Path != out[j].Path {
-			return out[i].Path < out[j].Path
+		if c := cmp.Compare(a.Path, b.Path); c != 0 {
+			return c
 		}
-		return out[i].LineStart < out[j].LineStart
+		return cmp.Compare(a.LineStart, b.LineStart)
 	})
 	return out
 }
@@ -536,7 +545,7 @@ func (s *Service) GetIndexStatus(ctx context.Context, q csapi.Query) ([]csapi.In
 			s.reportLagIfBoundExceeded(key)
 		}
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].RepositoryID < entries[j].RepositoryID })
+	slices.SortFunc(entries, func(a, b csapi.IndexStatusEntry) int { return cmp.Compare(a.RepositoryID, b.RepositoryID) })
 	return entries, nil
 }
 

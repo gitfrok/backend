@@ -15,8 +15,9 @@
 package engine
 
 import (
+	"cmp"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -76,7 +77,7 @@ func Build(revision string, files []File) *Shard {
 	// file indexes agree.
 	sorted := make([]File, len(files))
 	copy(sorted, files)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+	slices.SortFunc(sorted, func(a, b File) int { return cmp.Compare(a.Path, b.Path) })
 
 	s := &Shard{revision: revision, trigrams: make(map[string][]int)}
 	docs := make([]fileDoc, 0, len(sorted))
@@ -286,7 +287,7 @@ func (s *Shard) intersect(tris []string) []int {
 			out = append(out, idx)
 		}
 	}
-	sort.Ints(out)
+	slices.Sort(out)
 	return out
 }
 

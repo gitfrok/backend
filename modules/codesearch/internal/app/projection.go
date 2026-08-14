@@ -4,10 +4,11 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -110,7 +111,7 @@ func (p *Projection) ReposOfTenant(tenantID string) []string {
 	for id := range byRepo {
 		out = append(out, string(id))
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -143,11 +144,11 @@ func (p *Projection) AllAdmitted() []AdmittedRepo {
 			out = append(out, AdmittedRepo{TenantID: string(tenant), RepoID: string(repo), Revision: head.sha})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].TenantID != out[j].TenantID {
-			return out[i].TenantID < out[j].TenantID
+	slices.SortFunc(out, func(a, b AdmittedRepo) int {
+		if c := cmp.Compare(a.TenantID, b.TenantID); c != 0 {
+			return c
 		}
-		return out[i].RepoID < out[j].RepoID
+		return cmp.Compare(a.RepoID, b.RepoID)
 	})
 	return out
 }
