@@ -8,8 +8,9 @@
 package app
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/gitfrok/backend/modules/policy/api"
@@ -104,11 +105,11 @@ func (s *MemoryStore) Range(_ context.Context, tenantID string, q api.Historical
 		}
 		out = append(out, cloneRecord(r))
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].DecidedAt.Equal(out[j].DecidedAt) {
-			return out[i].DecidedAt.Before(out[j].DecidedAt)
+	slices.SortFunc(out, func(a, b api.Record) int {
+		if c := a.DecidedAt.Compare(b.DecidedAt); c != 0 {
+			return c
 		}
-		return out[i].DecisionID < out[j].DecisionID
+		return cmp.Compare(a.DecisionID, b.DecisionID)
 	})
 	if limit >= 0 && len(out) > limit {
 		out = out[:limit+1]

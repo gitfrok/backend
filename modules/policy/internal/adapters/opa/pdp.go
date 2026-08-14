@@ -82,6 +82,9 @@ func New(dir string) (*PDP, error) {
 
 	// Prepared once. Compiling Rego per request would put the policy compiler on the hot path of
 	// every authorized action, and SPEC-0002 asks for a p99 of a few milliseconds.
+	// Detached context, deliberately: preparation happens at plane wiring, before any request
+	// exists to inherit a context from; the compiled query then serves every decision
+	// (SPEC-0036: comment-only clarification, no behavior change).
 	query, err := rego.New(
 		rego.Query(decisionQuery),
 		rego.ParsedBundle("policy", &b),
