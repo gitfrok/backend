@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -58,7 +60,11 @@ func request() api.Request {
 }
 
 func newService(pdp api.DecisionPoint, b bus.Bus) *Service {
-	s := New(pdp, b)
+	return newServiceWithStore(pdp, b, NewMemoryStore())
+}
+
+func newServiceWithStore(pdp api.DecisionPoint, b bus.Bus, store RecordStore) *Service {
+	s := New(pdp, b, store)
 	s.now = func() time.Time { return time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC) }
 	return s
 }
@@ -81,8 +87,14 @@ func TestDecisionIsReturnedUnaltered(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Decide: %v", err)
 			}
-			if got != tc.want {
-				t.Errorf("Decide() = %+v, want %+v", got, tc.want)
+			// The evaluator's answer passes through verbatim; the only fields the service adds
+			// are its own server-produced provenance (SPEC-0030 AC2): the mode and the digest
+			// over the request it just evaluated. No caller supplies either.
+			want := tc.want
+			want.Mode = api.ModeEnforced
+			want.InputDigest = digestOf(request())
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Decide() = %+v, want %+v", got, want)
 			}
 		})
 	}
@@ -221,5 +233,250 @@ func TestAllowedIsNeverTrueOnError(t *testing.T) {
 	}
 }
 
-// The service satisfies the port it is injected as.
-var _ api.DecisionPoint = (*Service)(nil)
+// --- T-0025: every decision is recorded with server-produced provenance ----------------------
+
+// SPEC-0029 AC1: a decision that happened must be retrievable afterwards, allowed or denied,
+// with the provenance it was made under.
+func TestEveryDecisionIsRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision api.Decision
+	}{
+		{"allow", allowed()},
+		{"deny", denied()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newService(&stubPDP{decision: tc.decision}, &recorder{})
+			req := request()
+			if _, err := svc.Decide(t.Context(), req); err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+			rec, err := svc.GetDecision(t.Context(), req.TenantID, tc.decision.DecisionID)
+			if err != nil {
+				t.Fatalf("GetDecision: %v", err)
+			}
+			if rec.Mode != api.ModeEnforced {
+				t.Errorf("Mode = %q, want ENFORCED for a Decide-produced record", rec.Mode)
+			}
+			if rec.InputDigest != digestOf(req) {
+				t.Errorf("InputDigest = %q, want the digest over the recorded input", rec.InputDigest)
+			}
+			if rec.PolicyRevision != tc.decision.PolicyRevision || rec.Allowed != tc.decision.Allowed ||
+				rec.Action != req.Action || rec.TenantID != req.TenantID {
+				t.Errorf("record = %+v, want the decision's outcome over the request", rec)
+			}
+		})
+	}
+}
+
+// The recorded input digest is reproducible from the recorded input itself: re-deriving it from
+// the record's question must land on the stored value, or an auditor could not prove which
+// input a decision answered (SPEC-0030).
+func TestRecordedDigestIsReDerivableFromTheRecord(t *testing.T) {
+	svc := newService(&stubPDP{decision: allowed()}, &recorder{})
+	req := request()
+	req.Context = map[string]string{"protocol": "https", "origin": "web"}
+	if _, err := svc.Decide(t.Context(), req); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	rec, err := svc.GetDecision(t.Context(), req.TenantID, allowed().DecisionID)
+	if err != nil {
+		t.Fatalf("GetDecision: %v", err)
+	}
+	if got := digestOf(requestOf(rec)); got != rec.InputDigest {
+		t.Errorf("re-derived digest %q, want the recorded %q", got, rec.InputDigest)
+	}
+}
+
+// An evaluator failure records nothing: a record of a decision the PDP never made would be a
+// false statement in the evidence trail.
+func TestEvaluatorErrorRecordsNothing(t *testing.T) {
+	svc := newService(&stubPDP{err: errors.New("bundle exploded")}, &recorder{})
+	if _, err := svc.Decide(t.Context(), request()); err == nil {
+		t.Fatal("expected an error")
+	}
+	if _, err := svc.GetDecision(t.Context(), "acme", "anything"); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("GetDecision = %v, want ErrNotFound: a failed decision leaves no record", err)
+	}
+}
+
+// Retrieval is tenant-scoped and coarse: another tenant's ID and a nonexistent ID are the same
+// not-found (SPEC-0030 AC6).
+func TestGetDecisionIsCoarseNotFound(t *testing.T) {
+	svc := newService(&stubPDP{decision: allowed()}, &recorder{})
+	if _, err := svc.Decide(t.Context(), request()); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if _, err := svc.GetDecision(t.Context(), "other-tenant", allowed().DecisionID); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("cross-tenant GetDecision = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.GetDecision(t.Context(), "acme", "no-such-id"); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("nonexistent GetDecision = %v, want the same ErrNotFound", err)
+	}
+}
+
+// --- T-0025: dry-run evaluation --------------------------------------------------------------
+
+// countingPDP is the candidate-bundle seam for dry-runs: it answers every replayed input with
+// the dictated decision, assigning each a fresh decision ID the way a real PDP would.
+type countingPDP struct {
+	decision api.Decision
+	err      error
+	calls    int
+	lastReqs []api.Request
+}
+
+func (s *countingPDP) Decide(_ context.Context, req api.Request) (api.Decision, error) {
+	s.calls++
+	s.lastReqs = append(s.lastReqs, req)
+	if s.err != nil {
+		return api.Decision{}, s.err
+	}
+	d := s.decision
+	d.DecisionID = fmt.Sprintf("01DRY%04d", s.calls)
+	return d, nil
+}
+
+// The dry-run's core claim (SPEC-0029 AC2): recorded enforced inputs are replayed through the
+// CANDIDATE bundle, each would-be decision labelled DRY_RUN under the candidate's revision, and
+// the digest re-derives the original — same question, same digest.
+func TestDryRunReplaysEnforcedHistoryThroughTheCandidate(t *testing.T) {
+	// Two enforced decisions form the history the dry-run replays.
+	rec := &recorder{}
+	pdp := &stubPDP{decision: allowed()}
+	svc := newService(pdp, rec)
+	candidate := &countingPDP{decision: api.Decision{Allowed: false, Reason: "denied", PolicyRevision: "rev-candidate"}}
+	svc.WithCandidateLoader(func(_ context.Context, ref string) (api.DecisionPoint, error) {
+		if ref != "candidate/bundle" {
+			t.Errorf("loader ref = %q, want the request's candidate reference", ref)
+		}
+		return candidate, nil
+	})
+	for i, action := range []string{"repo.read", "merge_request.merge"} {
+		req := request()
+		req.Action = action
+		// A real PDP assigns every decision a fresh ID; the stub needs one told to.
+		pdp.decision.DecisionID = fmt.Sprintf("01ENF%04d", i)
+		if _, err := svc.Decide(t.Context(), req); err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+	}
+
+	got, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+		TenantID:           "acme",
+		CandidateBundleRef: "candidate/bundle",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateDryRun: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("EvaluateDryRun returned %d decisions, want one per enforced record", len(got))
+	}
+	// Oldest first, replayed with the recorded inputs.
+	if candidate.lastReqs[0].Action != "repo.read" || candidate.lastReqs[1].Action != "merge_request.merge" {
+		t.Errorf("replayed actions %v, want the recorded history oldest first", candidate.lastReqs)
+	}
+	for i, d := range got {
+		if d.Mode != api.ModeDryRun {
+			t.Errorf("decision %d Mode = %q, want DRY_RUN", i, d.Mode)
+		}
+		if d.PolicyRevision != "rev-candidate" {
+			t.Errorf("decision %d PolicyRevision = %q, want the CANDIDATE's revision", i, d.PolicyRevision)
+		}
+		if d.InputDigest != digestOf(candidate.lastReqs[i]) {
+			t.Errorf("decision %d InputDigest = %q, want the original input's digest", i, d.InputDigest)
+		}
+	}
+
+	// The would-be decisions are recorded as DRY_RUN... and never replayed by a later dry-run:
+	// history is the enforced record, not a simulation of one.
+	if _, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+		TenantID: "acme", CandidateBundleRef: "candidate/bundle",
+	}); err != nil {
+		t.Fatalf("second EvaluateDryRun: %v", err)
+	}
+	if candidate.calls != 4 {
+		t.Errorf("candidate evaluated %d inputs across two dry-runs, want 2+2: dry-run records are never replayed", candidate.calls)
+	}
+
+	// A dry-run writes no enforcement and audits nothing — even its denials are not audit
+	// events: only enforced refusals are (G5).
+	if len(rec.events) != 0 {
+		t.Errorf("dry-run published %d audit events, want none: %+v", len(rec.events), rec.events)
+	}
+}
+
+// A range that would exceed its cap is rejected, never silently truncated (SPEC-0030).
+func TestDryRunOverCapIsRejected(t *testing.T) {
+	pdp := &stubPDP{decision: allowed()}
+	svc := newService(pdp, &recorder{})
+	svc.WithCandidateLoader(func(_ context.Context, _ string) (api.DecisionPoint, error) {
+		return &countingPDP{decision: allowed()}, nil
+	})
+	for i := 0; i < 3; i++ {
+		req := request()
+		req.Resource.ID = fmt.Sprintf("repo-%d", i)
+		pdp.decision.DecisionID = fmt.Sprintf("01ENF%04d", i)
+		if _, err := svc.Decide(t.Context(), req); err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+	}
+	_, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+		TenantID: "acme", CandidateBundleRef: "candidate", MaxResults: 2,
+	})
+	if !errors.Is(err, api.ErrInvalidRequest) {
+		t.Errorf("over-cap dry-run = %v, want ErrInvalidRequest: a partial result must never look complete", err)
+	}
+}
+
+// The cap itself is capped: a single dry-run may never ask for more than the hard maximum.
+func TestDryRunMaxResultsBeyondHardCapIsRejected(t *testing.T) {
+	loaded := false
+	svc := newService(&stubPDP{decision: allowed()}, &recorder{})
+	svc.WithCandidateLoader(func(_ context.Context, _ string) (api.DecisionPoint, error) {
+		loaded = true
+		return &countingPDP{}, nil
+	})
+	_, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+		TenantID: "acme", CandidateBundleRef: "candidate", MaxResults: 1001,
+	})
+	if !errors.Is(err, api.ErrInvalidRequest) {
+		t.Errorf("MaxResults=1001 = %v, want ErrInvalidRequest", err)
+	}
+	if loaded {
+		t.Error("an over-hard-cap request still loaded its candidate bundle")
+	}
+}
+
+// A plane without a candidate-bundle loader refuses dry-runs outright: results computed from
+// anything but the named candidate would be a lie about that candidate.
+func TestDryRunWithoutLoaderIsARefusal(t *testing.T) {
+	svc := newService(&stubPDP{decision: allowed()}, &recorder{})
+	_, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+		TenantID: "acme", CandidateBundleRef: "candidate",
+	})
+	if !errors.Is(err, api.ErrNoCandidateLoader) {
+		t.Errorf("loaderless dry-run = %v, want ErrNoCandidateLoader", err)
+	}
+}
+
+// A candidate that cannot answer one replayed input refuses the whole operation — never a
+// partial dry-run that looks complete.
+func TestDryRunCandidateFailureRefusesTheWholeRun(t *testing.T) {
+	svc := newService(&stubPDP{decision: allowed()}, &recorder{})
+	svc.WithCandidateLoader(func(_ context.Context, _ string) (api.DecisionPoint, error) {
+		return &countingPDP{err: errors.New("candidate exploded")}, nil
+	})
+	if _, err := svc.Decide(t.Context(), request()); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	_, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+		TenantID: "acme", CandidateBundleRef: "candidate",
+	})
+	if err == nil {
+		t.Fatal("a failing candidate produced a dry-run result")
+	}
+}
+
+// The service satisfies the full port it is injected as: decision point plus provenance.
+var _ api.Service = (*Service)(nil)

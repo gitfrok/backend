@@ -101,6 +101,18 @@ type PolicyDecisionDenied struct {
 	// be reproduced later: the rules will have moved on, and "it was denied under the rules of the
 	// day" is the only defensible answer to an audit question about a past decision.
 	PolicyRevision string
+	// InputDigest is the digest over the canonicalized input the decision was made over
+	// (SPEC-0029 AC8, SPEC-0030). With it an evidence pack can state not only that the action
+	// was gated but over exactly what input.
+	InputDigest string
+	// PolicyMode is the evaluation mode of the decision that produced the refusal — the string
+	// rendering of policy EvaluationMode, "ENFORCED" or "DRY_RUN". A DRY_RUN decision is never
+	// written as an enforced control record; it is labelled wherever it appears (SPEC-0029 AC2).
+	PolicyMode string
+	// ReliedUponTriage lists the ACCEPT/FALSE_POSITIVE triage record IDs a security merge gate
+	// relied on when it exempted a findings breach (SPEC-0029 AC4). Empty when no exemption was
+	// applied. IDs only — the triage justification text stays with the triage record.
+	ReliedUponTriage []string
 	// OccurredAt is when the decision was made.
 	OccurredAt time.Time
 }

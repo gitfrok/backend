@@ -21,7 +21,9 @@ import (
 	"github.com/gitfrok/backend/platform/tenancy"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type allowDecisionPoint struct{}
@@ -173,7 +175,7 @@ func TestDataPlaneServesSmartHTTPFrontDoor(t *testing.T) {
 
 	cfg := frontDoorConfig{storageAddr: storageAddr, httpAddr: "127.0.0.1:0", patKey: key}
 	ctx := t.Context()
-	doors, err := startGitFrontDoors(ctx, cfg, authenticator, allowDecisionPoint{})
+	doors, err := startGitFrontDoors(ctx, cfg, authenticator, allowDecisionPoint{}, nil)
 	if err != nil {
 		t.Fatalf("startGitFrontDoors(): %v", err)
 	}
@@ -249,7 +251,7 @@ func TestDataPlaneSSHDeniesUnknownKey(t *testing.T) {
 
 	cfg := frontDoorConfig{storageAddr: storageAddr, sshAddr: "127.0.0.1:0", patKey: key, verifierKeyID: "active-1"}
 	ctx := t.Context()
-	doors, err := startGitFrontDoors(ctx, cfg, authenticator, allowDecisionPoint{})
+	doors, err := startGitFrontDoors(ctx, cfg, authenticator, allowDecisionPoint{}, nil)
 	if err != nil {
 		t.Fatalf("startGitFrontDoors(): %v", err)
 	}
@@ -278,10 +280,12 @@ func TestDataPlaneSSHDeniesUnknownKey(t *testing.T) {
 
 // The PDP's gRPC door for out-of-process PEPs is served by the data plane
 // when configured, answering over the contract rather than in-process calls.
+// A door composed without a decision-record surface still serves Decide; the
+// provenance RPCs report Unimplemented rather than pretending a trail exists.
 func TestDataPlaneServesPolicyGRPCDoor(t *testing.T) {
 	cfg := frontDoorConfig{policyAddr: "127.0.0.1:0"}
 	ctx := t.Context()
-	doors, err := startGitFrontDoors(ctx, cfg, nil, allowDecisionPoint{})
+	doors, err := startGitFrontDoors(ctx, cfg, nil, allowDecisionPoint{}, nil)
 	if err != nil {
 		t.Fatalf("startGitFrontDoors(): %v", err)
 	}
@@ -307,6 +311,12 @@ func TestDataPlaneServesPolicyGRPCDoor(t *testing.T) {
 	}
 	if !response.GetAllowed() {
 		t.Fatalf("Decide allowed = %v", response.GetAllowed())
+	}
+	if _, err := client.EvaluateDryRun(decideCtx, &policyv1.EvaluateDryRunRequest{TenantId: "tenant-a", CandidateBundleRef: "x"}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("EvaluateDryRun without a record surface = %v, want Unimplemented", err)
+	}
+	if _, err := client.GetDecision(decideCtx, &policyv1.GetDecisionRequest{TenantId: "tenant-a", DecisionId: "x"}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("GetDecision without a record surface = %v, want Unimplemented", err)
 	}
 }
 

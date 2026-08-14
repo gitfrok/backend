@@ -225,7 +225,8 @@ func TestEvaluationFailureReturnsZeroDecision(t *testing.T) {
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Errorf("error = %v, want it to wrap %v", err, tc.wantErr)
 			}
-			if got != (api.Decision{}) {
+			if got.Allowed || got.Reason != "" || got.PolicyRevision != "" || got.DecisionID != "" ||
+				got.InputDigest != "" || got.Mode != "" || got.ReliedUponTriage != nil {
 				t.Errorf("returned a partially-populated decision %+v; it must be the zero "+
 					"value so an ignored error still denies", got)
 			}

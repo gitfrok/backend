@@ -221,8 +221,10 @@ func (d *gitFrontDoors) Close() {
 // startGitFrontDoors binds the configured doors. The authenticator is built
 // by the caller so credential lifecycle and transport share one Identity
 // composition; pdp serves the policy door and must be the plane's decision
-// point.
-func startGitFrontDoors(ctx context.Context, cfg frontDoorConfig, authenticator identityapi.Authenticator, pdp policyapi.DecisionPoint) (*gitFrontDoors, error) {
+// point. records is the decision-provenance surface served alongside it
+// (T-0025): nil on a composition without one, in which case the provenance
+// RPCs report Unimplemented while Decide still serves.
+func startGitFrontDoors(ctx context.Context, cfg frontDoorConfig, authenticator identityapi.Authenticator, pdp policyapi.DecisionPoint, records policyapi.DecisionRecords) (*gitFrontDoors, error) {
 	doors := &gitFrontDoors{}
 	if !cfg.enabled() {
 		return doors, nil
@@ -294,7 +296,7 @@ func startGitFrontDoors(ctx context.Context, cfg frontDoorConfig, authenticator 
 		}
 		doors.policyListener = listener
 		doors.policyServer = grpc.NewServer()
-		policyv1.RegisterPolicyDecisionPointServer(doors.policyServer, policy.NewGRPCServer(pdp))
+		policyv1.RegisterPolicyDecisionPointServer(doors.policyServer, policy.NewGRPCServer(pdp, records))
 	}
 
 	go func() {

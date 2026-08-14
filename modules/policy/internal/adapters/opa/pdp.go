@@ -125,11 +125,37 @@ func (p *PDP) Decide(ctx context.Context, req api.Request) (api.Decision, error)
 	reason, _ := doc["reason"].(string)
 
 	return api.Decision{
-		Allowed:        allowed,
-		Reason:         reason,
-		PolicyRevision: p.revision,
-		DecisionID:     ids.NewULID(),
+		Allowed:          allowed,
+		Reason:           reason,
+		PolicyRevision:   p.revision,
+		DecisionID:       ids.NewULID(),
+		ReliedUponTriage: reliedUponTriage(doc),
 	}, nil
+}
+
+// reliedUponTriage reads the triage record IDs the security merge gate relied on, straight from
+// the decision document (SPEC-0029 AC4): the policy that exempted a findings breach names the
+// ACCEPT/FALSE_POSITIVE triage records it relied on, and the adapter carries those IDs through
+// so the decision — and the audit record of its refusal — can name them too.
+//
+// Absence and malformation both read as "no exemption": the document member is optional (older
+// bundles predate it), and a malformed one cannot fabricate an exemption that policy did not
+// grant — only well-formed string lists survive this conversion.
+func reliedUponTriage(doc map[string]any) []string {
+	raw, ok := doc["relied_upon_triage"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Revision reports the loaded bundle's revision.

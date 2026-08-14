@@ -150,9 +150,19 @@ func main() {
 	// Fail the rollout, not the requests. A plane that starts with an unusable bundle denies
 	// everything, which reaches an operator as an unexplained total outage rather than as a
 	// deployment that refused to come up and said why.
-	pdp, err := policy.NewOPADecisionPoint(bundleDir, b)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "policy bundle at %s is unusable: %v\n", bundleDir, err)
+	//
+	// Since T-0025 (SPEC-0029 AC1) a configured plane also records every decision on the same
+	// Postgres trail as its audit events; a plane without a database URL records on the
+	// in-memory store. The composition line is the only difference between the two.
+	var pdp policyapi.Service
+	var pdpErr error
+	if dbPool != nil {
+		pdp, pdpErr = policy.NewOPADecisionPointWithPostgres(bundleDir, b, dbPool)
+	} else {
+		pdp, pdpErr = policy.NewOPADecisionPoint(bundleDir, b)
+	}
+	if pdpErr != nil {
+		fmt.Fprintf(os.Stderr, "policy bundle at %s is unusable: %v\n", bundleDir, pdpErr)
 		os.Exit(1)
 	}
 
@@ -192,7 +202,7 @@ func main() {
 	if frontCfg.httpAddr != "" || frontCfg.sshAddr != "" {
 		authenticator = identity.NewInMemory(frontCfg.patKey, dp.policy)
 	}
-	doors, err := startGitFrontDoors(ctx, frontCfg, authenticator, dp.policy)
+	doors, err := startGitFrontDoors(ctx, frontCfg, authenticator, dp.policy, pdp)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dataplane front doors: %v\n", err)
 		os.Exit(1)

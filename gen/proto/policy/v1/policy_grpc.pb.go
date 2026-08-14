@@ -35,7 +35,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PolicyDecisionPoint_Decide_FullMethodName = "/gitsaas.policy.v1.PolicyDecisionPoint/Decide"
+	PolicyDecisionPoint_Decide_FullMethodName         = "/gitsaas.policy.v1.PolicyDecisionPoint/Decide"
+	PolicyDecisionPoint_EvaluateDryRun_FullMethodName = "/gitsaas.policy.v1.PolicyDecisionPoint/EvaluateDryRun"
+	PolicyDecisionPoint_GetDecision_FullMethodName    = "/gitsaas.policy.v1.PolicyDecisionPoint/GetDecision"
 )
 
 // PolicyDecisionPointClient is the client API for PolicyDecisionPoint service.
@@ -50,6 +52,24 @@ type PolicyDecisionPointClient interface {
 	// independently attributable in the audit trail (SPEC-0003). Batching would make a partial
 	// failure ambiguous — and "some of these were allowed" is not a safe thing to be vague about.
 	Decide(ctx context.Context, in *DecideRequest, opts ...grpc.CallOption) (*DecideResponse, error)
+	// EvaluateDryRun evaluates a candidate bundle over a bounded range of
+	// historical decision inputs and reports what it *would* have decided,
+	// without enforcing anything (SPEC-0029 AC2, SPEC-0030).
+	//
+	// Unary rather than streaming for the same reason Decide is: each would-be
+	// decision must be independently attributable in the audit trail, and a
+	// partial failure over a range must not be vague about which inputs it
+	// covered. A dry-run that enforces nothing and changes no state is still an
+	// auditable operation, because it is how a rule's effect becomes knowable
+	// before it binds.
+	EvaluateDryRun(ctx context.Context, in *EvaluateDryRunRequest, opts ...grpc.CallOption) (*EvaluateDryRunResponse, error)
+	// GetDecision retrieves a decision record by the ID the PDP assigned it,
+	// with the provenance it was made under (SPEC-0029 AC1, SPEC-0030).
+	//
+	// Retrieval is the other half of "every decision records the version that
+	// decided it": a decision is only useful as evidence if it can be read back,
+	// by ID, with its deciding bundle revision, input digest and mode.
+	GetDecision(ctx context.Context, in *GetDecisionRequest, opts ...grpc.CallOption) (*GetDecisionResponse, error)
 }
 
 type policyDecisionPointClient struct {
@@ -70,6 +90,26 @@ func (c *policyDecisionPointClient) Decide(ctx context.Context, in *DecideReques
 	return out, nil
 }
 
+func (c *policyDecisionPointClient) EvaluateDryRun(ctx context.Context, in *EvaluateDryRunRequest, opts ...grpc.CallOption) (*EvaluateDryRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EvaluateDryRunResponse)
+	err := c.cc.Invoke(ctx, PolicyDecisionPoint_EvaluateDryRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *policyDecisionPointClient) GetDecision(ctx context.Context, in *GetDecisionRequest, opts ...grpc.CallOption) (*GetDecisionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetDecisionResponse)
+	err := c.cc.Invoke(ctx, PolicyDecisionPoint_GetDecision_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PolicyDecisionPointServer is the server API for PolicyDecisionPoint service.
 // All implementations must embed UnimplementedPolicyDecisionPointServer
 // for forward compatibility.
@@ -82,6 +122,24 @@ type PolicyDecisionPointServer interface {
 	// independently attributable in the audit trail (SPEC-0003). Batching would make a partial
 	// failure ambiguous — and "some of these were allowed" is not a safe thing to be vague about.
 	Decide(context.Context, *DecideRequest) (*DecideResponse, error)
+	// EvaluateDryRun evaluates a candidate bundle over a bounded range of
+	// historical decision inputs and reports what it *would* have decided,
+	// without enforcing anything (SPEC-0029 AC2, SPEC-0030).
+	//
+	// Unary rather than streaming for the same reason Decide is: each would-be
+	// decision must be independently attributable in the audit trail, and a
+	// partial failure over a range must not be vague about which inputs it
+	// covered. A dry-run that enforces nothing and changes no state is still an
+	// auditable operation, because it is how a rule's effect becomes knowable
+	// before it binds.
+	EvaluateDryRun(context.Context, *EvaluateDryRunRequest) (*EvaluateDryRunResponse, error)
+	// GetDecision retrieves a decision record by the ID the PDP assigned it,
+	// with the provenance it was made under (SPEC-0029 AC1, SPEC-0030).
+	//
+	// Retrieval is the other half of "every decision records the version that
+	// decided it": a decision is only useful as evidence if it can be read back,
+	// by ID, with its deciding bundle revision, input digest and mode.
+	GetDecision(context.Context, *GetDecisionRequest) (*GetDecisionResponse, error)
 	mustEmbedUnimplementedPolicyDecisionPointServer()
 }
 
@@ -94,6 +152,12 @@ type UnimplementedPolicyDecisionPointServer struct{}
 
 func (UnimplementedPolicyDecisionPointServer) Decide(context.Context, *DecideRequest) (*DecideResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Decide not implemented")
+}
+func (UnimplementedPolicyDecisionPointServer) EvaluateDryRun(context.Context, *EvaluateDryRunRequest) (*EvaluateDryRunResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EvaluateDryRun not implemented")
+}
+func (UnimplementedPolicyDecisionPointServer) GetDecision(context.Context, *GetDecisionRequest) (*GetDecisionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetDecision not implemented")
 }
 func (UnimplementedPolicyDecisionPointServer) mustEmbedUnimplementedPolicyDecisionPointServer() {}
 func (UnimplementedPolicyDecisionPointServer) testEmbeddedByValue()                             {}
@@ -134,6 +198,42 @@ func _PolicyDecisionPoint_Decide_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PolicyDecisionPoint_EvaluateDryRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EvaluateDryRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolicyDecisionPointServer).EvaluateDryRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolicyDecisionPoint_EvaluateDryRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolicyDecisionPointServer).EvaluateDryRun(ctx, req.(*EvaluateDryRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PolicyDecisionPoint_GetDecision_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDecisionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolicyDecisionPointServer).GetDecision(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolicyDecisionPoint_GetDecision_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolicyDecisionPointServer).GetDecision(ctx, req.(*GetDecisionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PolicyDecisionPoint_ServiceDesc is the grpc.ServiceDesc for PolicyDecisionPoint service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -144,6 +244,14 @@ var PolicyDecisionPoint_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Decide",
 			Handler:    _PolicyDecisionPoint_Decide_Handler,
+		},
+		{
+			MethodName: "EvaluateDryRun",
+			Handler:    _PolicyDecisionPoint_EvaluateDryRun_Handler,
+		},
+		{
+			MethodName: "GetDecision",
+			Handler:    _PolicyDecisionPoint_GetDecision_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

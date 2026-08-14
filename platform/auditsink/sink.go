@@ -12,6 +12,7 @@ package auditsink
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	auditmodule "github.com/gitfrok/backend/modules/audit"
 	auditapi "github.com/gitfrok/backend/modules/audit/api"
@@ -47,13 +48,26 @@ func (s *Sink) Subscribe(events bus.Bus) {
 }
 
 func (s *Sink) appendDenied(ctx context.Context, e platformaudit.PolicyDecisionDenied) error {
+	// The provenance keys are the audit contract's decision-provenance fields (SPEC-0029 AC8,
+	// SPEC-0030): a denial's record names the decision, the deciding policy version, the digest
+	// over the input decided on, and the mode — a DRY_RUN decision would be labelled here, never
+	// written as an enforced control record.
+	detail := map[string]string{
+		"decision_id":     e.DecisionID,
+		"policy_revision": e.PolicyRevision,
+		"input_digest":    e.InputDigest,
+		"policy_mode":     e.PolicyMode,
+	}
+	if len(e.ReliedUponTriage) > 0 {
+		detail["relied_upon_triage_ids"] = strings.Join(e.ReliedUponTriage, ",")
+	}
 	return s.append(ctx, e.TenantID, auditapi.Entry{
 		TenantID:   e.TenantID,
 		Action:     auditapi.Action(e.DeniedAction),
 		ActorID:    e.ActorID,
 		Resource:   e.Resource,
 		Outcome:    auditapi.OutcomeDenied,
-		Detail:     map[string]string{"decision_id": e.DecisionID, "policy_revision": e.PolicyRevision},
+		Detail:     detail,
 		OccurredAt: e.OccurredAt,
 	})
 }
@@ -110,7 +124,7 @@ func (s *Sink) appendFindingsScanIngested(ctx context.Context, e platformaudit.F
 		Outcome:  auditapi.OutcomeAllowed,
 		Detail: map[string]string{
 			"scan_id": e.ScanID, "request_id": e.RequestID,
-			"decision_id": e.PolicyDecisionID,
+			"decision_id":       e.PolicyDecisionID,
 			"findings_recorded": strconv.FormatInt(e.FindingsRecorded, 10),
 		},
 		OccurredAt: e.OccurredAt,
