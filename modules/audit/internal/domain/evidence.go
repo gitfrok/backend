@@ -31,6 +31,12 @@ const (
 // admits. The string rendering of policy EvaluationMode the trail carries.
 const policyModeEnforced = "ENFORCED"
 
+// policyModeDryRun is the other rendering the trail can carry. A DRY_RUN
+// decision is not control evidence at all (SPEC-0032 AC3), so it is neither
+// admitted nor marked as an exclusion — its absence from the section is the
+// correct answer, not a gap.
+const policyModeDryRun = "DRY_RUN"
+
 // Detail keys the classifier reads from trail records. These are the keys
 // auditsink writes; they are server-produced facts, never caller claims.
 const (
@@ -103,25 +109,42 @@ func Classify(r api.Record) (api.SectionRecord, api.SectionType, bool) {
 	return base, api.SectionPolicyDecisions, true
 }
 
-// excludedPolicyDecision reports whether a witnessed record is an enforced
-// policy decision the control section cannot admit: it carries the ENFORCED
-// mode but lacks part of its SPEC-0030 provenance (decision ID, policy
-// revision, or input digest). Classify refuses it — the section may cite
-// only fully-provenanced decisions (SPEC-0031 AC3) — and assembly marks the
-// exclusion with a gap instead of dropping it silently (wave-2 N6). The two
-// actions classified by their action string are never policy decisions, and
-// a DRY_RUN (or un-moded) record is not an exclusion: it is simply not
-// control evidence at all (SPEC-0032 AC3).
+// excludedPolicyDecision reports whether a witnessed record is a policy
+// decision the control section cannot admit. Classify refuses it — the
+// section may cite only fully-provenanced ENFORCED decisions (SPEC-0031
+// AC3) — and assembly marks the exclusion with a gap instead of dropping it
+// silently (wave-2 N6, N6-residual). Three shapes are exclusions:
+//
+//   - ENFORCED with part of its SPEC-0030 provenance missing;
+//   - a mode the trail's vocabulary does not define, which is a decision
+//     record this classifier cannot reason about at all;
+//   - no mode, but a policy revision or an input digest — auditsink writes
+//     those two keys only for decision records, so their presence without a
+//     mode is a decision record that lost its mode in transit.
+//
+// Not exclusions: the two actions classified by their action string, which
+// are never policy decisions; a DRY_RUN decision, which is correctly absent
+// rather than missing (SPEC-0032 AC3); and a record carrying decision_id
+// alone. That last one is deliberate — decision_id is a correlation key
+// every audited action carries (auditor-grant issuance, evidence-pack
+// requests, scan ingests), so treating it as decision provenance would gap
+// the section on healthy records.
 func excludedPolicyDecision(r api.Record) bool {
 	switch string(r.Action) {
 	case actionReviewApproved, actionScanIngested:
 		return false
 	}
-	if r.Detail[detailPolicyMode] != policyModeEnforced {
+	switch r.Detail[detailPolicyMode] {
+	case policyModeEnforced:
+		return r.Detail[detailDecisionID] == "" || r.Detail[detailPolicyRevision] == "" ||
+			r.Detail[detailInputDigest] == ""
+	case policyModeDryRun:
 		return false
+	case "":
+		return r.Detail[detailPolicyRevision] != "" || r.Detail[detailInputDigest] != ""
+	default:
+		return true
 	}
-	return r.Detail[detailDecisionID] == "" || r.Detail[detailPolicyRevision] == "" ||
-		r.Detail[detailInputDigest] == ""
 }
 
 // resourceID extracts the identifier after the kind prefix of a trail
