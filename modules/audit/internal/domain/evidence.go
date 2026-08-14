@@ -292,7 +292,7 @@ func writeCanonicalRecord(h interface{ Write([]byte) (int, error) }, r api.Secti
 		write("detail", "scan_gate")
 		write("scan.merge_request_id", r.ScanGate.MergeRequestID)
 		write("scan.scan_id", r.ScanGate.ScanID)
-		triage := append([]string(nil), r.ScanGate.ReliedUponTriageIDs...)
+		triage := slices.Clone(r.ScanGate.ReliedUponTriageIDs)
 		slices.Sort(triage)
 		write("scan.relied_upon_triage_ids", strings.Join(triage, ","))
 	case r.AccessChange != nil:

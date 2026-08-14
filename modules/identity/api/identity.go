@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -29,7 +30,7 @@ type principalKey struct{}
 // It is a transport boundary helper: gRPC/HTTP authentication must create this
 // only after verifying credentials, never from client-controlled request fields.
 func WithPrincipal(ctx context.Context, principal Principal) context.Context {
-	principal.Roles = append([]string(nil), principal.Roles...)
+	principal.Roles = slices.Clone(principal.Roles)
 	return context.WithValue(ctx, principalKey{}, principal)
 }
 
@@ -39,7 +40,7 @@ func RequirePrincipal(ctx context.Context) (Principal, error) {
 	if !ok || principal.TenantID == "" || principal.ActorID == "" {
 		return Principal{}, ErrNoPrincipal
 	}
-	principal.Roles = append([]string(nil), principal.Roles...)
+	principal.Roles = slices.Clone(principal.Roles)
 	return principal, nil
 }
 

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -281,7 +282,7 @@ func main() {
 					RepositoryId: e.RepositoryID,
 					ActorId:      e.ActorID,
 					RequestId:    e.EventID,
-					ActorRoles:   append([]string(nil), e.ActorRoles...),
+					ActorRoles:   slices.Clone(e.ActorRoles),
 				},
 				TargetRef:         e.TargetRef,
 				RequiredApprovals: e.RequiredApprovals,

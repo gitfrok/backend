@@ -9,6 +9,7 @@ package gitwire
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	"github.com/gitfrok/backend/modules/codereview/internal/app"
@@ -33,7 +34,7 @@ func (m *RefMover) MoveRef(ctx context.Context, command app.MergeRefCommand) err
 			RepositoryId: command.RepositoryID,
 			ActorId:      command.ActorID,
 			RequestId:    command.RequestID,
-			ActorRoles:   append([]string(nil), command.ActorRoles...),
+			ActorRoles:   slices.Clone(command.ActorRoles),
 		},
 		TargetRef:               command.TargetRef,
 		Revision:                command.Revision,

@@ -9,6 +9,7 @@ package ci
 import (
 	"context"
 	"net/http"
+	"slices"
 
 	"github.com/gitfrok/backend/modules/ci/api"
 	"github.com/gitfrok/backend/modules/ci/internal/adapters/grpc"
@@ -67,7 +68,7 @@ func NewRuntime(pdp policyapi.DecisionPoint, events bus.Bus, config RunnerConfig
 				Image:            config.Image,
 				SourceEndpoint:   config.SourceEndpoint,
 				SourceCapability: config.SourceCapability,
-				Command:          append([]string(nil), config.Command...),
+				Command:          slices.Clone(config.Command),
 			}),
 			dispatcher.WithGauge(gauge),
 		)

@@ -230,7 +230,7 @@ func (s *Service) issueAttempt(ctx context.Context, tenant string, principal api
 		RangeFrom:          req.RangeFrom.UTC(),
 		RangeTo:            req.RangeTo.UTC(),
 		RepositoryID:       req.RepositoryID,
-		PackIDs:            append([]string(nil), req.PackIDs...),
+		PackIDs:            slices.Clone(req.PackIDs),
 		ExpiresAt:          req.ExpiresAt.UTC(),
 		GrantedBy:          principal.ActorID,
 		IssuedAt:           now,
@@ -294,7 +294,7 @@ func (s *Service) issueAttempt(ctx context.Context, tenant string, principal api
 		EventID: ids.NewULID(), TenantID: grant.TenantID, GrantID: grant.GrantID,
 		GrantedBy: grant.GrantedBy, AuditorPrincipalID: grant.AuditorPrincipalID,
 		RangeFrom: grant.RangeFrom, RangeTo: grant.RangeTo, RepositoryID: grant.RepositoryID,
-		PackIDs: append([]string(nil), grant.PackIDs...), ExpiresAt: grant.ExpiresAt,
+		PackIDs: slices.Clone(grant.PackIDs), ExpiresAt: grant.ExpiresAt,
 		DecisionID: decision.DecisionID, OccurredAt: now,
 	})
 	return cloneGrant(grant), nil
@@ -468,7 +468,7 @@ func (s *Service) GrantFacts(ctx context.Context, auditorPrincipalID, packID str
 		// AC1/AC8) so the policy can compare scopes; the reviewed bundle
 		// does not consume the fact yet — a governance follow-up wires it.
 		RepositoryID: pick.RepositoryID,
-		Packs:        append([]string(nil), pick.PackIDs...),
+		Packs:        slices.Clone(pick.PackIDs),
 	}, true, nil
 }
 
@@ -488,7 +488,7 @@ func (s *Service) GrantTransitions(ctx context.Context, tenantID string, from, t
 	if err != nil {
 		return nil, api.ErrGrantUnavailable
 	}
-	out := append([]api.GrantTransition(nil), transitions...)
+	out := slices.Clone(transitions)
 	slices.SortStableFunc(out, func(a, b api.GrantTransition) int { return cmp.Compare(a.ChainSeq, b.ChainSeq) })
 	return out, nil
 }
@@ -517,7 +517,7 @@ func (s *Service) authorizedTenant(ctx context.Context) (string, api.Principal, 
 func (s *Service) decide(ctx context.Context, tenant string, principal api.Principal, pctx map[string]string) (policyapi.Decision, error) {
 	return s.pdp.Decide(ctx, policyapi.Request{
 		TenantID: tenant,
-		Subject:  policyapi.Subject{ID: principal.ActorID, TenantID: principal.TenantID, Roles: append([]string(nil), principal.Roles...)},
+		Subject:  policyapi.Subject{ID: principal.ActorID, TenantID: principal.TenantID, Roles: slices.Clone(principal.Roles)},
 		Action:   platformaudit.ActionAuditorGrantManage,
 		Resource: policyapi.Resource{Type: "tenant", ID: tenant},
 		Context:  pctx,
@@ -615,7 +615,7 @@ func (s *Service) recognizeExpiry(ctx context.Context, g api.AuditorGrant) {
 }
 
 func cloneGrant(g api.AuditorGrant) api.AuditorGrant {
-	g.PackIDs = append([]string(nil), g.PackIDs...)
+	g.PackIDs = slices.Clone(g.PackIDs)
 	return g
 }
 

@@ -83,10 +83,11 @@ func httpUnauthorized(w http.ResponseWriter) {
 
 func smartHTTPPath(path, queryService string) (handle, service string, discovery, ok bool) {
 	const prefix = "/git/"
-	if !strings.HasPrefix(path, prefix) {
+	rest, ok := strings.CutPrefix(path, prefix)
+	if !ok {
 		return "", "", false, false
 	}
-	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	parts := strings.Split(rest, "/")
 	if len(parts) < 3 {
 		return "", "", false, false
 	}

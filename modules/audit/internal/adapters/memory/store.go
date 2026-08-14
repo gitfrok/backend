@@ -12,6 +12,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/gitfrok/backend/modules/audit/api"
@@ -80,7 +81,7 @@ func (s *Store) Verify(ctx context.Context) (api.VerifyResult, error) {
 		return api.VerifyResult{}, fmt.Errorf("audit: verify without tenant scope")
 	}
 	s.mu.Lock()
-	chain := append([]api.Record(nil), s.entries[string(tenant)]...)
+	chain := slices.Clone(s.entries[string(tenant)])
 	s.mu.Unlock()
 
 	links := make([]domain.Link, 0, len(chain))
@@ -110,7 +111,7 @@ func (s *Store) Query(ctx context.Context, q api.TrailQuery) ([]api.Record, bool
 	}
 
 	s.mu.Lock()
-	chain := append([]api.Record(nil), s.entries[string(tenant)]...)
+	chain := slices.Clone(s.entries[string(tenant)])
 	s.mu.Unlock()
 
 	limit := q.Limit

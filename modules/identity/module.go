@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"net/http"
+	"slices"
 	"time"
 
 	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
@@ -123,7 +124,7 @@ func (s service) authorizeLifecycle(ctx context.Context, requestedTenant, action
 	decision, err := s.pdp.Decide(ctx, policyapi.Request{
 		TenantID: requestedTenant,
 		Subject: policyapi.Subject{
-			ID: principal.ActorID, TenantID: principal.TenantID, Roles: append([]string(nil), principal.Roles...),
+			ID: principal.ActorID, TenantID: principal.TenantID, Roles: slices.Clone(principal.Roles),
 		},
 		Action:   action,
 		Resource: policyapi.Resource{Type: "personal_access_token", ID: resourceID},
@@ -134,7 +135,7 @@ func (s service) authorizeLifecycle(ctx context.Context, requestedTenant, action
 	return nil
 }
 func publicPAT(p domain.PAT) api.PAT {
-	return api.PAT{ID: p.ID, TenantID: p.TenantID, ActorID: p.ActorID, Label: p.Label, Scopes: append([]string(nil), p.Scopes...), Roles: append([]string(nil), p.Roles...), CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt, RevokedAt: p.RevokedAt}
+	return api.PAT{ID: p.ID, TenantID: p.TenantID, ActorID: p.ActorID, Label: p.Label, Scopes: slices.Clone(p.Scopes), Roles: slices.Clone(p.Roles), CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt, RevokedAt: p.RevokedAt}
 }
 
 // OIDCConfig is the per-environment OIDC login configuration, restated here so
@@ -173,7 +174,7 @@ func (config OIDCConfig) verifier() oidc.Config {
 	verifierConfig := oidc.Config{
 		Issuer: config.Issuer, ClientID: config.ClientID, ClientSecret: config.ClientSecret,
 		RedirectURI: config.RedirectURI, RoleClaim: config.RoleClaim,
-		AllowedRoles:  append([]string(nil), config.AllowedRoles...),
+		AllowedRoles:  slices.Clone(config.AllowedRoles),
 		TenantMapping: config.TenantMapping, Leeway: config.Leeway,
 	}
 	return verifierConfig

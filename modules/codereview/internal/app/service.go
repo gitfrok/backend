@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -365,7 +366,7 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 	if err := s.refs.MoveRef(ctx, MergeRefCommand{
 		TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
 		ActorID: req.ActorID, RequestID: req.RequestID,
-		ActorRoles: append([]string(nil), req.ActorRoles...),
+		ActorRoles: slices.Clone(req.ActorRoles),
 		TargetRef:  mr.TargetRef, Revision: mr.HeadRevision,
 		ExpectedCurrentRevision: mr.TargetRevision,
 	}); err != nil {
@@ -431,7 +432,7 @@ func (s *Service) SetProtection(ctx context.Context, req api.ProtectionRequest) 
 	return updated, s.bus.Publish(ctx, api.BranchProtectionChanged{
 		EventID: s.newID(), TenantID: updated.TenantID, RepositoryID: updated.RepositoryID,
 		TargetRef: updated.TargetRef, RequiredApprovals: updated.RequiredApprovals,
-		ActorID: req.Context.ActorID, ActorRoles: append([]string(nil), req.Context.ActorRoles...),
+		ActorID: req.Context.ActorID, ActorRoles: slices.Clone(req.Context.ActorRoles),
 		OccurredAt: s.now().UTC(),
 	})
 }
@@ -484,7 +485,7 @@ func (s *Service) decide(ctx context.Context, principal api.Context, action, res
 		TenantID: principal.TenantID,
 		Subject: policyapi.Subject{
 			ID: principal.ActorID, TenantID: principal.TenantID,
-			Roles: append([]string(nil), principal.ActorRoles...),
+			Roles: slices.Clone(principal.ActorRoles),
 		},
 		Action:   action,
 		Resource: policyapi.Resource{Type: resourceType, ID: resourceID},
@@ -642,7 +643,7 @@ func (m *memoryStore) PutReview(_ context.Context, mergeRequestID string, review
 func (m *memoryStore) Reviews(_ context.Context, mergeRequestID string) ([]Review, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]Review(nil), m.reviews[mergeRequestID]...), nil
+	return slices.Clone(m.reviews[mergeRequestID]), nil
 }
 
 func (m *memoryStore) Protection(_ context.Context, tenantID, repositoryID, targetRef string) (api.BranchProtection, bool, error) {

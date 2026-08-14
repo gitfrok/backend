@@ -81,7 +81,7 @@ func (r *GRPCReader) ReadFile(ctx context.Context, tenantID, repositoryID, revis
 	var buf []byte
 	for {
 		chunk, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/gitfrok/backend/modules/policy/api"
@@ -150,7 +151,7 @@ func (s *Service) Decide(ctx context.Context, req api.Request) (api.Decision, er
 		OccurredAt:     decidedAt,
 	}
 	if len(decision.ReliedUponTriage) > 0 {
-		event.ReliedUponTriage = append([]string(nil), decision.ReliedUponTriage...)
+		event.ReliedUponTriage = slices.Clone(decision.ReliedUponTriage)
 	}
 
 	if err := s.bus.Publish(ctx, event); err != nil {
@@ -301,7 +302,7 @@ func recordOf(d api.Decision, req api.Request, decidedAt time.Time) api.Record {
 		Reason:          d.Reason,
 		DecidedAt:       decidedAt.UTC(),
 		SubjectTenantID: req.Subject.TenantID,
-		SubjectRoles:    append([]string(nil), req.Subject.Roles...),
+		SubjectRoles:    slices.Clone(req.Subject.Roles),
 		Context:         copyContext(req.Context),
 	}
 }
@@ -315,7 +316,7 @@ func requestOf(rec api.Record) api.Request {
 		Subject: api.Subject{
 			ID:       rec.ActorID,
 			TenantID: rec.SubjectTenantID,
-			Roles:    append([]string(nil), rec.SubjectRoles...),
+			Roles:    slices.Clone(rec.SubjectRoles),
 		},
 		Action:   rec.Action,
 		Resource: rec.Resource,

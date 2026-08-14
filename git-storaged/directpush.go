@@ -87,7 +87,7 @@ func (s *Server) rejectedRefs(ctx context.Context, op *gitv1.OperationContext) [
 			TenantID: op.GetTenantId(),
 			Subject: policyapi.Subject{
 				ID: op.GetActorId(), TenantID: op.GetTenantId(),
-				Roles: append([]string(nil), op.GetActorRoles()...),
+				Roles: slices.Clone(op.GetActorRoles()),
 			},
 			Action:   "repo.write",
 			Resource: policyapi.Resource{Type: "repository", ID: op.GetRepositoryId()},

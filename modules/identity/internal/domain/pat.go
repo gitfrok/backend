@@ -56,7 +56,7 @@ func NewServiceWithKeyRing(activeKeyID string, keys map[string][]byte, now func(
 	ring := make(map[string][]byte, len(keys))
 	for id, key := range keys {
 		if id != "" && len(key) != 0 {
-			ring[id] = append([]byte(nil), key...)
+			ring[id] = slices.Clone(key)
 		}
 	}
 	if len(ring) == 0 {
@@ -78,7 +78,7 @@ func (s *Service) RegisterSSHKey(publicKey, verifierKeyID, tenant, actor string,
 	if !ok {
 		return errors.New("unknown verifier key id")
 	}
-	s.keys[index] = &sshKey{principal: Principal{TenantID: tenant, ActorID: actor, Roles: append([]string(nil), roles...)}}
+	s.keys[index] = &sshKey{principal: Principal{TenantID: tenant, ActorID: actor, Roles: slices.Clone(roles)}}
 	return nil
 }
 func (s *Service) AuthenticateSSHKey(publicKey, verifierKeyID string) (Principal, bool) {
@@ -90,7 +90,7 @@ func (s *Service) AuthenticateSSHKey(publicKey, verifierKeyID string) (Principal
 		return Principal{}, false
 	}
 	p := k.principal
-	p.Roles = append([]string(nil), p.Roles...)
+	p.Roles = slices.Clone(p.Roles)
 	return p, true
 }
 func (s *Service) RevokeSSHKey(tenant, actor, publicKey, verifierKeyID string) error {
@@ -157,7 +157,7 @@ func (s *Service) IssuePAT(tenant, actor, label string, scopes, roles []string, 
 	token := "gfp_" + s.activeKeyID + "_" + hex.EncodeToString(b)
 	id := hex.EncodeToString(b[:16])
 	createdAt := s.now().UTC()
-	p := &PAT{ID: id, TenantID: tenant, ActorID: actor, Label: label, Scopes: append([]string(nil), scopes...), Roles: append([]string(nil), roles...), CreatedAt: createdAt, ExpiresAt: expiresAt, verifier: hashWithKey(key, token)}
+	p := &PAT{ID: id, TenantID: tenant, ActorID: actor, Label: label, Scopes: slices.Clone(scopes), Roles: slices.Clone(roles), CreatedAt: createdAt, ExpiresAt: expiresAt, verifier: hashWithKey(key, token)}
 	s.pats[id] = p
 	s.byVerifier[p.verifier] = id
 	return s.public(*p), token, nil
@@ -180,7 +180,7 @@ func (s *Service) AuthenticatePAT(token string) (Principal, bool) {
 	}
 	p := s.pats[id]
 	if p != nil && p.RevokedAt == nil && (p.ExpiresAt == nil || s.now().Before(*p.ExpiresAt)) && hmac.Equal([]byte(p.verifier), []byte(verifier)) {
-		return Principal{TenantID: p.TenantID, ActorID: p.ActorID, Roles: append([]string(nil), p.Roles...)}, true
+		return Principal{TenantID: p.TenantID, ActorID: p.ActorID, Roles: slices.Clone(p.Roles)}, true
 	}
 	return Principal{}, false
 }
@@ -215,10 +215,11 @@ func hashWithKey(key []byte, value string) string {
 
 func patKeyID(token string) (string, bool) {
 	const prefix = "gfp_"
-	if !strings.HasPrefix(token, prefix) {
+	rest, found := strings.CutPrefix(token, prefix)
+	if !found {
 		return "", false
 	}
-	keyID, secret, ok := strings.Cut(strings.TrimPrefix(token, prefix), "_")
+	keyID, secret, ok := strings.Cut(rest, "_")
 	if !ok || keyID == "" || len(secret) != 64 {
 		return "", false
 	}
@@ -240,7 +241,7 @@ func (s *Service) sshKeyIndex(publicKey, verifierKeyID string) (string, bool) {
 }
 func (s *Service) public(p PAT) PAT {
 	p.verifier = ""
-	p.Scopes = append([]string(nil), p.Scopes...)
+	p.Scopes = slices.Clone(p.Scopes)
 	if p.ExpiresAt != nil {
 		expires := *p.ExpiresAt
 		p.ExpiresAt = &expires

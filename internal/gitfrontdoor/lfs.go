@@ -287,10 +287,11 @@ func objectError(oid string, size int64, code int, message string) batchObject {
 // the proxied transfer endpoint, and nothing else.
 func lfsObjectPath(path string) (handle, oid string, ok bool) {
 	const prefix = "/git/"
-	if !strings.HasPrefix(path, prefix) {
+	rest, ok := strings.CutPrefix(path, prefix)
+	if !ok {
 		return "", "", false
 	}
-	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	parts := strings.Split(rest, "/")
 	if len(parts) != 6 {
 		return "", "", false
 	}
@@ -305,10 +306,11 @@ func lfsObjectPath(path string) (handle, oid string, ok bool) {
 // enumerated rather than derived, so it cannot become a generic proxy.
 func lfsBatchPath(path string) (handle string, ok bool) {
 	const prefix = "/git/"
-	if !strings.HasPrefix(path, prefix) {
+	rest, ok := strings.CutPrefix(path, prefix)
+	if !ok {
 		return "", false
 	}
-	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	parts := strings.Split(rest, "/")
 	if len(parts) != 6 {
 		return "", false
 	}

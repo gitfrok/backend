@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
@@ -64,7 +65,7 @@ func (r Router) route(handle, requestID string, principal identityapi.Principal,
 		RepositoryId: repositoryID,
 		ActorId:      principal.ActorID,
 		RequestId:    requestID,
-		ActorRoles:   append([]string(nil), principal.Roles...),
+		ActorRoles:   slices.Clone(principal.Roles),
 		Transport:    transport,
 	}, nil
 }

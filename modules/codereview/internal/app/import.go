@@ -262,7 +262,7 @@ func (s *ImportService) Create(ctx context.Context, req api.CreateImportRequest)
 		}
 		result, err := s.history.ImportHistory(ctx, ImportHistoryCommand{
 			TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID,
-			RequestID: req.RequestID, ActorRoles: append([]string(nil), req.ActorRoles...),
+			RequestID: req.RequestID, ActorRoles: slices.Clone(req.ActorRoles),
 			ImportID: imp.ID, SourceURL: req.SourceURL, SourceToken: req.SourceToken,
 			SourceSystem: req.SourceSystem, SourceInstance: req.SourceInstance,
 		})
@@ -319,7 +319,7 @@ func (s *ImportService) runGitPhase(ctx context.Context, req api.CreateImportReq
 	}
 	result, err := s.git.ImportRefs(ctx, ImportRefsCommand{
 		TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID,
-		RequestID: req.RequestID, ActorRoles: append([]string(nil), req.ActorRoles...),
+		RequestID: req.RequestID, ActorRoles: slices.Clone(req.ActorRoles),
 		SourceURL: req.SourceURL, SourceToken: req.SourceToken,
 	})
 	if err != nil {
@@ -495,7 +495,7 @@ func (s *ImportService) allowed(ctx context.Context, principal api.Context, acti
 		TenantID: principal.TenantID,
 		Subject: policyapi.Subject{
 			ID: principal.ActorID, TenantID: principal.TenantID,
-			Roles: append([]string(nil), principal.ActorRoles...),
+			Roles: slices.Clone(principal.ActorRoles),
 		},
 		Action:   action,
 		Resource: policyapi.Resource{Type: resourceType, ID: resourceID},
@@ -729,7 +729,7 @@ func (m *memoryRecordStore) ListImport(_ context.Context, importID string) ([]ap
 	if m.dead[importID] {
 		return nil, nil
 	}
-	return append([]api.ImportedMergeRequest(nil), m.records[importID]...), nil
+	return slices.Clone(m.records[importID]), nil
 }
 
 func (m *memoryRecordStore) Tombstone(_ context.Context, importID string) error {

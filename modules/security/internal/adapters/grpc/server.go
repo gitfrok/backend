@@ -7,6 +7,7 @@ package grpc
 import (
 	"context"
 	"errors"
+	"slices"
 
 	securityv1 "github.com/gitfrok/backend/gen/proto/security/v1"
 	"github.com/gitfrok/backend/modules/security/api"
@@ -118,7 +119,7 @@ func intoTenantContext(ctx context.Context, c *securityv1.FindingsContext) (cont
 func withAPIContext(ctx context.Context, c *securityv1.FindingsContext) (context.Context, api.Context, error) {
 	in := api.Context{
 		TenantID: c.GetTenantId(), RepositoryID: c.GetRepositoryId(),
-		ActorID: c.GetActorId(), ActorRoles: append([]string(nil), c.GetActorRoles()...),
+		ActorID: c.GetActorId(), ActorRoles: slices.Clone(c.GetActorRoles()),
 		RequestID: c.GetRequestId(),
 	}
 	return tenancy.WithTenant(ctx, tenancy.ID(in.TenantID)), in, nil
@@ -142,7 +143,7 @@ func intoIngestChunk(req *securityv1.IngestScanResultsRequest) (api.IngestChunk,
 	chunk := api.IngestChunk{
 		Context: api.Context{
 			TenantID: c.GetTenantId(), RepositoryID: c.GetRepositoryId(),
-			ActorID: c.GetActorId(), ActorRoles: append([]string(nil), c.GetActorRoles()...),
+			ActorID: c.GetActorId(), ActorRoles: slices.Clone(c.GetActorRoles()),
 			RequestID: c.GetRequestId(),
 		},
 		Revision: req.GetRevision(),
@@ -451,7 +452,7 @@ func (s *Server) GetFindingsSummary(ctx context.Context, req *securityv1.GetFind
 		MinAgeDays:         int(req.GetMinAgeDays()),
 		MaxAgeDays:         int(req.GetMaxAgeDays()),
 		OwningTeamFilter:   req.GetOwningTeamFilter(),
-		FacetDimensions:    append([]string(nil), req.GetFacetDimensions()...),
+		FacetDimensions:    slices.Clone(req.GetFacetDimensions()),
 	})
 	if err != nil {
 		if errors.Is(err, api.ErrMalformed) {

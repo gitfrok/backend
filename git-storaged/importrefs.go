@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -111,7 +112,7 @@ func (s *Server) ImportRefs(ctx context.Context, req *gitv1.ImportRefsRequest) (
 			OldSha:     zeroSHA(delta.oldSHA),
 			NewSha:     zeroSHA(delta.newSHA),
 			ActorID:    repository.actorID,
-			ActorRoles: append([]string(nil), repository.actorRoles...),
+			ActorRoles: slices.Clone(repository.actorRoles),
 			OccurredAt: now,
 		}); err != nil {
 			return nil, unavailable()

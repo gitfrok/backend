@@ -8,6 +8,7 @@ package grpc
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -131,7 +132,7 @@ func contextOf(c *auditv1.EvidenceContext) (api.Context, error) {
 	return api.Context{
 		TenantID:   c.GetTenantId(),
 		ActorID:    c.GetActorId(),
-		ActorRoles: append([]string(nil), c.GetActorRoles()...),
+		ActorRoles: slices.Clone(c.GetActorRoles()),
 		RequestID:  c.GetRequestId(),
 	}, nil
 }
@@ -264,7 +265,7 @@ func recordOf(r api.SectionRecord) *auditv1.ControlSectionRecord {
 		pb.Detail = &auditv1.ControlSectionRecord_ScanGate{ScanGate: &auditv1.ScanGateRecord{
 			MergeRequestId:      r.ScanGate.MergeRequestID,
 			ScanId:              r.ScanGate.ScanID,
-			ReliedUponTriageIds: append([]string(nil), r.ScanGate.ReliedUponTriageIDs...),
+			ReliedUponTriageIds: slices.Clone(r.ScanGate.ReliedUponTriageIDs),
 		}}
 	case r.AccessChange != nil:
 		pb.Detail = &auditv1.ControlSectionRecord_AccessChange{AccessChange: &auditv1.AccessChangeRecord{
@@ -296,7 +297,7 @@ func appendixOf(a api.Appendix) *auditv1.AttestedAppendix {
 			group.Records = append(group.Records, &auditv1.AttestedAppendixRecord{
 				RecordKind:       r.RecordKind,
 				SourceRef:        r.Provenance.SourceRef,
-				Payload:          append([]byte(nil), r.Payload...),
+				Payload:          slices.Clone(r.Payload),
 				PayloadMediaType: "application/json",
 				Provenance: &contractsv1.Provenance{
 					Class:          contractsv1.Provenance_CLASS_ATTESTED_IMPORT,

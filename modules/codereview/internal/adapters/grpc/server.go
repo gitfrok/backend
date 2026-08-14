@@ -6,6 +6,7 @@ package grpc
 
 import (
 	"context"
+	"slices"
 
 	codereviewv1 "github.com/gitfrok/backend/gen/proto/codereview/v1"
 	"github.com/gitfrok/backend/modules/codereview/api"
@@ -124,7 +125,7 @@ func intoContext(ctx context.Context, c *codereviewv1.ReviewCommandContext) (con
 	return scoped, api.Context{
 		TenantID: c.GetTenantId(), RepositoryID: c.GetRepositoryId(),
 		ActorID: c.GetActorId(), RequestID: c.GetRequestId(),
-		ActorRoles: append([]string(nil), c.GetActorRoles()...),
+		ActorRoles: slices.Clone(c.GetActorRoles()),
 	}, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
@@ -175,7 +176,7 @@ func (t *ObjectTier) allowed(ctx context.Context, operation *gitv1.OperationCont
 		Subject: policyapi.Subject{
 			ID:       operation.GetActorId(),
 			TenantID: operation.GetTenantId(),
-			Roles:    append([]string(nil), operation.GetActorRoles()...),
+			Roles:    slices.Clone(operation.GetActorRoles()),
 		},
 		Action:   action,
 		Resource: policyapi.Resource{Type: "repository", ID: operation.GetRepositoryId()},

@@ -8,8 +8,8 @@ import "strings"
 func ParseSSHCommand(command string) (service, handle string, err error) {
 	for _, candidate := range []string{"git-upload-pack", "git-receive-pack"} {
 		prefix := candidate + " '"
-		if strings.HasPrefix(command, prefix) && strings.HasSuffix(command, "'") {
-			handle = strings.TrimSuffix(strings.TrimPrefix(command, prefix), "'")
+		if rest, found := strings.CutPrefix(command, prefix); found && strings.HasSuffix(command, "'") {
+			handle = strings.TrimSuffix(rest, "'")
 			// git uses a rooted path for ssh://host/tenant/repo.git. This
 			// slash is URI framing, not a filesystem path; the normalized
 			// value still has to pass the same opaque-handle validation.

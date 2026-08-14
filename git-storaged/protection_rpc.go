@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strconv"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
@@ -41,7 +42,7 @@ func (s *Server) SetProtection(ctx context.Context, req *gitv1.SetProtectionRequ
 		Subject: policyapi.Subject{
 			ID:       principal.GetActorId(),
 			TenantID: principal.GetTenantId(),
-			Roles:    append([]string(nil), principal.GetActorRoles()...),
+			Roles:    slices.Clone(principal.GetActorRoles()),
 		},
 		Action:   "repository.branch_protection.manage",
 		Resource: policyapi.Resource{Type: "repository", ID: principal.GetRepositoryId()},

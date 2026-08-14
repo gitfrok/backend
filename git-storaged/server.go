@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -416,7 +417,7 @@ func (s *Server) exchange(ctx context.Context, op *gitv1.OperationContext, actio
 		for {
 			count, readErr := stdout.Read(buffer)
 			if count > 0 {
-				if err := outgoing(append([]byte(nil), buffer[:count]...)); err != nil {
+				if err := outgoing(slices.Clone(buffer[:count])); err != nil {
 					sendErr = err
 					return
 				}
@@ -487,7 +488,7 @@ func (s *Server) prepareWith(ctx context.Context, op *gitv1.OperationContext, ac
 		TenantID: op.GetTenantId(),
 		// Roles arrive only from a verified Identity&Access principal through the
 		// front door. They are PDP input, never a client-provided allow result.
-		Subject:  policyapi.Subject{ID: op.GetActorId(), TenantID: op.GetTenantId(), Roles: append([]string(nil), op.GetActorRoles()...)},
+		Subject:  policyapi.Subject{ID: op.GetActorId(), TenantID: op.GetTenantId(), Roles: slices.Clone(op.GetActorRoles())},
 		Action:   action,
 		Resource: policyapi.Resource{Type: "repository", ID: op.GetRepositoryId()},
 		Context:  decisionContext,
@@ -503,7 +504,7 @@ func (s *Server) prepareWith(ctx context.Context, op *gitv1.OperationContext, ac
 		tenantID:     op.GetTenantId(),
 		repositoryID: op.GetRepositoryId(),
 		actorID:      op.GetActorId(),
-		actorRoles:   append([]string(nil), op.GetActorRoles()...),
+		actorRoles:   slices.Clone(op.GetActorRoles()),
 		path:         path,
 		requestID:    op.GetRequestId(),
 	}
@@ -581,7 +582,7 @@ func (s *Server) publishRefUpdates(ctx context.Context, repository repositoryOpe
 				OldSha:     zeroSHA(oldSHA),
 				NewSha:     zeroSHA(newSHA),
 				ActorID:    repository.actorID,
-				ActorRoles: append([]string(nil), repository.actorRoles...),
+				ActorRoles: slices.Clone(repository.actorRoles),
 				OccurredAt: time.Now().UTC(),
 			}); err != nil {
 				return unavailable()
@@ -598,7 +599,7 @@ func (s *Server) publishRefUpdates(ctx context.Context, repository repositoryOpe
 				OldSha:     zeroSHA(oldSHA),
 				NewSha:     strings.Repeat("0", 40),
 				ActorID:    repository.actorID,
-				ActorRoles: append([]string(nil), repository.actorRoles...),
+				ActorRoles: slices.Clone(repository.actorRoles),
 				OccurredAt: time.Now().UTC(),
 			}); err != nil {
 				return unavailable()
@@ -640,7 +641,7 @@ func (s *Server) prepareRead(ctx context.Context, read *repositoryv1.ReadContext
 		return repositoryOperation{}, unavailable()
 	}
 	return s.prepare(ctx, &gitv1.OperationContext{
-		TenantId: read.GetTenantId(), RepositoryId: read.GetRepositoryId(), ActorId: read.GetActorId(), RequestId: read.GetRequestId(), ActorRoles: append([]string(nil), read.GetActorRoles()...),
+		TenantId: read.GetTenantId(), RepositoryId: read.GetRepositoryId(), ActorId: read.GetActorId(), RequestId: read.GetRequestId(), ActorRoles: slices.Clone(read.GetActorRoles()),
 	}, "repo.read")
 }
 
