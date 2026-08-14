@@ -7,7 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"sort"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -100,7 +100,7 @@ func objectTier(getenv func(string) string) (ObjectStore, error) {
 				missing = append(missing, name)
 			}
 		}
-		sort.Strings(missing)
+		slices.Sort(missing)
 		return nil, fmt.Errorf("git-storaged: the SeaweedFS-S3 tier is partly configured; missing %s", strings.Join(missing, ", "))
 	}
 }

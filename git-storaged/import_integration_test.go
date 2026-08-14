@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -151,7 +151,7 @@ func refList(t *testing.T, dir string) []string {
 			refs = append(refs, line)
 		}
 	}
-	sort.Strings(refs)
+	slices.Sort(refs)
 	return refs
 }
 

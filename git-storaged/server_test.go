@@ -448,14 +448,16 @@ func TestReceivePackDeniedOnReadOnlyShardNeverStartsGit(t *testing.T) {
 		t.Fatalf("MarkDegraded: %v", err)
 	}
 
-	var gitCalls int32
+	// atomic_types (SPEC-0036 CONDITIONAL, test-file-only): the counter is only read and
+	// incremented, so the typed atomic carries the same semantics with no address-taking.
+	var gitCalls atomic.Int32
 	client, closeClient := newClientWithConfig(t, Config{
 		RepositoryRoot: root, PDP: allowPDP{}, Events: events,
 		Coordinator:   coord,
 		NodeID:        testNodeID,
 		QuorumTimeout: testQuorumTimeout,
 		command: func(context.Context, string, ...string) *exec.Cmd {
-			atomic.AddInt32(&gitCalls, 1)
+			gitCalls.Add(1)
 			return exec.Command("false")
 		},
 	})
@@ -473,8 +475,8 @@ func TestReceivePackDeniedOnReadOnlyShardNeverStartsGit(t *testing.T) {
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("Recv error code = %s, want %s; error = %v", status.Code(err), codes.NotFound, err)
 	}
-	if atomic.LoadInt32(&gitCalls) != 0 {
-		t.Fatalf("git subprocess started %d times on a read-only shard, want 0", gitCalls)
+	if gitCalls.Load() != 0 {
+		t.Fatalf("git subprocess started %d times on a read-only shard, want 0", gitCalls.Load())
 	}
 }
 

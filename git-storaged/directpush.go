@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
@@ -102,7 +102,7 @@ func (s *Server) rejectedRefs(ctx context.Context, op *gitv1.OperationContext) [
 			rejected = append(rejected, ref)
 		}
 	}
-	sort.Strings(rejected)
+	slices.Sort(rejected)
 	return rejected
 }
 

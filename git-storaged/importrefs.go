@@ -350,14 +350,13 @@ func validSourceURL(raw string) bool {
 func hasPassword(raw string) bool {
 	rest := raw
 	// Strip the scheme.
-	if i := strings.Index(rest, "://"); i >= 0 {
-		rest = rest[i+3:]
+	if _, after, ok := strings.Cut(rest, "://"); ok {
+		rest = after
 	}
-	at := strings.Index(rest, "@")
-	if at < 0 {
+	authority, _, ok := strings.Cut(rest, "@")
+	if !ok {
 		return false
 	}
 	// user:pass@host — a colon before the @ is the password marker.
-	authority := rest[:at]
 	return strings.Contains(authority, ":")
 }

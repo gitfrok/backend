@@ -11,7 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -161,7 +161,7 @@ func loadFrontDoorConfig(getenv func(string) string) (frontDoorConfig, error) {
 		}
 		cfg.objects = store
 	default:
-		sort.Strings(missing)
+		slices.Sort(missing)
 		return cfg, fmt.Errorf("the SeaweedFS-S3 tier is partly configured; missing %s", strings.Join(missing, ", "))
 	}
 	return cfg, nil

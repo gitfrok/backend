@@ -14,7 +14,7 @@ package protection
 
 import (
 	"context"
-	"sort"
+	"slices"
 	"sync"
 
 	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
@@ -78,7 +78,7 @@ func (p *Projection) ProtectedRefs(tenantID, repositoryID string) []string {
 			refs = append(refs, rule.TargetRef)
 		}
 	}
-	sort.Strings(refs)
+	slices.Sort(refs)
 	return refs
 }
 

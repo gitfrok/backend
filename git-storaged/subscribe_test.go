@@ -158,7 +158,7 @@ func TestSubscribeRefUpdatesDropsSlowConsumer(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		for i := 0; i < 64; i++ {
+		for range 64 {
 			done <- events.Publish(context.Background(), api.RefUpdated{
 				EventID:  "01JQZTEST000000000000000005",
 				TenantID: "tenant-a",
@@ -169,7 +169,7 @@ func TestSubscribeRefUpdatesDropsSlowConsumer(t *testing.T) {
 			})
 		}
 	}()
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		if err := <-done; err != nil {
 			t.Fatalf("Publish(%d): %v", i, err)
 		}
