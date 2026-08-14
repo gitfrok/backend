@@ -77,7 +77,15 @@ func (s *Store) Append(ctx context.Context, r api.Record) error {
 // api.ErrNotFound — one coarse shape (SPEC-0030 AC6): RLS has already made another tenant's
 // record invisible to this transaction, so the adapter genuinely cannot tell the cases apart
 // and does not pretend to.
+//
+// H1: before the transaction is pinned to the requested tenant, the tenancy bound in ctx must
+// already name it — invariant 1's application half (tenant scoping AND RLS). An absent or
+// mismatched binding is the same coarse not-found, never a query under the caller-supplied
+// value alone.
 func (s *Store) Get(ctx context.Context, tenantID, decisionID string) (api.Record, error) {
+	if !tenantReadAllowed(ctx, tenantID) {
+		return api.Record{}, api.ErrNotFound
+	}
 	ctx = tenancy.WithTenant(ctx, tenancy.ID(tenantID))
 	var rec api.Record
 	err := s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
@@ -119,7 +127,13 @@ func (s *Store) Get(ctx context.Context, tenantID, decisionID string) (api.Recor
 //
 // The WHERE clause is assembled from constant fragments plus one placeholder per bound; the
 // caller's values never enter the SQL text itself.
+//
+// H1: as with Get, the tenancy bound in ctx must already name the requested tenant before the
+// transaction is pinned to it; an absent or mismatched binding is refused, not queried.
 func (s *Store) Range(ctx context.Context, tenantID string, q api.HistoricalRange, limit int) ([]api.Record, error) {
+	if !tenantReadAllowed(ctx, tenantID) {
+		return nil, api.ErrNotFound
+	}
 	ctx = tenancy.WithTenant(ctx, tenancy.ID(tenantID))
 	var out []api.Record
 	err := s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
@@ -189,6 +203,14 @@ func orEmptyStrings(v []string) []string {
 		return []string{}
 	}
 	return v
+}
+
+// tenantReadAllowed is the adapter's H1 check: a read is served only when ctx already carries
+// a tenancy binding equal to the requested tenant. RLS remains the backstop; this is the
+// application half invariant 1 requires alongside it. Absence and mismatch refuse identically.
+func tenantReadAllowed(ctx context.Context, tenantID string) bool {
+	bound, ok := tenancy.FromContext(ctx)
+	return ok && bound.Equal(tenancy.ID(tenantID))
 }
 
 func orEmptyContext(v map[string]string) map[string]string {

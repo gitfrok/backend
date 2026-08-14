@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/platform/tenancy"
 )
 
 // RecordStore persists decision records and serves the reads a dry-run and a retrieval need.
@@ -21,6 +22,12 @@ import (
 // Every method is tenant-scoped by the record's own TenantID: a store implementation that let
 // one tenant read another's records would fail SPEC-0030 AC6 regardless of how correct its
 // queries were.
+//
+// H1: the READS (Get, Range) additionally require ctx to carry a tenancy binding equal to the
+// requested tenant — the application half of invariant 1 (tenant scoping AND RLS). A mismatched
+// or absent binding is refused at the store as surely as at the service: reads are served under
+// the authenticated caller's tenant or not at all. Appends are exempt: the recorder's worker
+// pins ctx to the record's own server-produced TenantID.
 type RecordStore interface {
 	// Append records one decision. Appending a DecisionID the store already holds for that
 	// tenant is a programming error the store refuses, never a silent overwrite: a decision's
@@ -56,6 +63,14 @@ var _ RecordStore = (*MemoryStore)(nil)
 
 func recordKey(tenantID, decisionID string) string { return tenantID + "\x00" + decisionID }
 
+// tenantReadAllowed is the store-level H1 check: reads are served only under a tenancy
+// binding equal to the requested tenant. Absence and mismatch are the same refusal — the
+// coarse shape keeps the store from distinguishing "not here" from "not yours".
+func tenantReadAllowed(ctx context.Context, tenantID string) bool {
+	bound, ok := tenancy.FromContext(ctx)
+	return ok && bound.Equal(tenancy.ID(tenantID))
+}
+
 // Append records one decision, refusing a duplicate decision ID within its tenant.
 func (s *MemoryStore) Append(_ context.Context, r api.Record) error {
 	s.mu.Lock()
@@ -68,8 +83,12 @@ func (s *MemoryStore) Append(_ context.Context, r api.Record) error {
 	return nil
 }
 
-// Get retrieves one record within its tenant.
-func (s *MemoryStore) Get(_ context.Context, tenantID, decisionID string) (api.Record, error) {
+// Get retrieves one record within its tenant. A cross-tenant read — an unbound ctx or one
+// bound to another tenant — is exactly as not-found as a nonexistent ID (H1, SPEC-0030 AC6).
+func (s *MemoryStore) Get(ctx context.Context, tenantID, decisionID string) (api.Record, error) {
+	if !tenantReadAllowed(ctx, tenantID) {
+		return api.Record{}, api.ErrNotFound
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.records[recordKey(tenantID, decisionID)]
@@ -79,8 +98,12 @@ func (s *MemoryStore) Get(_ context.Context, tenantID, decisionID string) (api.R
 	return cloneRecord(r), nil
 }
 
-// Range replays ENFORCED records within the bounds, oldest first.
-func (s *MemoryStore) Range(_ context.Context, tenantID string, q api.HistoricalRange, limit int) ([]api.Record, error) {
+// Range replays ENFORCED records within the bounds, oldest first. A cross-tenant or unbound
+// read is refused just like Get's (H1).
+func (s *MemoryStore) Range(ctx context.Context, tenantID string, q api.HistoricalRange, limit int) ([]api.Record, error) {
+	if !tenantReadAllowed(ctx, tenantID) {
+		return nil, api.ErrNotFound
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []api.Record

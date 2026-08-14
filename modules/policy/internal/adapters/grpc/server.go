@@ -16,10 +16,22 @@ import (
 
 	policyv1 "github.com/gitfrok/backend/gen/proto/policy/v1"
 	"github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/platform/tenancy"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// bindTenant returns ctx carrying the tenant this request names.
+//
+// TENANT-PINNING HOOK POINT (H1): the dataplane door cannot verify callers today — the H2
+// limit governance records — so the binding is the request's own tenant, and the app layer's
+// guard degenerates to a consistency check. Once door authentication lands, an interceptor
+// binds the AUTHENTICATED caller's tenant here instead, and the very same guard enforces
+// caller == tenant for every decision-record read without touching this adapter's callers.
+func bindTenant(ctx context.Context, tenantID string) context.Context {
+	return tenancy.WithTenant(ctx, tenancy.ID(tenantID))
+}
 
 // Server adapts the generated service onto the module's api/ ports: the decision point, plus
 // the provenance surface when the plane composes one. Keeping the two ports separate is what
@@ -81,7 +93,7 @@ func (s *Server) EvaluateDryRun(ctx context.Context, req *policyv1.EvaluateDryRu
 		return nil, status.Error(codes.InvalidArgument, "tenant and candidate bundle reference are required")
 	}
 	r := req.GetRange()
-	decisions, err := s.records.EvaluateDryRun(ctx, api.DryRunRequest{
+	decisions, err := s.records.EvaluateDryRun(bindTenant(ctx, req.GetTenantId()), api.DryRunRequest{
 		TenantID:           req.GetTenantId(),
 		CandidateBundleRef: req.GetCandidateBundleRef(),
 		Range: api.HistoricalRange{
@@ -138,7 +150,7 @@ func (s *Server) GetDecision(ctx context.Context, req *policyv1.GetDecisionReque
 	if req.GetTenantId() == "" || req.GetDecisionId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "tenant and decision id are required")
 	}
-	rec, err := s.records.GetDecision(ctx, req.GetTenantId(), req.GetDecisionId())
+	rec, err := s.records.GetDecision(bindTenant(ctx, req.GetTenantId()), req.GetTenantId(), req.GetDecisionId())
 	if err != nil {
 		if errors.Is(err, api.ErrNotFound) {
 			// Absence and denial are the same shape: a response with no record, not an error

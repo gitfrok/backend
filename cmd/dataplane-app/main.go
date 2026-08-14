@@ -175,6 +175,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "policy bundle at %s is unusable: %v\n", bundleDir, pdpErr)
 		os.Exit(1)
 	}
+	// Decision records append asynchronously (M12): on shutdown, drain the recorder so every
+	// admitted record reaches the store before the database pool closes. Registered after the
+	// pool's own Close, so it runs first.
+	defer func() {
+		if closer, ok := pdp.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}()
 
 	// The CI runner configuration is per-environment. An unconfigured runner is not
 	// an error — the plane records jobs and dispatches none — but a misconfigured

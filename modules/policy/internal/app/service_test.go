@@ -11,6 +11,7 @@ import (
 	"github.com/gitfrok/backend/modules/policy/api"
 	platformaudit "github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
+	"github.com/gitfrok/backend/platform/tenancy"
 )
 
 // stubPDP is the evaluator seam. The Rego rules are governance's to test and the OPA adapter is
@@ -68,6 +69,18 @@ func newServiceWithStore(pdp api.DecisionPoint, b bus.Bus, store RecordStore) *S
 	s.now = func() time.Time { return time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC) }
 	return s
 }
+
+// acmeCtx is the request context the record-reading paths require after H1: a tenancy binding
+// equal to the tenant asked about. The grpc door binds it from the request's tenant (the
+// hook point a future authenticated interceptor replaces); tests bind it directly.
+func acmeCtx(t testing.TB) context.Context {
+	t.Helper()
+	return tenancy.WithTenant(t.Context(), "acme")
+}
+
+// flush waits for the async recorder (M12) to apply everything enqueued so far, so a test can
+// observe recorded decisions deterministically.
+func flush(s *Service) { s.flushRecords() }
 
 // --- the decision passes through unaltered --------------------------------------------------------
 
@@ -251,7 +264,8 @@ func TestEveryDecisionIsRecorded(t *testing.T) {
 			if _, err := svc.Decide(t.Context(), req); err != nil {
 				t.Fatalf("Decide: %v", err)
 			}
-			rec, err := svc.GetDecision(t.Context(), req.TenantID, tc.decision.DecisionID)
+			flush(svc) // the append is asynchronous (M12); observe it deterministically
+			rec, err := svc.GetDecision(acmeCtx(t), req.TenantID, tc.decision.DecisionID)
 			if err != nil {
 				t.Fatalf("GetDecision: %v", err)
 			}
@@ -279,7 +293,8 @@ func TestRecordedDigestIsReDerivableFromTheRecord(t *testing.T) {
 	if _, err := svc.Decide(t.Context(), req); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	rec, err := svc.GetDecision(t.Context(), req.TenantID, allowed().DecisionID)
+	flush(svc)
+	rec, err := svc.GetDecision(acmeCtx(t), req.TenantID, allowed().DecisionID)
 	if err != nil {
 		t.Fatalf("GetDecision: %v", err)
 	}
@@ -295,22 +310,25 @@ func TestEvaluatorErrorRecordsNothing(t *testing.T) {
 	if _, err := svc.Decide(t.Context(), request()); err == nil {
 		t.Fatal("expected an error")
 	}
-	if _, err := svc.GetDecision(t.Context(), "acme", "anything"); !errors.Is(err, api.ErrNotFound) {
+	flush(svc)
+	if _, err := svc.GetDecision(acmeCtx(t), "acme", "anything"); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("GetDecision = %v, want ErrNotFound: a failed decision leaves no record", err)
 	}
 }
 
 // Retrieval is tenant-scoped and coarse: another tenant's ID and a nonexistent ID are the same
-// not-found (SPEC-0030 AC6).
+// not-found (SPEC-0030 AC6). Since H1, asking under another tenant is caught by the guard —
+// and deliberately shaped into the very same coarse answer, so the guard cannot be probed.
 func TestGetDecisionIsCoarseNotFound(t *testing.T) {
 	svc := newService(&stubPDP{decision: allowed()}, &recorder{})
 	if _, err := svc.Decide(t.Context(), request()); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	if _, err := svc.GetDecision(t.Context(), "other-tenant", allowed().DecisionID); !errors.Is(err, api.ErrNotFound) {
+	flush(svc)
+	if _, err := svc.GetDecision(tenancy.WithTenant(t.Context(), "other-tenant"), "other-tenant", allowed().DecisionID); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("cross-tenant GetDecision = %v, want ErrNotFound", err)
 	}
-	if _, err := svc.GetDecision(t.Context(), "acme", "no-such-id"); !errors.Is(err, api.ErrNotFound) {
+	if _, err := svc.GetDecision(acmeCtx(t), "acme", "no-such-id"); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("nonexistent GetDecision = %v, want the same ErrNotFound", err)
 	}
 }
@@ -361,8 +379,9 @@ func TestDryRunReplaysEnforcedHistoryThroughTheCandidate(t *testing.T) {
 			t.Fatalf("Decide: %v", err)
 		}
 	}
+	flush(svc) // the dry-run replays whatever the recorder has applied
 
-	got, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+	got, err := svc.EvaluateDryRun(acmeCtx(t), api.DryRunRequest{
 		TenantID:           "acme",
 		CandidateBundleRef: "candidate/bundle",
 	})
@@ -390,7 +409,7 @@ func TestDryRunReplaysEnforcedHistoryThroughTheCandidate(t *testing.T) {
 
 	// The would-be decisions are recorded as DRY_RUN... and never replayed by a later dry-run:
 	// history is the enforced record, not a simulation of one.
-	if _, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+	if _, err := svc.EvaluateDryRun(acmeCtx(t), api.DryRunRequest{
 		TenantID: "acme", CandidateBundleRef: "candidate/bundle",
 	}); err != nil {
 		t.Fatalf("second EvaluateDryRun: %v", err)
@@ -421,7 +440,8 @@ func TestDryRunOverCapIsRejected(t *testing.T) {
 			t.Fatalf("Decide: %v", err)
 		}
 	}
-	_, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+	flush(svc)
+	_, err := svc.EvaluateDryRun(acmeCtx(t), api.DryRunRequest{
 		TenantID: "acme", CandidateBundleRef: "candidate", MaxResults: 2,
 	})
 	if !errors.Is(err, api.ErrInvalidRequest) {
@@ -437,7 +457,7 @@ func TestDryRunMaxResultsBeyondHardCapIsRejected(t *testing.T) {
 		loaded = true
 		return &countingPDP{}, nil
 	})
-	_, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+	_, err := svc.EvaluateDryRun(acmeCtx(t), api.DryRunRequest{
 		TenantID: "acme", CandidateBundleRef: "candidate", MaxResults: 1001,
 	})
 	if !errors.Is(err, api.ErrInvalidRequest) {
@@ -452,7 +472,7 @@ func TestDryRunMaxResultsBeyondHardCapIsRejected(t *testing.T) {
 // anything but the named candidate would be a lie about that candidate.
 func TestDryRunWithoutLoaderIsARefusal(t *testing.T) {
 	svc := newService(&stubPDP{decision: allowed()}, &recorder{})
-	_, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+	_, err := svc.EvaluateDryRun(acmeCtx(t), api.DryRunRequest{
 		TenantID: "acme", CandidateBundleRef: "candidate",
 	})
 	if !errors.Is(err, api.ErrNoCandidateLoader) {
@@ -470,7 +490,8 @@ func TestDryRunCandidateFailureRefusesTheWholeRun(t *testing.T) {
 	if _, err := svc.Decide(t.Context(), request()); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	_, err := svc.EvaluateDryRun(t.Context(), api.DryRunRequest{
+	flush(svc)
+	_, err := svc.EvaluateDryRun(acmeCtx(t), api.DryRunRequest{
 		TenantID: "acme", CandidateBundleRef: "candidate",
 	})
 	if err == nil {
