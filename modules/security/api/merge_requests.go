@@ -72,6 +72,13 @@ const (
 	// compared against. The merge request reports UNAVAILABLE rather than
 	// attributing everything (SPEC-0028 open questions).
 	AttributionUnavailableNoMergeBase AttributionUnavailableReason = "NO_MERGE_BASE"
+	// AttributionUnavailableMergeBaseResolverNotComposed: this plane has no
+	// route to Repository/Git composed (no MergeBaseResolver attached), so
+	// the comparison cannot be answered (SPEC-0028 AC7: an UNAVAILABLE
+	// comparison carries its reason, never UNSPECIFIED). The wire enum
+	// predates this reason and renders it as UNSPECIFIED until the contract
+	// gains it (governance follow-up); the Go surface carries the full value.
+	AttributionUnavailableMergeBaseResolverNotComposed AttributionUnavailableReason = "MERGE_BASE_RESOLVER_NOT_COMPOSED"
 )
 
 // MergeRequestFindingsRequest pages the findings attributable to one merge

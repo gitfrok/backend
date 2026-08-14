@@ -69,6 +69,21 @@ func (s *Store) IngestChunk(ctx context.Context, p app.IngestParams) (app.Ingest
 				Completed:        rec.completed,
 				Replayed:         true,
 			}
+			// A completed replay also reports whether the ingest's one
+			// audit record already landed (its "audit:"-prefixed claim
+			// marker exists); without it the replay path must backfill the
+			// record a committed ingest can never lack (SPEC-0025 AC5).
+			if rec.completed {
+				var recorded bool
+				if err := tx.QueryRow(ctx,
+					`SELECT EXISTS(
+					   SELECT 1 FROM security.scan_chunks
+					    WHERE scan_id = $1 AND chunk_index = $2 AND request_id = 'audit:' || $3)`,
+					p.ScanID, p.ChunkIndex, p.RequestID).Scan(&recorded); err != nil {
+					return fmt.Errorf("audit marker check: %w", err)
+				}
+				out.AuditAlreadyRecorded = recorded
+			}
 			return nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -174,6 +189,27 @@ func recordChunk(ctx context.Context, tx pgx.Tx, p app.IngestParams, completed b
 		return fmt.Errorf("record chunk: %w", err)
 	}
 	return nil
+}
+
+// ClaimIngestAuditMarker records that the ingest's one audit record has
+// landed (SPEC-0025 AC5). The marker is a separate append-only row in the
+// idempotency table — the schema grants INSERT only, nothing here is ever
+// updated — keyed by the same (tenant, scan, chunk) tuple with an
+// "audit:"-prefixed request ID, so it can never collide with a chunk's own
+// replay key. ON CONFLICT DO NOTHING keeps a re-claim a no-op.
+func (s *Store) ClaimIngestAuditMarker(ctx context.Context, tenantID, scanID string, chunkIndex int, requestID string) error {
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(tenantID))
+	return s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO security.scan_chunks
+			   (tenant_id, scan_id, chunk_index, request_id, findings_recorded, completed, outcome_json)
+			 VALUES ($1, $2, $3, 'audit:' || $4, 0, true, '{"audit_marker": true}')
+			 ON CONFLICT (tenant_id, scan_id, chunk_index, request_id) DO NOTHING`,
+			tenantID, scanID, chunkIndex, requestID); err != nil {
+			return fmt.Errorf("claim audit marker: %w", err)
+		}
+		return nil
+	})
 }
 
 // applyLifecycle upserts the scan's staged set into security.findings and
@@ -709,32 +745,54 @@ func (s *Store) GetTriage(ctx context.Context, tenantID, findingID string, versi
 	return rec, found, nil
 }
 
-// ScanReportAt returns the reported set of the latest COMPLETE scan the
-// tenant ran at the repository's revision (SPEC-0028). The reported set is
-// the durable scan_report recorded when the scan completed — not a
-// derivation from last_seen_scan_id, which a later scan moves on. Found is
-// false when no completed scan exists at the revision: attribution renders
-// that as UNAVAILABLE, never as an empty reported set (SPEC-0028 AC7).
+// ScanReportAt returns the reported set of the latest COMPLETE scans the
+// tenant ran at the repository's revision, spanning every ingested scanner
+// class — one latest scan per class, so a revision scanned by semgrep AND
+// gitleaks reports both tools' sets (SPEC-0026 AC1, SPEC-0028 AC1). The
+// reported set is the durable scan_report recorded when each scan completed
+// — not a derivation from last_seen_scan_id, which a later scan moves on.
+// Found is false when no completed scan exists at the revision: attribution
+// renders that as UNAVAILABLE, never as an empty reported set (SPEC-0028
+// AC7).
 func (s *Store) ScanReportAt(ctx context.Context, tenantID, repositoryID, revision string) (app.ScanReport, bool, error) {
 	ctx = tenancy.WithTenant(ctx, tenancy.ID(tenantID))
 	var out app.ScanReport
 	var found bool
 	err := s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		var scanID string
-		err := tx.QueryRow(ctx,
-			`SELECT id FROM security.scans
-			  WHERE repository_id = $1 AND revision = $2 AND state = 'COMPLETE'
-			  ORDER BY completed_at DESC NULLS LAST, started_at DESC, id DESC
-			  LIMIT 1`, repositoryID, revision).Scan(&scanID)
-		if errors.Is(err, pgx.ErrNoRows) {
+		// One latest COMPLETE scan per scanner class at the revision.
+		scanIDs := []string{}
+		rows, err := tx.Query(ctx,
+			`SELECT id FROM (
+			   SELECT id, ROW_NUMBER() OVER (
+			              PARTITION BY scanner_class
+			              ORDER BY completed_at DESC NULLS LAST, started_at DESC, id DESC
+			            ) AS rn
+			     FROM security.scans
+			    WHERE repository_id = $1 AND revision = $2 AND state = 'COMPLETE'
+			 ) latest
+			  WHERE rn = 1
+			  ORDER BY id`, repositoryID, revision)
+		if err != nil {
+			return fmt.Errorf("scans at revision: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan at revision row: %w", err)
+			}
+			scanIDs = append(scanIDs, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("scans at revision rows: %w", err)
+		}
+		if len(scanIDs) == 0 {
 			return nil
 		}
-		if err != nil {
-			return fmt.Errorf("scan at revision: %w", err)
-		}
 		found = true
-		out.ScanID = scanID
-		rows, err := tx.Query(ctx,
+		out.ScanIDs = scanIDs
+		rows, err = tx.Query(ctx,
 			`SELECT r.identity, f.id, f.tenant_id, f.repository_id, f.scanner_class,
 			        f.tool_name, f.tool_version, f.rule_id, f.severity, f.artifact_path,
 			        f.enclosing_content, f.component, f.component_version, f.lifecycle,
@@ -742,8 +800,8 @@ func (s *Store) ScanReportAt(ctx context.Context, tenantID, repositoryID, revisi
 			        f.provenance_media_type
 			   FROM security.scan_report r
 			   JOIN security.findings f ON f.id = r.finding_id
-			  WHERE r.scan_id = $1
-			  ORDER BY f.id`, scanID)
+			  WHERE r.scan_id = ANY($1)
+			  ORDER BY f.id`, scanIDs)
 		if err != nil {
 			return fmt.Errorf("scan report: %w", err)
 		}

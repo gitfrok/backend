@@ -160,10 +160,11 @@ func (s *Service) SetMergeBaseResolver(r api.MergeBaseResolver) {
 
 // computeAttribution runs the comparison for one merge request under the
 // actor's identity and materializes it per (merge request, head, merge
-// base) triple: the first successful computation of a triple caches the
-// record and emits FindingsAttributed, and a repeat computes nothing new
-// (SPEC-0028 idempotency). A nil record with no error means the comparison
-// is UNAVAILABLE and reason says why.
+// base) triple: each computation replaces the stored record with the fresh
+// one, FindingsAttributed is emitted once per materialized content, and an
+// unchanged recompute emits nothing new (SPEC-0028 idempotency). A nil
+// record with no error means the comparison is UNAVAILABLE and reason says
+// why.
 func (s *Service) computeAttribution(ctx context.Context, tenantID, mergeRequestID, actorID string) (attributionOutcome, error) {
 	mr, ok := s.projectionFor(tenantID, mergeRequestID)
 	if !ok || mr.HeadRevision == "" {
@@ -183,9 +184,10 @@ func (s *Service) computeAttribution(ctx context.Context, tenantID, mergeRequest
 	s.attrMu.Unlock()
 	if resolver == nil {
 		// No route to Repository/Git on this plane: the comparison cannot be
-		// answered, and the honest rendering is UNAVAILABLE — never
-		// "no findings" and never "everything attributed" (SPEC-0028 AC7).
-		return attributionOutcome{reason: ""}, nil
+		// answered, and the honest rendering is UNAVAILABLE with its reason —
+		// never "no findings", never "everything attributed", and never an
+		// unnamed UNSPECIFIED (SPEC-0028 AC7).
+		return attributionOutcome{reason: api.AttributionUnavailableMergeBaseResolverNotComposed}, nil
 	}
 	base, baseFound, err := resolver.MergeBase(ctx, tenantID, mr.RepositoryID, actorID, mr.SourceRef, mr.TargetRef)
 	if err != nil {
@@ -247,11 +249,17 @@ func (s *Service) computeAttribution(ctx context.Context, tenantID, mergeRequest
 
 	key := attributionKey(tenantID, mergeRequestID, mr.HeadRevision, base)
 	s.attrMu.Lock()
+	// The freshly computed record REPLACES the stored one: a later scan at
+	// the same head/base triple must update the served view and the gate
+	// facts, never be masked by the earlier materialization. The emission
+	// flag carries over so an unchanged recompute emits nothing, while a
+	// recompute that sees different content honestly re-emits
+	// FindingsAttributed (SPEC-0028 idempotency bounds emission per
+	// materialized content, not per triple forever).
 	if existing, ok := s.attributions[key]; ok {
-		rec = existing
-	} else {
-		s.attributions[key] = rec
+		rec.emitted = existing.emitted && attributionContentEqual(existing, rec)
 	}
+	s.attributions[key] = rec
 	needsEmit := !rec.emitted
 	if needsEmit {
 		rec.emitted = true
@@ -294,6 +302,27 @@ func (s *Service) latestAttribution(tenantID, mergeRequestID string) (*attributi
 
 func attributionKey(tenantID, mergeRequestID, head, base string) string {
 	return tenantID + "\x00" + mergeRequestID + "\x00" + head + "\x00" + base
+}
+
+// attributionContentEqual reports whether two materialized records render
+// the same comparison: same status, revisions, counts, and views. It bounds
+// FindingsAttributed emission — an unchanged recompute stays silent, a
+// changed one re-emits honestly.
+func attributionContentEqual(a, b *attributionRecord) bool {
+	if a.status != b.status || a.reason != b.reason || a.head != b.head || a.base != b.base ||
+		a.low != b.low || a.medium != b.medium || a.high != b.high || a.critical != b.critical ||
+		len(a.views) != len(b.views) {
+		return false
+	}
+	for i := range a.views {
+		if a.views[i].finding.ID != b.views[i].finding.ID ||
+			a.views[i].attribution != b.views[i].attribution ||
+			a.views[i].finding.Severity != b.views[i].finding.Severity ||
+			a.views[i].finding.Lifecycle != b.views[i].finding.Lifecycle {
+			return false
+		}
+	}
+	return true
 }
 
 // ListMergeRequestFindings pages the findings attributable to one merge
@@ -442,11 +471,13 @@ func (s *Service) renderMergeRequestPage(ctx context.Context, req api.MergeReque
 }
 
 // mrCursor is the signed payload of a merge-request findings page token. It
-// binds the cursor to the tenant, the repository, the merge request, and the
-// exact filters that issued it: a token issued for one listing is inert
-// under another (SPEC-0025).
+// binds the cursor to the tenant, the issuing actor, the repository, the
+// merge request, and the exact filters that issued it: a token issued for
+// one listing is inert under another — including under the same listing
+// replayed by a different actor (SPEC-0025).
 type mrCursor struct {
 	TenantID     string
+	ActorID      string
 	Repository   string
 	MergeRequest string
 	Class        api.ScannerClass
@@ -457,8 +488,9 @@ type mrCursor struct {
 
 func (s *Service) encodeMRCursor(req api.MergeRequestFindingsRequest, lastID string) string {
 	c := mrCursor{
-		TenantID: req.TenantID, Repository: req.RepositoryID, MergeRequest: req.MergeRequestID,
-		Class: req.ScannerClassFilter, Severity: req.SeverityFilter,
+		TenantID: req.TenantID, ActorID: req.ActorID, Repository: req.RepositoryID,
+		MergeRequest: req.MergeRequestID,
+		Class:        req.ScannerClassFilter, Severity: req.SeverityFilter,
 		Attribution: req.AttributionFilter, AfterID: lastID,
 	}
 	payload, err := json.Marshal(c)
@@ -477,7 +509,8 @@ func (s *Service) decodeMRCursor(token string, req api.MergeRequestFindingsReque
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return mrCursor{}, false
 	}
-	if c.TenantID != req.TenantID || c.Repository != req.RepositoryID ||
+	if c.TenantID != req.TenantID || c.ActorID != req.ActorID ||
+		c.Repository != req.RepositoryID ||
 		c.MergeRequest != req.MergeRequestID || c.Class != req.ScannerClassFilter ||
 		c.Severity != req.SeverityFilter || c.Attribution != req.AttributionFilter ||
 		c.AfterID == "" {

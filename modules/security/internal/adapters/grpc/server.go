@@ -349,6 +349,12 @@ func toAttributionReasonProto(r api.AttributionUnavailableReason) securityv1.Att
 		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_HEAD_SCAN_NOT_RUN
 	case api.AttributionUnavailableNoMergeBase:
 		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_NO_MERGE_BASE
+	case api.AttributionUnavailableMergeBaseResolverNotComposed:
+		// The wire enum predates this reason (gen/** is frozen): the Go
+		// surface carries the full value, the wire degrades to UNSPECIFIED
+		// until the contract gains it (governance follow-up). The summary
+		// still reports UNAVAILABLE status, never "no findings".
+		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_UNSPECIFIED
 	default:
 		return securityv1.AttributionUnavailableReason_ATTRIBUTION_UNAVAILABLE_REASON_UNSPECIFIED
 	}

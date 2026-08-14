@@ -53,8 +53,15 @@ type IngestOutcome struct {
 	Completed bool
 	// Replayed reports the request ID was already recorded for this scan and
 	// chunk. The outcome is the recorded one; nothing new was created, and
-	// the caller must emit no event or audit record (SPEC-0025 AC1).
+	// the caller must emit no event (SPEC-0025 AC1).
 	Replayed bool
+	// AuditAlreadyRecorded reports — on a Replayed COMPLETED chunk — that
+	// the ingest's one audit record already landed (its claim marker
+	// exists). A completed replay WITHOUT it means the first attempt
+	// committed but its audit publish never landed: the replay path must
+	// backfill the missing record so a committed ingest can never lack it
+	// (SPEC-0025 AC5: one, and at least one).
+	AuditAlreadyRecorded bool
 	// Opened and Resolved are valid when Completed && !Replayed: the findings
 	// this scan opened (first sight) and resolved (no longer reported),
 	// carrying everything the corresponding events need (SPEC-0024 AC9).
@@ -146,12 +153,15 @@ type ReportedFinding struct {
 	Finding  api.Finding
 }
 
-// ScanReport is the reported set of one completed scan at a revision:
-// everything the scan reported, keyed by identity. The set is a durable
-// server fact of the scan — a later scan re-reporting an identity never
-// rewrites an earlier scan's reported set (SPEC-0028 attribution rule).
+// ScanReport is the reported set of the latest COMPLETE scans at a
+// revision — one per scanner class, so a revision scanned by semgrep AND
+// gitleaks reports both tools' sets (SPEC-0026 AC1, SPEC-0028 AC1). Within
+// a class, the latest completed scan is the report: everything it reported,
+// keyed by identity. The set is a durable server fact of the scan — a later
+// scan re-reporting an identity never rewrites an earlier scan's reported
+// set (SPEC-0028 attribution rule).
 type ScanReport struct {
-	ScanID   string
+	ScanIDs  []string
 	Findings []ReportedFinding
 }
 
@@ -195,9 +205,16 @@ type Store interface {
 	// lives here because Security/Findings owns the attribution it derives
 	// (SPEC-0026 data owned), never by reading another context's tables.
 	SetRepositoryOwningTeam(ctx context.Context, tenantID, repositoryID, owningTeam string) error
-	// ScanReportAt returns the reported set of the latest COMPLETE scan the
-	// tenant ran at the repository's revision. Found is false when no
+	// ScanReportAt returns the reported set of the latest COMPLETE scans the
+	// tenant ran at the repository's revision, spanning every ingested
+	// scanner class (one latest scan per class). Found is false when no
 	// completed scan exists at that revision: attribution renders that as
 	// UNAVAILABLE, never as an empty reported set (SPEC-0028 AC7).
 	ScanReportAt(ctx context.Context, tenantID, repositoryID, revision string) (ScanReport, bool, error)
+	// ClaimIngestAuditMarker records that the ingest's one audit record has
+	// landed for (tenant, scan, chunk, request ID), so a replay of the same
+	// chunk can tell "record already appended" from "first attempt committed
+	// but its audit publish failed — backfill" (SPEC-0025 AC5). The claim is
+	// append-only and idempotent: a re-claim changes nothing.
+	ClaimIngestAuditMarker(ctx context.Context, tenantID, scanID string, chunkIndex int, requestID string) error
 }

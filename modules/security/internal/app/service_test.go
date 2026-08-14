@@ -43,6 +43,13 @@ type harness struct {
 	scans      []api.ScanIngested
 	attributed []api.FindingsAttributed
 	audits     []platformaudit.FindingsScanIngested
+	// failAuditOnce makes the NEXT audit delivery fail, then clears itself:
+	// the stand-in for "the audit sink failed after the ingest committed"
+	// (SPEC-0025 AC5 backfill path).
+	failAuditOnce bool
+	// failScanEvents fails every ScanIngested delivery: the stand-in for a
+	// domain-event publish failing after the audit record landed.
+	failScanEvents bool
 }
 
 func newHarness(allow bool) *harness {
@@ -59,6 +66,9 @@ func newHarness(allow bool) *harness {
 		return nil
 	})
 	events.Subscribe(api.EventScanIngested, func(_ context.Context, e bus.Event) error {
+		if h.failScanEvents {
+			return errors.New("scan event sink unavailable")
+		}
 		h.scans = append(h.scans, e.(api.ScanIngested))
 		return nil
 	})
@@ -68,6 +78,10 @@ func newHarness(allow bool) *harness {
 	})
 	events.Subscribe(platformaudit.EventAudit, func(_ context.Context, e bus.Event) error {
 		if a, ok := e.(platformaudit.FindingsScanIngested); ok {
+			if h.failAuditOnce {
+				h.failAuditOnce = false
+				return errors.New("audit sink unavailable")
+			}
 			h.audits = append(h.audits, a)
 		}
 		return nil
@@ -481,5 +495,138 @@ func TestListFilters(t *testing.T) {
 	page, err = h.svc.ListFindings(ctx, api.ListRequest{Context: validContext(), ScannerClassFilter: api.ScannerClassSecrets})
 	if err != nil || len(page.Findings) != 0 {
 		t.Fatalf("scanner class filter: %+v err=%v", page, err)
+	}
+}
+
+// A finding lives in exactly one repository: a principal scoped to repo
+// repo-1 cannot read the finding or its triage in repo-2 of the same tenant
+// — cross-repository reads are the same coarse denial as absence
+// (SPEC-0001, phase-2 review H3).
+func TestGetFindingAndTriageAreRepositoryScoped(t *testing.T) {
+	h := newHarness(true)
+	ctx := context.Background()
+
+	chunk := singleChunk(sastScan(0), "req-r2", rawFinding("rule-r2", "r2.py", "fn-r2"))
+	chunk.Context.RepositoryID = "repo-2"
+	res, err := h.svc.IngestScanResults(ctx, chunk)
+	if err != nil || !res.Completed {
+		t.Fatalf("ingest into repo-2: %+v err=%v", res, err)
+	}
+	findingID := h.opened[0].FindingID
+
+	repo1 := validContext()
+	if _, err := h.svc.GetFinding(ctx, repo1, findingID); !errors.Is(err, api.ErrDenied) {
+		t.Fatalf("a repo-1 principal must not read repo-2's finding, got %v", err)
+	}
+	if _, _, err := h.svc.GetTriage(ctx, repo1, findingID, 0); !errors.Is(err, api.ErrDenied) {
+		t.Fatalf("a repo-1 principal must not read repo-2's triage, got %v", err)
+	}
+
+	repo2 := validContext()
+	repo2.RepositoryID = "repo-2"
+	if _, err := h.svc.GetFinding(ctx, repo2, findingID); err != nil {
+		t.Fatalf("the finding's own repository must read it: %v", err)
+	}
+	if _, found, err := h.svc.GetTriage(ctx, repo2, findingID, 0); err != nil || found {
+		t.Fatalf("triage read in-scope: found=%v err=%v", found, err)
+	}
+}
+
+// SPEC-0025 AC5 — exactly one audit record per accepted ingest, including
+// the replay path: when the first attempt commits but its audit publish
+// fails, the replay backfills the missing record (phase-2 review M10).
+func TestAuditBackfillsWhenTheFirstAttemptLostIt(t *testing.T) {
+	h := newHarness(true)
+	chunk := singleChunk(sastScan(0), "req-1", rawFinding("py-eval", "app.py", "def handler():"))
+	chunk.RequestID = "req-1"
+
+	h.failAuditOnce = true
+	if _, err := h.svc.IngestScanResults(context.Background(), chunk); err == nil {
+		t.Fatalf("a failed audit publish must fail the ingest")
+	}
+	if len(h.audits) != 0 {
+		t.Fatalf("the failed publish must append nothing, got %d", len(h.audits))
+	}
+
+	// The redelivery replays the committed outcome and backfills the one
+	// record — exactly one in total, never two.
+	res, err := h.svc.IngestScanResults(context.Background(), chunk)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if !res.Replayed || !res.Completed {
+		t.Fatalf("expected a replayed recorded outcome, got %+v", res)
+	}
+	if len(h.audits) != 1 {
+		t.Fatalf("the replay must backfill exactly one audit record, got %d", len(h.audits))
+	}
+	// The backfill appends the audit record only. Domain-event delivery is
+	// the first attempt's responsibility; recovering a lost event stream is
+	// out of AC5's scope.
+	if len(h.opened) != 0 || len(h.scans) != 0 {
+		t.Fatalf("the backfill must emit no domain events: opened=%d scans=%d", len(h.opened), len(h.scans))
+	}
+
+	// A further replay is silent again: the claim marker landed.
+	if _, err := h.svc.IngestScanResults(context.Background(), chunk); err != nil {
+		t.Fatalf("second replay: %v", err)
+	}
+	if len(h.audits) != 1 {
+		t.Fatalf("a marked replay must append nothing, got %d", len(h.audits))
+	}
+}
+
+// The audit record lands before the domain events: when a later event
+// publish fails after commit, the committed ingest still has its one audit
+// record, and the retry's replay appends no second one (phase-2 review M10).
+func TestAuditSurvivesALaterEventFailure(t *testing.T) {
+	h := newHarness(true)
+	chunk := singleChunk(sastScan(0), "req-1", rawFinding("py-eval", "app.py", "def handler():"))
+	chunk.RequestID = "req-1"
+
+	h.failScanEvents = true
+	if _, err := h.svc.IngestScanResults(context.Background(), chunk); err == nil {
+		t.Fatalf("a failed domain-event publish must fail the ingest")
+	}
+	if len(h.audits) != 1 {
+		t.Fatalf("the audit record must survive the later event failure, got %d", len(h.audits))
+	}
+
+	h.failScanEvents = false
+	res, err := h.svc.IngestScanResults(context.Background(), chunk)
+	if err != nil || !res.Replayed {
+		t.Fatalf("replay: %+v err=%v", res, err)
+	}
+	if len(h.audits) != 1 {
+		t.Fatalf("a marked replay must append no second audit record, got %d", len(h.audits))
+	}
+}
+
+// A list cursor is bound to the issuing principal: the same tenant's second
+// actor replaying the token gets no content — a cursor is not transferable
+// (phase-2 review L17).
+func TestListCursorIsBoundToTheIssuingActor(t *testing.T) {
+	h := newHarness(true)
+	ctx := context.Background()
+	if _, err := h.svc.IngestScanResults(ctx, singleChunk(sastScan(0), "req-1",
+		rawFinding("rule-a", "a.py", "fn-a"), rawFinding("rule-b", "b.py", "fn-b"))); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	page1, err := h.svc.ListFindings(ctx, api.ListRequest{Context: validContext(), PageSize: 1})
+	if err != nil || page1.NextPageToken == "" {
+		t.Fatalf("page 1 must carry a next token: %+v err=%v", page1, err)
+	}
+
+	other := validContext()
+	other.ActorID = "actor-2"
+	page2, err := h.svc.ListFindings(ctx, api.ListRequest{Context: other, PageSize: 1, PageToken: page1.NextPageToken})
+	if err != nil || len(page2.Findings) != 0 || page2.NextPageToken != "" {
+		t.Fatalf("another actor's replay of the token must yield nothing: %+v err=%v", page2, err)
+	}
+
+	own, err := h.svc.ListFindings(ctx, api.ListRequest{Context: validContext(), PageSize: 1, PageToken: page1.NextPageToken})
+	if err != nil || len(own.Findings) != 1 {
+		t.Fatalf("the issuing actor's own token must still page: %+v err=%v", own, err)
 	}
 }

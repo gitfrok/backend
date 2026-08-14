@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -84,7 +85,11 @@ type MemoryStore struct {
 	// ownership is the repository-level owning-team attribution projection
 	// (SPEC-0026): tenant -> repository ID -> team.
 	ownership map[string]map[string]string
-	nextID    func() string
+	// auditMarkers keys claimed ingest-audit markers by (scan, chunk,
+	// request ID): the in-memory stand-in for the Postgres adapter's
+	// "audit:"-prefixed scan_chunks rows (SPEC-0025 AC5).
+	auditMarkers map[string]struct{}
+	nextID       func() string
 }
 
 // NewMemoryStore builds the in-memory store.
@@ -96,6 +101,7 @@ func NewMemoryStore() *MemoryStore {
 		triages:       map[string]map[string][]api.TriageRecord{},
 		triageReplays: map[string]map[string]map[string]api.TriageRecord{},
 		ownership:     map[string]map[string]string{},
+		auditMarkers:  map[string]struct{}{},
 		nextID:        ids.NewULID,
 	}
 }
@@ -127,13 +133,15 @@ func (m *MemoryStore) IngestChunk(_ context.Context, p IngestParams) (IngestOutc
 	// recorded outcome, whatever the scan's current state (SPEC-0025 AC1).
 	if byReq, ok := rec.outcomes[p.ChunkIndex]; ok {
 		if cr, ok := byReq[p.RequestID]; ok {
+			_, audited := m.auditMarkers[auditMarkerKey(p.ScanID, p.ChunkIndex, p.RequestID)]
 			return IngestOutcome{
-				ScanID:           p.ScanID,
-				FindingsRecorded: cr.findingsRecorded,
-				Completed:        cr.completed,
-				Replayed:         true,
-				Opened:           cr.opened,
-				Resolved:         cr.resolved,
+				ScanID:               p.ScanID,
+				FindingsRecorded:     cr.findingsRecorded,
+				Completed:            cr.completed,
+				Replayed:             true,
+				AuditAlreadyRecorded: cr.completed && audited,
+				Opened:               cr.opened,
+				Resolved:             cr.resolved,
 			}, nil
 		}
 	}
@@ -519,17 +527,19 @@ func (m *MemoryStore) SetRepositoryOwningTeam(_ context.Context, tenantID, repos
 	return nil
 }
 
-// ScanReportAt returns the reported set of the latest COMPLETE scan at the
-// repository's revision. The reported set is the scan's own accumulated
-// identities — nothing ever removes from it, so a later scan re-reporting an
-// identity leaves the earlier scan's set intact (SPEC-0028 attribution
-// rule). Each identity joins to the finding row recorded for it; a row
-// always exists, because ingestion creates one for every reported identity
-// and never deletes.
+// ScanReportAt returns the union of the latest COMPLETE scan per scanner
+// class at the repository's revision: a revision scanned by semgrep AND
+// gitleaks reports both tools' sets (SPEC-0026 AC1, SPEC-0028 AC1). Within
+// a class the latest completed scan wins. The reported set is each scan's
+// own accumulated identities — nothing ever removes from it, so a later
+// scan re-reporting an identity leaves the earlier scan's set intact
+// (SPEC-0028 attribution rule). Each identity joins to the finding row
+// recorded for it; a row always exists, because ingestion creates one for
+// every reported identity and never deletes.
 func (m *MemoryStore) ScanReportAt(_ context.Context, tenantID, repositoryID, revision string) (ScanReport, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var best *scanRecord
+	bestByClass := map[api.ScannerClass]*scanRecord{}
 	for _, rec := range m.scans {
 		if rec.state != scanComplete {
 			continue
@@ -538,24 +548,56 @@ func (m *MemoryStore) ScanReportAt(_ context.Context, tenantID, repositoryID, re
 		if p.TenantID != tenantID || p.RepositoryID != repositoryID || p.Revision != revision {
 			continue
 		}
-		if best == nil || p.Scan.StartedAt.After(best.params.Scan.StartedAt) ||
-			(p.Scan.StartedAt.Equal(best.params.Scan.StartedAt) && p.ScanID > best.params.ScanID) {
-			best = rec
+		cur, ok := bestByClass[p.Scan.ScannerClass]
+		if !ok || p.Scan.StartedAt.After(cur.params.Scan.StartedAt) ||
+			(p.Scan.StartedAt.Equal(cur.params.Scan.StartedAt) && p.ScanID > cur.params.ScanID) {
+			bestByClass[p.Scan.ScannerClass] = rec
 		}
 	}
-	if best == nil {
+	if len(bestByClass) == 0 {
 		return ScanReport{}, false, nil
 	}
+	classes := make([]api.ScannerClass, 0, len(bestByClass))
+	for class := range bestByClass {
+		classes = append(classes, class)
+	}
+	slices.Sort(classes)
+
 	tenant := m.finds[tenantID]
 	identityIndex := m.byIdentity[tenantID]
 	out := []ReportedFinding{}
-	for identity := range best.prepared {
-		findingID, ok := identityIndex[identity]
-		if !ok {
-			continue
+	scanIDs := make([]string, 0, len(bestByClass))
+	seen := map[string]struct{}{}
+	for _, class := range classes {
+		rec := bestByClass[class]
+		scanIDs = append(scanIDs, rec.params.ScanID)
+		for identity := range rec.prepared {
+			if _, dup := seen[identity]; dup {
+				continue
+			}
+			seen[identity] = struct{}{}
+			findingID, ok := identityIndex[identity]
+			if !ok {
+				continue
+			}
+			out = append(out, ReportedFinding{Identity: identity, Finding: tenant[findingID].finding})
 		}
-		out = append(out, ReportedFinding{Identity: identity, Finding: tenant[findingID].finding})
 	}
 	slices.SortFunc(out, func(a, b ReportedFinding) int { return cmp.Compare(a.Finding.ID, b.Finding.ID) })
-	return ScanReport{ScanID: best.params.ScanID, Findings: out}, true, nil
+	return ScanReport{ScanIDs: scanIDs, Findings: out}, true, nil
+}
+
+// auditMarkerKey composes the claim-marker key of one ingest's audit
+// record: (scan, chunk, request ID).
+func auditMarkerKey(scanID string, chunkIndex int, requestID string) string {
+	return scanID + "\x00" + strconv.Itoa(chunkIndex) + "\x00" + requestID
+}
+
+// ClaimIngestAuditMarker records that the ingest's one audit record has
+// landed (SPEC-0025 AC5). Idempotent: a re-claim changes nothing.
+func (m *MemoryStore) ClaimIngestAuditMarker(_ context.Context, _, scanID string, chunkIndex int, requestID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.auditMarkers[auditMarkerKey(scanID, chunkIndex, requestID)] = struct{}{}
+	return nil
 }

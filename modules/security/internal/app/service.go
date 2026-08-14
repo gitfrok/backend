@@ -104,8 +104,10 @@ func New(store Store, pdp policyapi.DecisionPoint, events bus.Bus, opts ...Optio
 //  3. compute identities server-side — no adapter can assert one;
 //  4. hand the chunk to the store, which is serializable per scan and
 //     idempotent per request ID;
-//  5. only after a successful, non-replayed completion, emit events and the
-//     one audit record (SPEC-0025 AC1/AC5).
+//  5. on a successful, non-replayed completion, emit the one audit record
+//     FIRST — as close to the commit as the bus allows — then the domain
+//     events; a completed replay whose audit marker is missing backfills
+//     the record instead (SPEC-0025 AC1/AC5).
 func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) (api.IngestResult, error) {
 	if !validContext(chunk.Context) || chunk.Revision == "" {
 		return api.IngestResult{}, api.ErrDenied
@@ -182,11 +184,33 @@ func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) 
 		Completed:        outcome.Completed,
 		Replayed:         outcome.Replayed,
 	}
-	// A replay reports the recorded outcome and creates no event and no
-	// second audit record of the same ingest (SPEC-0025 AC1). A non-final
-	// chunk is invisible to readers and emits nothing.
-	if outcome.Replayed || !outcome.Completed {
+	// A replay reports the recorded outcome and creates no event (SPEC-0025
+	// AC1). A completed replay WITHOUT its audit claim marker means the
+	// first attempt committed but its audit record never landed (the publish
+	// failed after commit, or the process crashed in between): backfill the
+	// one record so a committed ingest can never lack it (SPEC-0025 AC5 —
+	// one, and at least one). The backfill carries this replay's own PDP
+	// decision: every request, replay included, is decided.
+	if outcome.Replayed {
+		if outcome.Completed && !outcome.AuditAlreadyRecorded {
+			if err := s.emitIngestAudit(ctx, chunk, outcome, decision.DecisionID); err != nil {
+				return api.IngestResult{}, err
+			}
+		}
 		return result, nil
+	}
+	// A non-final chunk is invisible to readers and emits nothing.
+	if !outcome.Completed {
+		return result, nil
+	}
+
+	// AC5: the audit record lands FIRST — as close to the ingest commit as
+	// the bus allows — so a committed ingest can never lack its record even
+	// when a later domain-event publish fails. The claim marker recorded
+	// alongside it is what the replay path above reads to tell "already
+	// appended" from "must backfill".
+	if err := s.emitIngestAudit(ctx, chunk, outcome, decision.DecisionID); err != nil {
+		return api.IngestResult{}, err
 	}
 
 	now := s.now().UTC()
@@ -216,38 +240,46 @@ func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) 
 	}); err != nil {
 		return api.IngestResult{}, fmt.Errorf("security: publish ScanIngested: %w", err)
 	}
+	return result, nil
+}
 
-	// AC5: an accepted ingest appends exactly one immutable audit record —
-	// tenant, actor, repository resource, action, outcome, request ID, and
-	// decision ID. It is published on the audit bus; the audit sink makes it
-	// durable. This is the ONLY emission point, and the replay early-return
-	// above is what keeps it exactly-once.
+// emitIngestAudit appends the one immutable audit record of an accepted
+// ingest — tenant, actor, repository resource, action, outcome, request ID,
+// and decision ID (SPEC-0025 AC5) — then claims its replay marker. The
+// marker is best-effort: a failed claim is swallowed because failing the
+// ingest here would make the caller retry into a replay that backfills a
+// DUPLICATE record, while a missing claim only re-opens the crash window in
+// which a later replay may legitimately backfill.
+func (s *Service) emitIngestAudit(ctx context.Context, chunk api.IngestChunk, outcome IngestOutcome, decisionID string) error {
 	if s.bus != nil {
 		if err := s.bus.Publish(ctx, platformaudit.FindingsScanIngested{
 			TenantID: chunk.TenantID, ActorID: chunk.ActorID, RepositoryID: chunk.RepositoryID,
 			ScanID: outcome.ScanID, RequestID: chunk.RequestID,
-			PolicyDecisionID: decision.DecisionID, FindingsRecorded: result.FindingsRecorded,
-			OccurredAt: now,
+			PolicyDecisionID: decisionID, FindingsRecorded: outcome.FindingsRecorded,
+			OccurredAt: s.now().UTC(),
 		}); err != nil {
-			return api.IngestResult{}, fmt.Errorf("security: audit ingest: %w", err)
+			return fmt.Errorf("security: audit ingest: %w", err)
 		}
 	}
-	return result, nil
+	_ = s.store.ClaimIngestAuditMarker(ctx, chunk.TenantID, outcome.ScanID, chunk.ChunkIndex, chunk.RequestID)
+	return nil
 }
 
-// GetFinding returns one finding. The PDP decides first — resource type
-// "finding", per the SPEC-0025 vocabulary — and the read itself is
-// tenant-scoped by the store. Not-found, cross-tenant, and unauthorized are
-// the same coarse denial (SPEC-0001).
+// GetFinding returns one finding. The finding row is loaded FIRST: a
+// finding outside the caller's repository context is the same coarse denial
+// as absence or cross-tenant (SPEC-0001) — the PDP then decides with the
+// finding's repository as a server-derived fact, mirroring SetTriage.
+// Not-found, cross-tenant, cross-repository, and unauthorized are the same
+// coarse denial.
 func (s *Service) GetFinding(ctx context.Context, c api.Context, findingID string) (api.Finding, error) {
 	if !validContext(c) || findingID == "" {
 		return api.Finding{}, api.ErrDenied
 	}
-	if !s.allowed(ctx, c, "findings.read", "finding", findingID, map[string]string{}) {
+	f, err := s.store.GetFinding(ctx, c.TenantID, findingID)
+	if err != nil || f.RepositoryID != c.RepositoryID {
 		return api.Finding{}, api.ErrDenied
 	}
-	f, err := s.store.GetFinding(ctx, c.TenantID, findingID)
-	if err != nil {
+	if !s.allowed(ctx, c, "findings.read", "finding", findingID, map[string]string{"repository": f.RepositoryID}) {
 		return api.Finding{}, api.ErrDenied
 	}
 	return f, nil
@@ -463,14 +495,20 @@ func (s *Service) SetTriage(ctx context.Context, req api.TriageTransition) (api.
 }
 
 // GetTriage reads a finding's triage record: the latest when version is
-// zero, an exact superseded version otherwise (SPEC-0027 AC6). The read is a
-// PDP decision on the finding itself; absence and denial are the same coarse
-// shape.
+// zero, an exact superseded version otherwise (SPEC-0027 AC6). The finding
+// row is loaded FIRST so a finding outside the caller's repository context
+// is the same coarse denial as absence (SPEC-0001), mirroring SetTriage;
+// the PDP then decides on the finding itself with its repository as a
+// server-derived fact. Absence and denial are the same coarse shape.
 func (s *Service) GetTriage(ctx context.Context, c api.Context, findingID string, version int64) (api.TriageRecord, bool, error) {
 	if !validContext(c) || findingID == "" || version < 0 {
 		return api.TriageRecord{}, false, api.ErrDenied
 	}
-	if !s.allowed(ctx, c, "findings.read", "finding", findingID, map[string]string{}) {
+	f, err := s.store.GetFinding(ctx, c.TenantID, findingID)
+	if err != nil || f.RepositoryID != c.RepositoryID {
+		return api.TriageRecord{}, false, api.ErrDenied
+	}
+	if !s.allowed(ctx, c, "findings.read", "finding", findingID, map[string]string{"repository": f.RepositoryID}) {
 		return api.TriageRecord{}, false, api.ErrDenied
 	}
 	rec, found, err := s.store.GetTriage(ctx, c.TenantID, findingID, version)
@@ -634,10 +672,12 @@ func scanID(chunk api.IngestChunk) string {
 }
 
 // cursor is the signed payload of a list page token. It binds the cursor to
-// the tenant and the exact filters that issued it: a token issued for one
-// listing is inert under another (SPEC-0025).
+// the tenant, the issuing actor, and the exact filters that issued it: a
+// token issued for one listing is inert under another — including under the
+// same listing replayed by a different actor (SPEC-0025).
 type cursor struct {
 	TenantID   string
+	ActorID    string
 	Repository string
 	Class      api.ScannerClass
 	Severity   api.Severity
@@ -650,7 +690,7 @@ type cursor struct {
 
 func (s *Service) encodeCursor(req api.ListRequest, lastID string) string {
 	c := cursor{
-		TenantID: req.TenantID, Repository: listScope(req),
+		TenantID: req.TenantID, ActorID: req.ActorID, Repository: listScope(req),
 		Class: req.ScannerClassFilter, Severity: req.SeverityFilter,
 		Lifecycle: req.LifecycleFilter, MinAgeDays: req.MinAgeDays,
 		MaxAgeDays: req.MaxAgeDays, OwningTeam: req.OwningTeamFilter,
@@ -688,8 +728,10 @@ func (s *Service) decodeCursor(token string, req api.ListRequest) (cursor, bool)
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return cursor{}, false
 	}
-	// Bound to the tenant and the filters that issued it.
-	if c.TenantID != req.TenantID || c.Repository != listScope(req) ||
+	// Bound to the tenant, the issuing actor, and the filters that issued
+	// it.
+	if c.TenantID != req.TenantID || c.ActorID != req.ActorID ||
+		c.Repository != listScope(req) ||
 		c.Class != req.ScannerClassFilter || c.Severity != req.SeverityFilter ||
 		c.Lifecycle != req.LifecycleFilter || c.MinAgeDays != req.MinAgeDays ||
 		c.MaxAgeDays != req.MaxAgeDays || c.OwningTeam != req.OwningTeamFilter ||

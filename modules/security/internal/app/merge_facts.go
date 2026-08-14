@@ -71,6 +71,13 @@ func (s *Service) MergeFindingsFacts(ctx context.Context, tenantID, repositoryID
 	}
 	rec := outcome.record
 
+	// The severity threshold is read from the Code Review contract
+	// (SPEC-0029 AC3). A fully PDP-driven threshold would need a governance
+	// contract change (recorded follow-up, out of scope for the phase-2 fix
+	// wave); until then the constant-parity test in
+	// threshold_parity_test.go fails CI when the reviewed rego bundle's
+	// security_severity_threshold (governance/policies/gitsaas/authz/
+	// authz.rego) drifts from this constant.
 	threshold, ok := mergeGateSeverityRank[api.Severity(codereviewapi.SecurityGateSeverityThreshold)]
 	if !ok {
 		return codereviewapi.FindingsGateFacts{}, errMergeFactsUnavailable

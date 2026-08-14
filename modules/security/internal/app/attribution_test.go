@@ -35,6 +35,26 @@ func chunkAt(rev, reqID string, offset time.Duration, findings ...api.RawFinding
 	return c
 }
 
+// secretsScan is a secrets-class scan by gitleaks — a different scanner
+// class and tool than the SAST default, so its findings live in their own
+// lifecycle scope.
+func secretsScan(startOffset time.Duration) api.Scan {
+	return api.Scan{
+		ScannerClass: api.ScannerClassSecrets,
+		ToolName:     "gitleaks",
+		ToolVersion:  "8.21.0",
+		StartedAt:    baseTime.Add(startOffset),
+		EndedAt:      baseTime.Add(startOffset + time.Minute),
+	}
+}
+
+// chunkAtClass is chunkAt with an explicit scan descriptor.
+func chunkAtClass(scan api.Scan, rev, reqID string, findings ...api.RawFinding) api.IngestChunk {
+	c := singleChunk(scan, reqID, findings...)
+	c.Revision = rev
+	return c
+}
+
 // announceMR feeds the tenant-scoped projection the way Code Review does.
 func announceMR(h *harness, head string) {
 	_ = h.bus.Publish(context.Background(), codereviewapi.MergeRequestUpdated{
@@ -209,8 +229,9 @@ func TestAttributionUnavailableReasons(t *testing.T) {
 		}
 		announceMR(h, "rev-head")
 		page, err := h.svc.ListMergeRequestFindings(context.Background(), mrRequest())
-		if err != nil || len(page.Views) != 0 || page.Summary.Status != api.AttributionUnavailable {
-			t.Fatalf("a plane without the Git route must report UNAVAILABLE: %+v err=%v", page, err)
+		if err != nil || len(page.Views) != 0 || page.Summary.Status != api.AttributionUnavailable ||
+			page.Summary.UnavailableReason != api.AttributionUnavailableMergeBaseResolverNotComposed {
+			t.Fatalf("a plane without the Git route must report UNAVAILABLE with its reason: %+v err=%v", page.Summary, err)
 		}
 	})
 }
@@ -366,5 +387,142 @@ func TestAttributionCompletesWhenScanLands(t *testing.T) {
 	page, err := h.svc.ListMergeRequestFindings(ctx, mrRequest())
 	if err != nil || page.Summary.Status != api.AttributionAttributed || page.Summary.Stale {
 		t.Fatalf("post-scan serving: %+v err=%v", page.Summary, err)
+	}
+}
+
+// The reported set at a revision spans every ingested scanner class:
+// semgrep AND gitleaks scanning the same head both contribute to the MR
+// view — attribution never sees just one scan per revision (SPEC-0026 AC1,
+// SPEC-0028 AC1; phase-2 review H5).
+func TestAttributionSpansScannerClasses(t *testing.T) {
+	h := newHarness(true)
+	ctx := context.Background()
+	h.svc.SetMergeBaseResolver(&fakeResolver{base: "rev-base", found: true})
+
+	// An empty base scan gives the comparison its base side.
+	if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-base", "req-b", 0)); err != nil {
+		t.Fatalf("base scan: %v", err)
+	}
+	// Two scanner classes at the same head revision.
+	if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-head", "req-h1", time.Hour,
+		rawFinding("rule-sast", "app.py", "fn-sast"))); err != nil {
+		t.Fatalf("sast scan: %v", err)
+	}
+	if _, err := h.svc.IngestScanResults(ctx, chunkAtClass(secretsScan(time.Hour), "rev-head", "req-h2",
+		rawFinding("rule-secret", "creds.env", "fn-secret"))); err != nil {
+		t.Fatalf("secrets scan: %v", err)
+	}
+	announceMR(h, "rev-head")
+
+	page, err := h.svc.ListMergeRequestFindings(ctx, mrRequest())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	rules := map[string]api.AttributionStatus{}
+	for _, v := range page.Views {
+		rules[v.Finding.RuleID] = v.Attribution
+	}
+	if len(page.Views) != 2 ||
+		rules["rule-sast"] != api.AttributionAttributed ||
+		rules["rule-secret"] != api.AttributionAttributed {
+		t.Fatalf("both scanner classes must contribute: %+v", page.Views)
+	}
+	if page.Summary.AttributedHigh != 2 {
+		t.Fatalf("summary must count both classes: %+v", page.Summary)
+	}
+}
+
+// A later scan at the same head/base replaces the stored materialization:
+// the served MR view and the gate facts reflect the fresh computation,
+// never the earlier one (phase-2 review H6). An unchanged recompute stays
+// silent; the changed one re-emits honestly.
+func TestAttributionSecondScanAtSameHeadUpdatesMaterialization(t *testing.T) {
+	h := newHarness(true)
+	ctx := context.Background()
+	h.svc.SetMergeBaseResolver(&fakeResolver{base: "rev-base", found: true})
+
+	if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-base", "req-b", 0)); err != nil {
+		t.Fatalf("base scan: %v", err)
+	}
+	if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-head", "req-h1", time.Hour,
+		rawFinding("rule-old", "old.py", "fn-old"))); err != nil {
+		t.Fatalf("head scan 1: %v", err)
+	}
+	announceMR(h, "rev-head")
+	page, err := h.svc.ListMergeRequestFindings(ctx, mrRequest())
+	if err != nil || len(page.Views) != 1 || page.Summary.AttributedHigh != 1 {
+		t.Fatalf("first materialization: %+v err=%v", page.Summary, err)
+	}
+	if len(h.attributed) != 1 {
+		t.Fatalf("expected one FindingsAttributed, got %d", len(h.attributed))
+	}
+
+	// A second scan of the same head by the same tool reports a different
+	// set: the first scan's finding resolves, the new one opens, and the
+	// materialization must move with them.
+	if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-head", "req-h2", 2*time.Hour,
+		rawFinding("rule-newer", "newer.py", "fn-newer"))); err != nil {
+		t.Fatalf("head scan 2: %v", err)
+	}
+	page, err = h.svc.ListMergeRequestFindings(ctx, mrRequest())
+	if err != nil {
+		t.Fatalf("list after rescan: %v", err)
+	}
+	if len(page.Views) != 1 || page.Views[0].Finding.RuleID != "rule-newer" ||
+		page.Views[0].Attribution != api.AttributionAttributed {
+		t.Fatalf("the rescan must replace the materialized view: %+v", page.Views)
+	}
+	if page.Summary.AttributedHigh != 1 || page.Summary.Stale {
+		t.Fatalf("summary must follow the rescan: %+v", page.Summary)
+	}
+	if len(h.attributed) != 2 || h.attributed[1].AttributedHigh != 1 {
+		t.Fatalf("a changed materialization must re-emit honestly: %+v", h.attributed)
+	}
+
+	facts, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", "mr-1")
+	if err != nil || facts.High != 1 || facts.HighestAttributedSeverity != "HIGH" {
+		t.Fatalf("gate facts must follow the rescan: %+v err=%v", facts, err)
+	}
+}
+
+// A merge-request cursor is bound to the issuing principal: the same
+// tenant's second actor replaying the token gets no content, while the
+// summary still names the comparison (phase-2 review L17).
+func TestMRCursorIsBoundToTheIssuingActor(t *testing.T) {
+	h := newHarness(true)
+	ctx := context.Background()
+	h.svc.SetMergeBaseResolver(&fakeResolver{base: "rev-base", found: true})
+	if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-base", "req-b", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-head", "req-h", time.Hour,
+		rawFinding("rule-a", "a.py", "fn-a"), rawFinding("rule-b", "b.py", "fn-b"))); err != nil {
+		t.Fatal(err)
+	}
+	announceMR(h, "rev-head")
+
+	req := mrRequest()
+	req.PageSize = 1
+	page1, err := h.svc.ListMergeRequestFindings(ctx, req)
+	if err != nil || page1.NextPageToken == "" {
+		t.Fatalf("page 1 must carry a next token: %+v err=%v", page1, err)
+	}
+
+	other := mrRequest()
+	other.PageSize = 1
+	other.ActorID = "actor-2"
+	other.PageToken = page1.NextPageToken
+	page2, err := h.svc.ListMergeRequestFindings(ctx, other)
+	if err != nil || len(page2.Views) != 0 || page2.NextPageToken != "" {
+		t.Fatalf("another actor's replay of the token must yield nothing: %+v err=%v", page2, err)
+	}
+	if page2.Summary.Status != api.AttributionAttributed {
+		t.Fatalf("the summary still names the comparison: %+v", page2.Summary)
+	}
+
+	req.PageToken = page1.NextPageToken
+	own, err := h.svc.ListMergeRequestFindings(ctx, req)
+	if err != nil || len(own.Views) != 1 {
+		t.Fatalf("the issuing actor's own token must still page: %+v err=%v", own, err)
 	}
 }
