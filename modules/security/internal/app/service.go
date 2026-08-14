@@ -179,7 +179,18 @@ func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) 
 	if hasReservedRequestIDPrefix(chunk.RequestID) {
 		return api.IngestResult{}, api.ErrMalformed
 	}
-	if !validContext(chunk.Context) || chunk.Revision == "" {
+	return s.ingestScanResults(ctx, chunk)
+}
+
+// ingestScanResults is the trusted core: validation against the PDP, identity
+// computation, the store write, and the audit/event emissions. It performs NO
+// reserved-namespace check — its only legitimate callers are the public
+// wire boundary above (which checks first) and the plane's own in-process CI
+// scan ingester, whose derived request IDs live IN the reserved "ci:"
+// namespace by design (SPEC-0037 AC6). Nothing outside this package may
+// reach it.
+func (s *Service) ingestScanResults(ctx context.Context, chunk api.IngestChunk) (api.IngestResult, error) {
+	if !completeContext(chunk.Context) || chunk.Revision == "" {
 		return api.IngestResult{}, api.ErrDenied
 	}
 	if err := validateChunk(chunk); err != nil {
@@ -680,6 +691,16 @@ func (s *Service) GetFindingsSummary(ctx context.Context, req api.SummaryRequest
 // before reaching here.
 func validContext(c api.Context) bool {
 	return c.TenantID != "" && c.RepositoryID != "" && c.ActorID != "" && validRequestID(c.RequestID)
+}
+
+// completeContext is the shape check the trusted ingest core applies: every
+// identity field present. Unlike validContext it performs NO
+// reserved-namespace refusal — the core's in-process callers mint request
+// IDs INSIDE those namespaces by design (the CI subscriber's "ci:" IDs,
+// SPEC-0037 AC6), and the public boundary already refused foreign ones
+// before delegating here.
+func completeContext(c api.Context) bool {
+	return c.TenantID != "" && c.RepositoryID != "" && c.ActorID != "" && c.RequestID != ""
 }
 
 // validTenantContext is the relaxed check the tenant-wide read paths apply

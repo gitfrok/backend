@@ -70,6 +70,10 @@ func (s *Sink) dispatch(ctx context.Context, e bus.Event) error {
 		return s.appendFindingsScanIngested(ctx, ev)
 	case platformaudit.FindingsTriaged:
 		return s.appendFindingsTriaged(ctx, ev)
+	case platformaudit.CIScanReportIngested:
+		return s.appendCIScanReportIngested(ctx, ev)
+	case platformaudit.FindingsScanReportRejected:
+		return s.appendFindingsScanReportRejected(ctx, ev)
 	default:
 		return nil
 	}
@@ -176,6 +180,45 @@ func (s *Sink) appendFindingsTriaged(ctx context.Context, e platformaudit.Findin
 			"repository_id": e.RepositoryID, "triage_id": e.TriageID,
 			"prior_state": e.PriorState, "new_state": e.NewState,
 			"request_id": e.RequestID, "decision_id": e.PolicyDecisionID,
+		},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendCIScanReportIngested records one CI scan report's ingest (SPEC-0037
+// AC5), including the job's terminal state — the provenance that a FAILED or
+// CANCELLED job's report was taken in like any other. The emission point is
+// the CI scan ingester; the ingest core's replay guard keeps it exactly-once
+// per (job, attempt, scanner class).
+func (s *Sink) appendCIScanReportIngested(ctx context.Context, e platformaudit.CIScanReportIngested) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID: e.TenantID,
+		Action:   auditapi.Action(platformaudit.ActionCIScanReportIngested),
+		ActorID:  e.ActorID,
+		Resource: "repository/" + e.RepositoryID,
+		Outcome:  auditapi.OutcomeAllowed,
+		Detail: map[string]string{
+			"job_id": e.JobID, "attempt_id": e.AttemptID,
+			"scanner_class": e.ScannerClass, "terminal_state": e.TerminalState,
+			"scan_id": e.ScanID, "findings_recorded": strconv.FormatInt(e.FindingsRecorded, 10),
+		},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendFindingsScanReportRejected records a scan report refused without any
+// finding change (SPEC-0037 AC8): unparseable bytes, a class no adapter
+// claims, or a principal the PDP refused.
+func (s *Sink) appendFindingsScanReportRejected(ctx context.Context, e platformaudit.FindingsScanReportRejected) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID: e.TenantID,
+		Action:   auditapi.Action(platformaudit.ActionFindingsScanReportRejected),
+		ActorID:  e.ActorID,
+		Resource: "repository/" + e.RepositoryID,
+		Outcome:  auditapi.OutcomeDenied,
+		Detail: map[string]string{
+			"job_id": e.JobID, "attempt_id": e.AttemptID,
+			"scanner_class": e.ScannerClass, "reason": e.Reason,
 		},
 		OccurredAt: e.OccurredAt,
 	})
