@@ -252,3 +252,77 @@ func TestChunksHeaderCarriesIdentityOnly(t *testing.T) {
 		t.Fatalf("the closing chunk must carry no content: %+v", chunks[3])
 	}
 }
+
+// Wave-2 residual A — the exclusion marker keyed only on the ENFORCED mode,
+// so a decision record that lost its mode in transit fell through Classify
+// and left the pack with no trace. Three shapes are pinned here: the
+// mode-less decision record IS an exclusion (it carries the revision and
+// digest auditsink writes for decisions only); an unrecognized mode is one
+// too; and the decision_id-only shape every audited action carries — an
+// auditor-grant issuance, for instance — is NOT, because gapping on a
+// correlation key would mark healthy packs incomplete.
+func TestExclusionMarkerCoversModelessAndUnknownModes(t *testing.T) {
+	policy := func(sections []api.Section) api.Section {
+		t.Helper()
+		for _, sec := range sections {
+			if sec.Type == api.SectionPolicyDecisions {
+				return sec
+			}
+		}
+		t.Fatal("the policy-decisions section must be present")
+		return api.Section{}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		detail  map[string]string
+		wantGap bool
+	}{
+		{
+			name: "a decision record with no mode is an exclusion",
+			detail: map[string]string{
+				"decision_id": "d-1", "policy_revision": "rev-1", "input_digest": "sha256:in",
+			},
+			wantGap: true,
+		},
+		{
+			name:    "a mode the vocabulary does not define is an exclusion",
+			detail:  map[string]string{"policy_mode": "SHADOW", "decision_id": "d-1"},
+			wantGap: true,
+		},
+		{
+			name: "a DRY_RUN decision is absent, not missing",
+			detail: map[string]string{
+				"policy_mode": "DRY_RUN", "decision_id": "d-1",
+				"policy_revision": "rev-1", "input_digest": "sha256:in",
+			},
+			wantGap: false,
+		},
+		{
+			name:    "an audited action carrying only decision_id is not a decision record",
+			detail:  map[string]string{"decision_id": "d-1", "grant_id": "g-1"},
+			wantGap: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := trailRecord(1, api.Action("auditor.grant.issued"), tc.detail)
+			sec := policy(AssembleSections([]api.Record{rec}, "", nil))
+			gapped := len(sec.Gaps) > 0
+			if gapped != tc.wantGap {
+				t.Fatalf("gaps = %+v, want a gap: %v", sec.Gaps, tc.wantGap)
+			}
+			if sec.Complete == tc.wantGap {
+				t.Errorf("Complete = %v with gaps %+v", sec.Complete, sec.Gaps)
+			}
+			if tc.wantGap {
+				want := api.SectionGap{From: rec.OccurredAt, To: rec.OccurredAt, Reason: api.GapRecordsExcluded}
+				if sec.Gaps[0] != want {
+					t.Errorf("gap = %+v, want %+v", sec.Gaps[0], want)
+				}
+			}
+			if len(sec.Records) != 0 {
+				t.Errorf("no record here is citable, got %+v", sec.Records)
+			}
+		})
+	}
+}
