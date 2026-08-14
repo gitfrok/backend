@@ -5,7 +5,10 @@
 //   - the AgentGateway door (T-0030, SPEC-0038, ADR-0060) when GITFROK_AGENT_GRPC_ADDR is
 //     set: one outbound bidi stream per data plane, bootstrapped by a one-time enrolment
 //     token and authenticated thereafter by control-plane-issued, on-channel-rotated
-//     client certificates.
+//     client certificates,
+//   - the UsageService door (T-0034, SPEC-0041) when GITFROK_USAGE_GRPC_ADDR is set: the
+//     tenant's fair-use usage view, read from the counters the control plane derives from
+//     telemetry it RECEIVES on the agent channel (ADR-0061).
 package main
 
 import (
@@ -20,9 +23,11 @@ import (
 
 	"github.com/gitfrok/backend/cmd/internal/health"
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
+	usagev1 "github.com/gitfrok/backend/gen/proto/usage/v1"
 	"github.com/gitfrok/backend/modules/agent"
 	"github.com/gitfrok/backend/modules/audit"
 	auditapi "github.com/gitfrok/backend/modules/audit/api"
+	"github.com/gitfrok/backend/modules/metering"
 	"github.com/gitfrok/backend/modules/policy"
 	"github.com/gitfrok/backend/modules/residency"
 	residencyapi "github.com/gitfrok/backend/modules/residency/api"
@@ -49,11 +54,15 @@ const (
 // agentDoor is one running AgentGateway listener and everything it was composed from.
 type agentDoor struct {
 	server *ggrpc.Server
+	usage  *ggrpc.Server // the UsageService door, when GITFROK_USAGE_GRPC_ADDR is set
 	pool   *db.Pool
 }
 
 func (d *agentDoor) close() {
 	d.server.Stop()
+	if d.usage != nil {
+		d.usage.Stop()
+	}
 	if d.pool != nil {
 		d.pool.Close()
 	}
@@ -61,7 +70,7 @@ func (d *agentDoor) close() {
 
 // startAgentDoor composes and starts the gateway. Every failure here fails the rollout —
 // a gateway that starts half-wired would refuse enrolments later as an unexplained outage.
-func startAgentDoor(cfg agentConfig) (*agentDoor, error) {
+func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 	bundleDir := os.Getenv(policyBundleDirEnv)
 	if bundleDir == "" {
 		return nil, fmt.Errorf("%s is not set: every operator action on the agent surface "+
@@ -132,6 +141,37 @@ func startAgentDoor(cfg agentConfig) (*agentDoor, error) {
 
 	gateway := agent.NewGRPCServer(svc, time.Second, time.Now, logf)
 
+	// Metering composition (T-0034, SPEC-0041, ADR-0061): the control plane counts from
+	// the telemetry it RECEIVES on the agent channel. The gateway forwards every
+	// TelemetrySample and UsageSample to the sink and polls the newest envelope desired
+	// state for delivery (AC9); the counters live in the metering context, and the same
+	// ledger feeds the UsageService door below (AC10). A breach only throttles CI and
+	// notifies — it never touches git (AC7) and never bills (ADR-0008).
+	meteringSvc := metering.New(pdp, metering.LogNotifier{Logf: logf}, b, mcfg.cfg, logf)
+	agent.AttachMetering(gateway, meteringSvc, meteringSvc)
+
+	// The UsageService door the BFF calls for the tenant's usage view. Dev posture is
+	// plaintext, exactly like the data plane's policy door; plane-to-plane mTLS is the
+	// same T-0013 follow-up named there.
+	var usageServer *ggrpc.Server
+	if mcfg.usageAddr != "" {
+		lis, err := net.Listen("tcp", mcfg.usageAddr)
+		if err != nil {
+			if pool != nil {
+				pool.Close()
+			}
+			return nil, fmt.Errorf("usage service listen %s: %w", mcfg.usageAddr, err)
+		}
+		usageServer = ggrpc.NewServer()
+		usagev1.RegisterUsageServiceServer(usageServer, metering.NewGRPCServer(meteringSvc))
+		go func() {
+			if serveErr := usageServer.Serve(lis); serveErr != nil {
+				logf("usage service stopped: %v", serveErr)
+			}
+		}()
+		fmt.Printf("controlplane-app: UsageService listening on %s\n", mcfg.usageAddr)
+	}
+
 	serverCert, err := ca.IssueServer("agent-gateway", cfg.serverNames, time.Now(), 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("agent gateway server certificate: %w", err)
@@ -154,7 +194,7 @@ func startAgentDoor(cfg agentConfig) (*agentDoor, error) {
 		}
 	}()
 	fmt.Printf("controlplane-app: AgentGateway listening on %s (dev CA custody)\n", cfg.grpcAddr)
-	return &agentDoor{server: server, pool: pool}, nil
+	return &agentDoor{server: server, usage: usageServer, pool: pool}, nil
 }
 
 func main() {
@@ -163,13 +203,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "controlplane agent configuration: %v\n", err)
 		os.Exit(1)
 	}
+	meteringCfg, err := loadMeteringConfig(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "controlplane metering configuration: %v\n", err)
+		os.Exit(1)
+	}
 	if agentCfg.grpcAddr != "" {
-		door, err := startAgentDoor(agentCfg)
+		door, err := startAgentDoor(agentCfg, meteringCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "controlplane agent gateway: %v\n", err)
 			os.Exit(1)
 		}
 		defer door.close()
+	} else if meteringCfg.usageAddr != "" {
+		// The usage view reads counters derived from telemetry the agent channel
+		// delivers: without the agent door there is no telemetry, and a usage door
+		// that can only render gaps is a misconfiguration, not a feature.
+		fmt.Fprintf(os.Stderr, "%s is set but %s is not: the usage view needs the agent channel\n",
+			usageGRPCAddrEnv, agentGRPCAddrEnv)
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

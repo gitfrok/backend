@@ -12,11 +12,13 @@ package grpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	agentpb "github.com/gitfrok/backend/gen/proto/agent/v1"
 	"github.com/gitfrok/backend/modules/agent/api"
+	meteringapi "github.com/gitfrok/backend/modules/metering/api"
 	"github.com/gitfrok/backend/platform/ids"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -35,9 +37,26 @@ type Gateway struct {
 	poll time.Duration        // rotation-lapse polling cadence
 	now  func() time.Time     // the same clock the app layer decides with
 	logf func(string, ...any) // coarse prose only; never credentials (AC2)
+
+	// Metering seams, attached post-construction by the composition root
+	// (T-0034, SPEC-0041). Both are optional: a surface without them still
+	// serves enrolment, rotation and contact. Telemetry and usage received on
+	// the stream are forwarded to the sink; the newest envelope desired state
+	// is delivered to the stream and its ack recorded (AC9). The gateway
+	// cannot tell what counts on the other side (invariant 14).
+	sink      meteringapi.Sink
+	envelopes meteringapi.EnvelopeDelivery
 }
 
 var _ agentpb.AgentGatewayServer = (*Gateway)(nil)
+
+// AttachTelemetrySink wires the metering ingestion seam every TelemetrySample and
+// UsageSample received on an established stream is forwarded to.
+func (g *Gateway) AttachTelemetrySink(s meteringapi.Sink) { g.sink = s }
+
+// AttachEnvelopeDelivery wires the metering seam the stream polls for the newest
+// envelope desired state and reports acknowledgements back to (SPEC-0041 AC9).
+func (g *Gateway) AttachEnvelopeDelivery(e meteringapi.EnvelopeDelivery) { g.envelopes = e }
 
 // NewGateway wires the adapter. poll bounds how late a lapsed certificate can go unnoticed;
 // one second is ample for hour-long certificates (invariant 13: per-environment).
@@ -151,6 +170,7 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 	ticker := time.NewTicker(g.poll)
 	defer ticker.Stop()
 	var seq, ackSeq int64
+	var lastEnvelopeGen int64 // newest EnvelopeStateUpdate this stream delivered (AC9)
 	send := func(msg *agentpb.ControlPlaneMessage) error {
 		seq++
 		msg.MessageId = ids.NewULID()
@@ -172,6 +192,7 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 			return err
 		case msg := <-in:
 			ackSeq = msg.GetSeq()
+			id := ss.Identity()
 			switch p := msg.GetPayload().(type) {
 			case *agentpb.AgentMessage_Heartbeat:
 				ss.Touch(ctx)
@@ -181,15 +202,56 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 				if err := ss.AckRotation(ctx, ack.GetCertificateId(), ack.GetApplied(), reason); err != nil {
 					return status.Error(codes.Internal, "rotation acknowledgement failed")
 				}
+			case *agentpb.AgentMessage_Telemetry:
+				// Metering counts from what it RECEIVES (ADR-0061 §1): every
+				// sample the channel delivers is forwarded under the stream's
+				// own identity. A refusal is logged, never traded against the
+				// stream — metering must not degrade the channel that carries
+				// it, and git must never depend on it (SPEC-0041 AC7).
+				if g.sink != nil {
+					t := telemetryOf(msg.GetMessageId(), msg.GetSeq(), p.Telemetry)
+					if err := g.sink.IngestTelemetry(ctx, id.TenantID, id.DataPlaneID, t); err != nil {
+						g.logf("agent: telemetry ingest refused: %v", err)
+					}
+				}
+			case *agentpb.AgentMessage_Usage:
+				// The data plane's OWN totals: operational input, never a
+				// counter input (ADR-0061 §2). Forwarded the same way.
+				if g.sink != nil {
+					u := usageOf(msg.GetMessageId(), msg.GetSeq(), p.Usage)
+					if err := g.sink.IngestUsage(ctx, id.TenantID, id.DataPlaneID, u); err != nil {
+						g.logf("agent: usage ingest refused: %v", err)
+					}
+				}
+			case *agentpb.AgentMessage_EnvelopeStateAck:
+				ack := p.EnvelopeStateAck
+				if g.envelopes != nil {
+					if err := g.envelopes.AckDesiredState(ctx, id.TenantID, ack.GetGeneration(), ack.GetApplied(), ack.GetError()); err != nil {
+						g.logf("agent: envelope ack recording failed: %v", err)
+					}
+				}
 			default:
-				// State, telemetry, usage and friends ride this same stream but belong to
-				// later specs (SPEC-0039/0041); the enrolment surface ignores them.
+				// Remaining state messages ride this same stream but belong to
+				// later specs; the enrolment surface ignores them.
 			}
 		case <-ticker.C:
 			now := g.now()
 			if ss.Lapsed(now) {
 				_ = g.gw.RefusedLapsed(ctx, ss.Identity())
 				return status.Error(codes.PermissionDenied, "certificate lapsed without rotation")
+			}
+			// Envelope delivery (SPEC-0041 AC9): when a newer evaluation
+			// exists for this tenant, state it on the stream; the data plane
+			// applies it and acks. The control plane never reaches in.
+			if g.envelopes != nil {
+				tenant := ss.Identity().TenantID
+				if d, ok, err := g.envelopes.LatestDesiredState(ctx, tenant); err == nil && ok && d.Generation > lastEnvelopeGen {
+					update := envelopeUpdate(d)
+					if err := send(&agentpb.ControlPlaneMessage{Payload: &agentpb.ControlPlaneMessage_EnvelopeState{EnvelopeState: update}}); err != nil {
+						return err
+					}
+					lastEnvelopeGen = d.Generation
+				}
 			}
 			if now.Before(ss.RotationDueAt()) {
 				continue
@@ -279,5 +341,109 @@ func refusalDetail(r api.RefusalReason) string {
 		return "enrolment refused by the control plane"
 	default:
 		return "enrolment refused: the token is not valid"
+	}
+}
+
+// telemetryOf maps one contract TelemetrySample onto the metering surface. The dedup key
+// is the envelope's stamped message ID; an unstamped message falls back to the stream's
+// seq so ingest keeps an idempotency key either way (SPEC-0041 non-functional).
+func telemetryOf(messageID string, seq int64, ts *agentpb.TelemetrySample) meteringapi.Telemetry {
+	if messageID == "" {
+		messageID = fmt.Sprintf("agent-msg-%d", seq)
+	}
+	return meteringapi.Telemetry{
+		MessageID: messageID,
+		Window:    intervalOf(ts.GetWindowStart(), ts.GetWindowEnd()),
+		Gauges:    ts.GetGauges(),
+		Counters:  ts.GetCounters(),
+	}
+}
+
+// usageOf maps one contract UsageSample onto the metering surface.
+func usageOf(messageID string, seq int64, us *agentpb.UsageSample) meteringapi.Usage {
+	if messageID == "" {
+		messageID = fmt.Sprintf("agent-msg-%d", seq)
+	}
+	return meteringapi.Usage{
+		MessageID:         messageID,
+		Window:            intervalOf(us.GetWindowStart(), us.GetWindowEnd()),
+		CIMinutes:         us.GetCiMinutes(),
+		StorageBytes:      us.GetStorageBytes(),
+		EgressBytes:       us.GetEgressBytes(),
+		SeatCount:         us.GetSeatCount(),
+		CIConcurrencyPeak: us.GetCiConcurrencyPeak(),
+		ScanBytes:         us.GetScanBytes(),
+		RepositoryCount:   us.GetRepositoryCount(),
+		IndexBytes:        us.GetIndexBytes(),
+	}
+}
+
+func intervalOf(start, end *timestamppb.Timestamp) meteringapi.Interval {
+	var iv meteringapi.Interval
+	if start != nil {
+		iv.Start = start.AsTime()
+	}
+	if end != nil {
+		iv.End = end.AsTime()
+	}
+	return iv
+}
+
+// envelopeUpdate maps the metering context's evaluation onto the contract's desired
+// state: every decision cites the counter and the interval it was made from (G6).
+func envelopeUpdate(d meteringapi.EnvelopeDesiredState) *agentpb.EnvelopeStateUpdate {
+	out := &agentpb.EnvelopeStateUpdate{
+		Generation:       d.Generation,
+		MaxCiConcurrency: d.MaxCIConcurrency,
+		QueueDepthCap:    d.QueueDepthCap,
+	}
+	for _, dec := range d.Decisions {
+		out.Dimensions = append(out.Dimensions, &agentpb.DimensionEnvelope{
+			Dimension:         wireDimension(dec.Dimension),
+			State:             wireEnvelopeState(dec.State),
+			CurrentValue:      dec.Value,
+			EnvelopeValue:     dec.Threshold.Envelope,
+			NotificationValue: dec.Threshold.Notify,
+			Unit:              dec.Dimension.Unit(),
+			WindowStart:       timestamppb.New(dec.Window.Start),
+			WindowEnd:         timestamppb.New(dec.Window.End),
+		})
+	}
+	return out
+}
+
+func wireDimension(d meteringapi.Dimension) agentpb.FairUseDimension {
+	switch d {
+	case meteringapi.DimensionSeats:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_SEATS
+	case meteringapi.DimensionRepositoryCount:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_REPOSITORY_COUNT
+	case meteringapi.DimensionRepositoryStorage:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_REPOSITORY_STORAGE
+	case meteringapi.DimensionCIMinutes:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_CI_MINUTES
+	case meteringapi.DimensionCIConcurrency:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_CI_CONCURRENCY
+	case meteringapi.DimensionScanVolume:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_SCAN_VOLUME
+	case meteringapi.DimensionIndexSize:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_INDEX_SIZE
+	case meteringapi.DimensionEgress:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_EGRESS
+	default:
+		return agentpb.FairUseDimension_FAIR_USE_DIMENSION_UNSPECIFIED
+	}
+}
+
+func wireEnvelopeState(s meteringapi.State) agentpb.EnvelopeState {
+	switch s {
+	case meteringapi.StateWithin:
+		return agentpb.EnvelopeState_ENVELOPE_STATE_WITHIN
+	case meteringapi.StateNear:
+		return agentpb.EnvelopeState_ENVELOPE_STATE_NEAR
+	case meteringapi.StateExceeded:
+		return agentpb.EnvelopeState_ENVELOPE_STATE_EXCEEDED
+	default:
+		return agentpb.EnvelopeState_ENVELOPE_STATE_UNSPECIFIED
 	}
 }

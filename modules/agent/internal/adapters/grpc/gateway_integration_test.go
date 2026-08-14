@@ -17,6 +17,7 @@ import (
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/pki"
 	"github.com/gitfrok/backend/modules/agent/internal/app"
 	identityapi "github.com/gitfrok/backend/modules/identity/api"
+	meteringapi "github.com/gitfrok/backend/modules/metering/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	platformaudit "github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
@@ -85,6 +86,7 @@ func (r *auditRecorder) of(action string) []bus.Event {
 // real composition.
 type rig struct {
 	svc    *app.Service
+	gw     *Gateway
 	ca     *pki.DevCA
 	clock  *fakeClock
 	logs   *strings.Builder
@@ -135,11 +137,12 @@ func newRig(t *testing.T) *rig {
 		Certificates: []tls.Certificate{serverCert},
 		ClientAuth:   tls.RequestClientCert, // admission happens in the app layer, audited
 	})))
-	agentpb.RegisterAgentGatewayServer(server, NewGateway(svc, 5*time.Millisecond, clock.Now, logf))
+	gw := NewGateway(svc, 5*time.Millisecond, clock.Now, logf)
+	agentpb.RegisterAgentGatewayServer(server, gw)
 	go func() { _ = server.Serve(lis) }()
 	t.Cleanup(server.Stop)
 
-	return &rig{svc: svc, ca: ca, clock: clock, logs: logs, audits: newAuditRecorder(b), addr: "localhost" + lis.Addr().String()[strings.LastIndex(lis.Addr().String(), ":"):]}
+	return &rig{svc: svc, gw: gw, ca: ca, clock: clock, logs: logs, audits: newAuditRecorder(b), addr: "localhost" + lis.Addr().String()[strings.LastIndex(lis.Addr().String(), ":"):]}
 }
 
 // dial opens one client connection. clientCertPEM is the enrolment-issued credential bundle;
@@ -426,5 +429,180 @@ func TestWireRefusalsAreCoarseAndIsolated(t *testing.T) {
 	fleet, err := r.svc.Fleet(operatorCtx("beta", "op-2"), "beta", "op-2")
 	if err != nil || len(fleet) != 0 {
 		t.Fatalf("tenant beta fleet = %+v, err=%v; want empty", fleet, err)
+	}
+}
+
+// --- T-0034 / SPEC-0041: telemetry and usage ride the established channel to the metering sink,
+// and envelope desired state is delivered and acknowledged (AC1, AC9). The metering seams are
+// ports in the metering context's own terms; the gateway only forwards under the stream's own
+// identity (invariant 14).
+
+// recordingSink captures whatever the channel forwards to the metering sink.
+type recordingSink struct {
+	mu        sync.Mutex
+	telemetry []recordedSample
+	usage     []recordedUsage
+}
+
+type recordedSample struct {
+	tenant, plane, messageID string
+}
+
+type recordedUsage struct {
+	tenant, plane, messageID string
+}
+
+func (s *recordingSink) IngestTelemetry(_ context.Context, tenantID, dataPlaneID string, t meteringapi.Telemetry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.telemetry = append(s.telemetry, recordedSample{tenantID, dataPlaneID, t.MessageID})
+	return nil
+}
+
+func (s *recordingSink) IngestUsage(_ context.Context, tenantID, dataPlaneID string, u meteringapi.Usage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usage = append(s.usage, recordedUsage{tenantID, dataPlaneID, u.MessageID})
+	return nil
+}
+
+func (s *recordingSink) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.telemetry), len(s.usage)
+}
+
+// scriptedEnvelopes hands out one desired state and records acknowledgements.
+type scriptedEnvelopes struct {
+	mu    sync.Mutex
+	state meteringapi.EnvelopeDesiredState
+	acks  []meteringapi.Ack
+}
+
+func (e *scriptedEnvelopes) LatestDesiredState(_ context.Context, _ string) (meteringapi.EnvelopeDesiredState, bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state, e.state.Generation > 0, nil
+}
+
+func (e *scriptedEnvelopes) AckDesiredState(_ context.Context, _ string, generation int64, applied bool, errMsg string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.acks = append(e.acks, meteringapi.Ack{Generation: generation, Applied: applied, Error: errMsg})
+	return nil
+}
+
+// TestTelemetryAndUsageRideTheChannel proves the metering sink receives every TelemetrySample
+// and UsageSample the channel delivers, under the stream's own enrolment identity — and that
+// the enrolment surface itself is unaffected by them (SPEC-0041 AC1, ADR-0061 §1).
+func TestTelemetryAndUsageRideTheChannel(t *testing.T) {
+	r := newRig(t)
+	sink := &recordingSink{}
+	r.gw.AttachTelemetrySink(sink)
+
+	secret := r.issueSecret(t, "acme")
+	stream, ack := r.enrolOverWire(t, secret)
+	defer func() { _ = stream.CloseSend() }()
+
+	now := r.clock.Now()
+	if err := stream.Send(&agentpb.AgentMessage{
+		MessageId: "m-tel", Seq: 2, SentAt: timestamppb.New(now),
+		Payload: &agentpb.AgentMessage_Telemetry{Telemetry: &agentpb.TelemetrySample{
+			WindowStart: timestamppb.New(now.Add(-time.Hour)), WindowEnd: timestamppb.New(now),
+			Counters: map[string]float64{"ci_job_minutes_total": 42},
+		}},
+	}); err != nil {
+		t.Fatalf("Send telemetry: %v", err)
+	}
+	if err := stream.Send(&agentpb.AgentMessage{
+		MessageId: "m-usage", Seq: 3, SentAt: timestamppb.New(now),
+		Payload: &agentpb.AgentMessage_Usage{Usage: &agentpb.UsageSample{
+			WindowStart: timestamppb.New(now.Add(-time.Hour)), WindowEnd: timestamppb.New(now),
+			CiMinutes: 41,
+		}},
+	}); err != nil {
+		t.Fatalf("Send usage: %v", err)
+	}
+
+	// The sink sees both under the enrolment identity. Poll because forwarding is async.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if tel, use := sink.counts(); tel == 1 && use == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	tel, use := sink.counts()
+	if tel != 1 || use != 1 {
+		t.Fatalf("sink received telemetry=%d usage=%d, want 1 and 1", tel, use)
+	}
+	sink.mu.Lock()
+	if sink.telemetry[0].tenant != ack.GetTenantId() || sink.telemetry[0].plane != ack.GetDataPlaneId() {
+		t.Fatalf("telemetry forwarded under %q/%q, want enrolment identity %q/%q",
+			sink.telemetry[0].tenant, sink.telemetry[0].plane, ack.GetTenantId(), ack.GetDataPlaneId())
+	}
+	sink.mu.Unlock()
+
+	// The stream is still healthy: a heartbeat still lands.
+	if err := stream.Send(&agentpb.AgentMessage{
+		MessageId: "m-hb2", Seq: 4, SentAt: timestamppb.New(now),
+		Payload: &agentpb.AgentMessage_Heartbeat{Heartbeat: &agentpb.Heartbeat{}},
+	}); err != nil {
+		t.Fatalf("Send heartbeat after telemetry: %v", err)
+	}
+}
+
+// TestEnvelopeStateDeliveredAndAcknowledged proves the AC9 loop over the wire: the control
+// plane states the newest envelope desired state on the stream, and the data plane's ack is
+// recorded — the control plane never reaches into the cluster to enforce it.
+func TestEnvelopeStateDeliveredAndAcknowledged(t *testing.T) {
+	r := newRig(t)
+	env := &scriptedEnvelopes{state: meteringapi.EnvelopeDesiredState{
+		Generation:       7,
+		MaxCIConcurrency: 2,
+		QueueDepthCap:    50,
+	}}
+	r.gw.AttachEnvelopeDelivery(env)
+
+	secret := r.issueSecret(t, "acme")
+	stream, _ := r.enrolOverWire(t, secret)
+	defer func() { _ = stream.CloseSend() }()
+
+	// The gateway polls on its ticker and states the desired state on the stream.
+	reply, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv envelope state: %v", err)
+	}
+	update := reply.GetEnvelopeState()
+	if update == nil {
+		t.Fatalf("expected EnvelopeStateUpdate, got %T", reply.GetPayload())
+	}
+	if update.GetGeneration() != 7 || update.GetMaxCiConcurrency() != 2 || update.GetQueueDepthCap() != 50 {
+		t.Fatalf("envelope state = %+v, want generation 7 with the CI throttle", update)
+	}
+
+	// The data plane applies it and acks; the ack is recorded.
+	if err := stream.Send(&agentpb.AgentMessage{
+		MessageId: "m-envack", Seq: 2, SentAt: timestamppb.New(r.clock.Now()),
+		Payload: &agentpb.AgentMessage_EnvelopeStateAck{EnvelopeStateAck: &agentpb.EnvelopeStateAck{
+			Generation: 7, Applied: true,
+		}},
+	}); err != nil {
+		t.Fatalf("Send envelope ack: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		env.mu.Lock()
+		n := len(env.acks)
+		env.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	env.mu.Lock()
+	defer env.mu.Unlock()
+	if len(env.acks) != 1 || env.acks[0].Generation != 7 || !env.acks[0].Applied {
+		t.Fatalf("recorded acks = %+v, want one applied ack of generation 7", env.acks)
 	}
 }

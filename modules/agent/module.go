@@ -15,6 +15,7 @@ import (
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/memory"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/pki"
 	"github.com/gitfrok/backend/modules/agent/internal/app"
+	meteringapi "github.com/gitfrok/backend/modules/metering/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
 )
@@ -65,4 +66,15 @@ func AttachPlacementGate(svc *Service, gate api.PlacementGate) bool {
 // a lapsed certificate can go unnoticed; one second is ample for hour-long certificates.
 func NewGRPCServer(gw api.Gateway, poll time.Duration, now func() time.Time, logf func(format string, args ...any)) *GRPCServer {
 	return agentgrpc.NewGateway(gw, poll, now, logf)
+}
+
+// AttachMetering wires the metering seams onto an established gateway (T-0034,
+// SPEC-0041): every TelemetrySample and UsageSample the stream RECEIVES is forwarded to
+// the sink, and the newest envelope desired state is delivered and acknowledged (AC9).
+// Post-construction because the Metering context is composed after the agent surface;
+// both seams are ports in the metering context's own terms, so the module graph stays
+// acyclic (invariant 14).
+func AttachMetering(srv *GRPCServer, sink meteringapi.Sink, envelopes meteringapi.EnvelopeDelivery) {
+	srv.AttachTelemetrySink(sink)
+	srv.AttachEnvelopeDelivery(envelopes)
 }
