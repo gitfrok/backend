@@ -2,10 +2,13 @@ package objectstore
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +24,9 @@ type fakeTier struct {
 	objects  map[string][]byte
 	requests []*http.Request
 	server   *httptest.Server
+	// pageLimit caps how many keys one ListObjectsV2 page returns, so a test can
+	// force continuation and prove the client follows it.
+	pageLimit int
 }
 
 func newFakeTier(t *testing.T) *fakeTier {
@@ -43,18 +49,64 @@ func newFakeTier(t *testing.T) *fakeTier {
 			w.Header().Set("Content-Length", itoa(len(body)))
 			w.WriteHeader(http.StatusOK)
 		case http.MethodGet:
+			if r.URL.Query().Get("list-type") == "2" {
+				tier.serveList(w, r)
+				return
+			}
 			body, ok := tier.objects[key]
 			if !ok {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
 			_, _ = w.Write(body)
+		case http.MethodDelete:
+			// S3 answers 204 whether or not the object existed.
+			delete(tier.objects, key)
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	}))
 	t.Cleanup(tier.server.Close)
 	return tier
+}
+
+// serveList answers a ListObjectsV2 request with sorted, prefix-filtered keys,
+// paginated at pageLimit when one is set. The continuation token is the offset
+// of the next page; a real gateway's is opaque, and the client must treat it so.
+func (tier *fakeTier) serveList(w http.ResponseWriter, r *http.Request) {
+	bucket := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 2)[0]
+	prefix := r.URL.Query().Get("prefix")
+	var keys []string
+	for path := range tier.objects {
+		key := strings.TrimPrefix(path, "/"+bucket+"/")
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+
+	limit := 1000
+	if tier.pageLimit > 0 {
+		limit = tier.pageLimit
+	}
+	start := 0
+	if token := r.URL.Query().Get("continuation-token"); token != "" {
+		start, _ = strconv.Atoi(token)
+	}
+	end := min(start+limit, len(keys))
+
+	var body strings.Builder
+	body.WriteString(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>`)
+	if end < len(keys) {
+		fmt.Fprintf(&body, "<IsTruncated>true</IsTruncated><NextContinuationToken>%d</NextContinuationToken>", end)
+	}
+	for _, key := range keys[start:end] {
+		fmt.Fprintf(&body, "<Contents><Key>%s</Key></Contents>", key)
+	}
+	body.WriteString("</ListBucketResult>")
+	w.Header().Set("Content-Type", "application/xml")
+	_, _ = w.Write([]byte(body.String()))
 }
 
 func itoa(n int) string {
@@ -245,5 +297,95 @@ func TestIncompleteConfigurationIsRefused(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "top-secret") {
 		t.Fatalf("error leaked a secret: %v", err)
+	}
+}
+
+// List names what a prefix holds, sorted, and follows continuation when a page
+// does not hold the whole answer. The report-store retention sweep and the CI
+// ingest read-back both rest on this (SPEC-0037 AC1, AC9).
+func TestStoreListIsPrefixedSortedAndPaginated(t *testing.T) {
+	tier := newFakeTier(t)
+	tier.pageLimit = 2
+	store := testStore(t, tier)
+
+	want := make([]string, 0, 5)
+	for i := range 5 {
+		payload := "report body " + itoa(i)
+		digest := sha256Hex(payload)
+		key := "ci-scan-reports/tenant-a/job/attempt/class" + itoa(i) + "/" + digest
+		if _, err := store.Put(t.Context(), key, int64(len(payload)), digest, strings.NewReader(payload)); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+		want = append(want, key)
+	}
+	// A neighbour under another prefix must not appear.
+	other := "ci-scan-reports/tenant-b/job/attempt/class/" + sha256Hex("elsewhere")
+	if _, err := store.Put(t.Context(), other, 9, sha256Hex("elsewhere"), strings.NewReader("elsewhere")); err != nil {
+		t.Fatalf("Put other: %v", err)
+	}
+	slices.Sort(want)
+
+	got, err := store.List(t.Context(), "ci-scan-reports/tenant-a/")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("List = %v, want %v", got, want)
+	}
+
+	// Five keys at two per page means three ListObjectsV2 requests, each signed.
+	listRequests := 0
+	for _, request := range tier.requests {
+		if request.Method == http.MethodGet && request.URL.Query().Get("list-type") == "2" {
+			listRequests++
+			if !strings.HasPrefix(request.Header.Get("Authorization"), "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/") {
+				t.Fatal("a list request was not signed")
+			}
+		}
+	}
+	if listRequests != 3 {
+		t.Fatalf("list requests = %d, want 3 (5 keys, 2 per page)", listRequests)
+	}
+}
+
+// A listing with an empty prefix would name the whole bucket; it is refused, as
+// is a listing whose requests fail.
+func TestStoreListRefusesAnEmptyPrefix(t *testing.T) {
+	tier := newFakeTier(t)
+	store := testStore(t, tier)
+	if _, err := store.List(t.Context(), ""); err == nil {
+		t.Fatal("a prefixless listing was allowed")
+	}
+}
+
+// Delete removes one object and, like S3, reports success whether or not the
+// object existed: the retention sweep must not fail because a concurrent sweep
+// already took a report.
+func TestStoreDeleteRemovesAndIsIdempotent(t *testing.T) {
+	tier := newFakeTier(t)
+	store := testStore(t, tier)
+	payload := "to be retained out"
+	digest := sha256Hex(payload)
+	key := "ci-scan-reports/tenant-a/job/attempt/class/" + digest
+	if _, err := store.Put(t.Context(), key, int64(len(payload)), digest, strings.NewReader(payload)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if err := store.Delete(t.Context(), key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := store.Stat(t.Context(), key); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Stat after Delete = %v, want ErrNotFound", err)
+	}
+	if err := store.Delete(t.Context(), key); err != nil {
+		t.Fatalf("deleting an absent object must succeed: %v", err)
+	}
+	for _, request := range tier.requests {
+		if request.Method == http.MethodDelete && !strings.HasPrefix(request.Header.Get("Authorization"), "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/") {
+			t.Fatal("the delete request was not signed")
+		}
+	}
+	if err := store.Delete(t.Context(), ""); err == nil {
+		t.Fatal("a keyless delete was allowed")
 	}
 }

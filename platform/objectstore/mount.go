@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -215,6 +216,70 @@ func (m *Mount) Get(ctx context.Context, key string) (io.ReadCloser, int64, erro
 // (ADR-0050 §4 — transfers proxy).
 func (m *Mount) Presign(string, string, time.Duration) (string, error) {
 	return "", ErrPresignUnsupported
+}
+
+// List enumerates the committed objects a prefix holds, sorted.
+//
+// Staging files never appear: a listing that surfaced an uncommitted write
+// would let the retention sweep delete something no reader can see committed.
+// The walk starts at the deepest directory the prefix names, so a scoped
+// listing does not traverse the whole mount.
+func (m *Mount) List(_ context.Context, prefix string) ([]string, error) {
+	if prefix == "" || strings.HasPrefix(prefix, "/") {
+		return nil, fmt.Errorf("objectstore: %q is not a listing prefix", prefix)
+	}
+	for segment := range strings.SplitSeq(strings.TrimSuffix(prefix, "/"), "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return nil, fmt.Errorf("objectstore: %q is not a listing prefix", prefix)
+		}
+	}
+	walkRoot := filepath.Join(m.root, filepath.Clean(filepath.Dir(prefix)))
+	if walkRoot != m.root && !strings.HasPrefix(walkRoot, m.root+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("objectstore: %q escapes the mount", prefix)
+	}
+	if _, err := os.Stat(walkRoot); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	var keys []string
+	err := filepath.WalkDir(walkRoot, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			return nil
+		}
+		rel, err := filepath.Rel(m.root, path)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("objectstore: listing %s: %w", prefix, err)
+	}
+	slices.Sort(keys)
+	return keys, nil
+}
+
+// Delete removes one object. Absence is success, matching the S3 tier: the
+// retention sweep must not fail because a concurrent sweep already took the
+// report (SPEC-0037 AC9). The parent directory is pruned best-effort — a FUSE
+// mount accrues empty directories otherwise — and a racing writer that
+// re-creates it loses nothing to the attempt.
+func (m *Mount) Delete(_ context.Context, key string) error {
+	path, err := m.pathFor(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("objectstore: deleting %s: %w", key, err)
+	}
+	_ = os.Remove(filepath.Dir(path))
+	return nil
 }
 
 // ErrPresignUnsupported is returned by a tier that cannot hand out capabilities.

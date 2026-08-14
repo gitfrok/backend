@@ -73,6 +73,51 @@ func increment(b *[entropyBytes]byte) bool {
 	return false
 }
 
+// crockfordValues maps a byte to its Crockford base32 value, or -1 for
+// anything outside the alphabet. Strict on case: the ids this process issues
+// render uppercase, and a lenient decode would admit shapes the encoder never
+// produces.
+var crockfordValues = func() [256]int8 {
+	var table [256]int8
+	for i := range table {
+		table[i] = -1
+	}
+	for v, c := range []byte(crockford) {
+		table[c] = int8(v)
+	}
+	return table
+}()
+
+// TimeOf recovers the millisecond a ULID was issued at from its 48-bit
+// timestamp prefix. ok is false for anything that is not a well-formed
+// 26-character Crockford base32 ULID. The report-store retention sweep ages
+// reports by the attempt ULID they are keyed under (SPEC-0037 AC9), so this
+// decode is the inverse of encode and guesses nothing.
+func TimeOf(id string) (time.Time, bool) {
+	if len(id) != 26 {
+		return time.Time{}, false
+	}
+	var millis uint64
+	for i := range 26 {
+		v := crockfordValues[id[i]]
+		if v < 0 {
+			return time.Time{}, false
+		}
+		// The first character carries 2 padding bits plus the top 3 bits of
+		// the timestamp; anything above 7 overflows the 48-bit field.
+		if i == 0 && v > 7 {
+			return time.Time{}, false
+		}
+		if i < 10 {
+			millis = millis<<5 | uint64(v)
+		}
+	}
+	// The ten characters accumulate 50 bits: the 2 padding bits (already
+	// proven zero by the first-character bound) followed by the 48-bit
+	// timestamp proper.
+	return time.UnixMilli(int64(millis & (1<<48 - 1))), true
+}
+
 // encode renders the 128-bit value as 26 Crockford base32 characters, most significant first.
 func encode(millis uint64, entropy [entropyBytes]byte) string {
 	// Lay the 128 bits out big-endian: 6 timestamp bytes, then 10 entropy bytes.

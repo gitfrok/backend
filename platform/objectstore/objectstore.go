@@ -27,6 +27,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -211,6 +212,111 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, int64, erro
 		return nil, 0, fmt.Errorf("objectstore: get %s: unexpected status %d", key, response.StatusCode)
 	}
 	return response.Body, response.ContentLength, nil
+}
+
+// List enumerates the keys a prefix holds, sorted, following continuation
+// until the tier has named everything. An empty prefix is refused: naming the
+// whole bucket is never what a scoped caller means, and the callers this
+// package serves (CI scan report ingest and retention, SPEC-0037 AC1, AC9)
+// always know their prefix.
+func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
+	if prefix == "" {
+		return nil, errors.New("objectstore: list needs a prefix")
+	}
+	base := strings.TrimSuffix(s.config.Endpoint, "/") + "/" + s.config.Bucket
+	var keys []string
+	token := ""
+	for {
+		query := url.Values{}
+		query.Set("list-type", "2")
+		query.Set("prefix", prefix)
+		if token != "" {
+			query.Set("continuation-token", token)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"?"+query.Encode(), nil)
+		if err != nil {
+			return nil, err
+		}
+		s.sign(request, emptyPayloadHash)
+		response, err := s.client.Do(request)
+		if err != nil {
+			return nil, err
+		}
+		page, err := parseListPage(response)
+		if err != nil {
+			return nil, fmt.Errorf("objectstore: list %s: %w", prefix, err)
+		}
+		keys = append(keys, page.keys...)
+		if !page.truncated {
+			return keys, nil
+		}
+		if page.nextToken == "" {
+			// The tier said there is more but handed no way to ask for it;
+			// looping would spin forever and returning would lie. Say so.
+			return nil, fmt.Errorf("objectstore: list %s: truncated without a continuation token", prefix)
+		}
+		token = page.nextToken
+	}
+}
+
+// listPage is the subset of a ListObjectsV2 answer this store reads.
+type listPage struct {
+	keys      []string
+	truncated bool
+	nextToken string
+}
+
+func parseListPage(response *http.Response) (listPage, error) {
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode/100 != 2 {
+		return listPage{}, fmt.Errorf("unexpected status %d", response.StatusCode)
+	}
+	var decoded struct {
+		Contents []struct {
+			Key string `xml:"Key"`
+		} `xml:"Contents"`
+		IsTruncated           bool   `xml:"IsTruncated"`
+		NextContinuationToken string `xml:"NextContinuationToken"`
+	}
+	// The answer is bounded by the page size, so reading it whole is safe.
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return listPage{}, err
+	}
+	if err := xml.Unmarshal(body, &decoded); err != nil {
+		return listPage{}, err
+	}
+	page := listPage{truncated: decoded.IsTruncated, nextToken: decoded.NextContinuationToken}
+	for _, entry := range decoded.Contents {
+		page.keys = append(page.keys, entry.Key)
+	}
+	return page, nil
+}
+
+// Delete removes one object. Absence is success: S3 answers 204 either way,
+// and the retention sweep must not fail because a concurrent sweep already
+// took the report (SPEC-0037 AC9).
+func (s *Store) Delete(ctx context.Context, key string) error {
+	if key == "" {
+		return errors.New("objectstore: delete needs a key")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.objectURL(key), nil)
+	if err != nil {
+		return err
+	}
+	s.sign(request, emptyPayloadHash)
+	response, err := s.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	switch {
+	case response.StatusCode == http.StatusNotFound:
+		return nil
+	case response.StatusCode/100 != 2:
+		return fmt.Errorf("objectstore: delete %s: unexpected status %d", key, response.StatusCode)
+	}
+	return nil
 }
 
 // Presign returns a URL that authorizes exactly one method on exactly one key,

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -265,4 +266,90 @@ func stagingFiles(t *testing.T, root string) []string {
 		t.Fatalf("walk: %v", err)
 	}
 	return found
+}
+
+// putObject stores content under a digest-terminated key and returns the key.
+func putObject(t *testing.T, mount *objectstore.Mount, key string, payload []byte) string {
+	t.Helper()
+	sum := sha256.Sum256(payload)
+	digest := hex.EncodeToString(sum[:])
+	full := key + "/" + digest
+	if _, err := mount.Put(t.Context(), full, int64(len(payload)), digest, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("Put %s: %v", full, err)
+	}
+	return full
+}
+
+// List names what a prefix holds, sorted — and never a staging file, because a
+// listing that surfaced an uncommitted write would make the retention sweep
+// delete something no reader can see committed (SPEC-0037 AC1, AC9).
+func TestMountListIsPrefixedSortedAndSkipsStaging(t *testing.T) {
+	mount, root := mountFor(t)
+	keyA := putObject(t, mount, "ci-scan-reports/tenant-a/job/attempt/class-a", []byte("report one"))
+	keyB := putObject(t, mount, "ci-scan-reports/tenant-a/job/attempt/class-b", []byte("report two"))
+	keyC := putObject(t, mount, "ci-scan-reports/tenant-b/job/attempt/class-a", []byte("elsewhere"))
+
+	// Staging debris from a crashed writer must not be listed.
+	if err := os.WriteFile(filepath.Join(root, "ci-scan-reports/tenant-a/job/attempt/class-a/.staging-junk"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed staging file: %v", err)
+	}
+
+	got, err := mount.List(t.Context(), "ci-scan-reports/tenant-a/")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []string{keyA, keyB}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("List = %v, want %v", got, want)
+	}
+
+	// A broader prefix sees both tenants but still no staging files.
+	got, err = mount.List(t.Context(), "ci-scan-reports/")
+	if err != nil {
+		t.Fatalf("List broad: %v", err)
+	}
+	all := []string{keyA, keyB, keyC}
+	slices.Sort(all)
+	if !slices.Equal(got, all) {
+		t.Fatalf("List broad = %v, want %v", got, all)
+	}
+
+	// A prefix naming nothing yields an empty listing, not an error.
+	got, err = mount.List(t.Context(), "ci-scan-reports/tenant-c/")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("List of an empty prefix = %v, %v", got, err)
+	}
+}
+
+// The mount will not list the whole tier, nor anything that could leave it.
+func TestMountListRefusesBroadOrEscapingPrefixes(t *testing.T) {
+	mount, _ := mountFor(t)
+	for _, prefix := range []string{"", "../", "reports/../", "/etc/"} {
+		if _, err := mount.List(t.Context(), prefix); err == nil {
+			t.Errorf("List accepted the prefix %q", prefix)
+		}
+	}
+}
+
+// Delete removes one object and is idempotent: the retention sweep must not
+// fail because a concurrent sweep already took a report (SPEC-0037 AC9).
+func TestMountDeleteRemovesAndIsIdempotent(t *testing.T) {
+	mount, _ := mountFor(t)
+	key := putObject(t, mount, "ci-scan-reports/tenant-a/job/attempt/class-a", []byte("doomed"))
+
+	if err := mount.Delete(t.Context(), key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := mount.Stat(t.Context(), key); !errors.Is(err, objectstore.ErrNotFound) {
+		t.Fatalf("Stat after Delete = %v, want ErrNotFound", err)
+	}
+	if err := mount.Delete(t.Context(), key); err != nil {
+		t.Fatalf("deleting an absent object must succeed: %v", err)
+	}
+	for _, key := range []string{"", "../escaped", "/etc/passwd", "reports//gap"} {
+		if err := mount.Delete(t.Context(), key); err == nil {
+			t.Errorf("Delete accepted the key %q", key)
+		}
+	}
 }
