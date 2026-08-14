@@ -176,7 +176,7 @@ func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) 
 		TenantID: chunk.TenantID,
 		Subject: policyapi.Subject{
 			ID: chunk.ActorID, TenantID: chunk.TenantID,
-			Roles: append([]string(nil), chunk.ActorRoles...),
+			Roles: slices.Clone(chunk.ActorRoles),
 		},
 		Action:   "findings.ingest",
 		Resource: policyapi.Resource{Type: "repository", ID: chunk.RepositoryID},
@@ -524,7 +524,7 @@ func (s *Service) SetTriage(ctx context.Context, req api.TriageTransition) (api.
 		TenantID: req.TenantID,
 		Subject: policyapi.Subject{
 			ID: req.ActorID, TenantID: req.TenantID,
-			Roles: append([]string(nil), req.ActorRoles...),
+			Roles: slices.Clone(req.ActorRoles),
 		},
 		Action:   "findings.triage",
 		Resource: policyapi.Resource{Type: "finding", ID: req.FindingID},

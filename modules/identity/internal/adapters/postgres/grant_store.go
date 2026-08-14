@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -231,7 +232,7 @@ func scanGrant(row rowScanner) (api.AuditorGrant, error) {
 	if revokedAt != nil {
 		g.RevokedAt = *revokedAt
 	}
-	g.PackIDs = append([]string(nil), g.PackIDs...)
+	g.PackIDs = slices.Clone(g.PackIDs)
 	return g, nil
 }
 

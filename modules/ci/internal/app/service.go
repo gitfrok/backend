@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -67,7 +68,7 @@ func (s *Service) SubscribeRefUpdates(events bus.Bus) {
 
 func (s *Service) onRefUpdated(ctx context.Context, event repoapi.RefUpdated) error {
 	_, err := s.Enqueue(ctx, api.EnqueueRequest{
-		Context: api.Context{TenantID: event.TenantID, RepositoryID: event.RepoID, ActorID: event.ActorID, ActorRoles: append([]string(nil), event.ActorRoles...), RequestID: "event:" + event.EventID},
+		Context: api.Context{TenantID: event.TenantID, RepositoryID: event.RepoID, ActorID: event.ActorID, ActorRoles: slices.Clone(event.ActorRoles), RequestID: "event:" + event.EventID},
 		Ref:     event.Ref, CommitSHA: event.NewSha, SourceEventID: event.EventID, Trigger: api.TriggerRefUpdated,
 	})
 	return err
@@ -86,7 +87,7 @@ func (s *Service) Enqueue(ctx context.Context, req api.EnqueueRequest) (api.Job,
 	}
 	key := idempotencyKey(req)
 	now := s.now().UTC()
-	candidate := api.Job{ID: s.newID(), TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID, Ref: req.Ref, CommitSHA: req.CommitSHA, Trigger: req.Trigger, ActorRoles: append([]string(nil), req.ActorRoles...), State: api.JobQueued, QueuedAt: now, ConfigurationDigest: digest}
+	candidate := api.Job{ID: s.newID(), TenantID: req.TenantID, RepositoryID: req.RepositoryID, ActorID: req.ActorID, Ref: req.Ref, CommitSHA: req.CommitSHA, Trigger: req.Trigger, ActorRoles: slices.Clone(req.ActorRoles), State: api.JobQueued, QueuedAt: now, ConfigurationDigest: digest}
 	job, created, err := s.store.CreateOrGet(ctx, key, candidate)
 	if err != nil {
 		return api.Job{}, api.ErrDenied
@@ -137,7 +138,7 @@ func (s *Service) Cancel(ctx context.Context, principal api.Context, jobID strin
 }
 
 func (s *Service) allowed(ctx context.Context, principal api.Context, action, resourceType, resourceID string, attributes map[string]string) bool {
-	decision, err := s.pdp.Decide(ctx, policyapi.Request{TenantID: principal.TenantID, Subject: policyapi.Subject{ID: principal.ActorID, TenantID: principal.TenantID, Roles: append([]string(nil), principal.ActorRoles...)}, Action: action, Resource: policyapi.Resource{Type: resourceType, ID: resourceID}, Context: attributes})
+	decision, err := s.pdp.Decide(ctx, policyapi.Request{TenantID: principal.TenantID, Subject: policyapi.Subject{ID: principal.ActorID, TenantID: principal.TenantID, Roles: slices.Clone(principal.ActorRoles)}, Action: action, Resource: policyapi.Resource{Type: resourceType, ID: resourceID}, Context: attributes})
 	return err == nil && decision.Allowed
 }
 

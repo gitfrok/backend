@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -20,7 +21,7 @@ func newVerifierKeyRing(activeKeyID string, keys map[string][]byte) verifierKeyR
 	ring := verifierKeyRing{activeKeyID: activeKeyID, keys: make(map[string][]byte, len(keys))}
 	for keyID, key := range keys {
 		if keyID != "" && len(key) != 0 {
-			ring.keys[keyID] = append([]byte(nil), key...)
+			ring.keys[keyID] = slices.Clone(key)
 		}
 	}
 	if len(ring.keys) == 0 {
@@ -73,10 +74,11 @@ func hashWithKey(key []byte, value string) string {
 
 func patKeyID(token string) (string, string, bool) {
 	const prefix = "gfp_"
-	if !strings.HasPrefix(token, prefix) {
+	rest, found := strings.CutPrefix(token, prefix)
+	if !found {
 		return "", "", false
 	}
-	keyID, secret, ok := strings.Cut(strings.TrimPrefix(token, prefix), "_")
+	keyID, secret, ok := strings.Cut(rest, "_")
 	if !ok || keyID == "" || len(secret) != 64 {
 		return "", "", false
 	}

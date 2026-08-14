@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	repoapi "github.com/gitfrok/backend/modules/repository/api"
@@ -84,7 +85,7 @@ func (s *Server) SubscribeRefUpdates(req *gitv1.SubscribeRefUpdatesRequest, stre
 				OldSha:       e.OldSha,
 				NewSha:       e.NewSha,
 				ActorId:      e.ActorID,
-				ActorRoles:   append([]string(nil), e.ActorRoles...),
+				ActorRoles:   slices.Clone(e.ActorRoles),
 				OccurredAt:   timestamppb.New(e.OccurredAt),
 			}); err != nil {
 				return err

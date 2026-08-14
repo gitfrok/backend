@@ -3,6 +3,7 @@ package memory
 
 import (
 	"context"
+	"slices"
 	"sync"
 )
 
@@ -76,13 +77,13 @@ func (q *Queue) Pending() []string {
 func (q *Queue) Enqueued() []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	out := append([]string(nil), q.enqueued...)
+	out := slices.Clone(q.enqueued)
 	return out
 }
 
 func (q *Queue) Cancelled() []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	out := append([]string(nil), q.cancelled...)
+	out := slices.Clone(q.cancelled)
 	return out
 }

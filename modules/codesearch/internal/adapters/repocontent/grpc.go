@@ -7,6 +7,7 @@ package repocontent
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
@@ -65,7 +66,7 @@ func (g *GRPC) ReadFile(ctx context.Context, tenantID, repoID, revision, path st
 	var buf []byte
 	for {
 		chunk, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return buf, nil
 		}
 		if err != nil {

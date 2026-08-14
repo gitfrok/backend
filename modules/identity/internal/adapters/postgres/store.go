@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,7 +63,7 @@ func (s *Store) resolve(ctx context.Context, kind, keyID, verifier string) (api.
 	if err != nil {
 		return api.Principal{}, false
 	}
-	principal.Roles = append([]string(nil), principal.Roles...)
+	principal.Roles = slices.Clone(principal.Roles)
 	return principal, true
 }
 
@@ -88,7 +89,7 @@ func (s *Store) IssuePAT(ctx context.Context, tenantID, actorID, label string, s
 		value := expiresAt.UTC()
 		expiry = &value
 	}
-	pat := api.PAT{ID: id, TenantID: tenantID, ActorID: actorID, Label: label, Scopes: append([]string(nil), scopes...), CreatedAt: createdAt, ExpiresAt: expiry}
+	pat := api.PAT{ID: id, TenantID: tenantID, ActorID: actorID, Label: label, Scopes: slices.Clone(scopes), CreatedAt: createdAt, ExpiresAt: expiry}
 	err = s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO identity.credentials
@@ -169,7 +170,7 @@ func (s *Store) authorizeLifecycle(ctx context.Context, requestedTenant, action,
 	}
 	decision, err := s.pdp.Decide(ctx, policyapi.Request{
 		TenantID: requestedTenant,
-		Subject:  policyapi.Subject{ID: principal.ActorID, TenantID: principal.TenantID, Roles: append([]string(nil), principal.Roles...)},
+		Subject:  policyapi.Subject{ID: principal.ActorID, TenantID: principal.TenantID, Roles: slices.Clone(principal.Roles)},
 		Action:   action,
 		Resource: policyapi.Resource{Type: "personal_access_token", ID: resourceID},
 	})
@@ -180,7 +181,7 @@ func (s *Store) authorizeLifecycle(ctx context.Context, requestedTenant, action,
 }
 
 func clonePAT(pat api.PAT) api.PAT {
-	pat.Scopes = append([]string(nil), pat.Scopes...)
+	pat.Scopes = slices.Clone(pat.Scopes)
 	if pat.ExpiresAt != nil {
 		value := *pat.ExpiresAt
 		pat.ExpiresAt = &value

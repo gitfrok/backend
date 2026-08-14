@@ -3,6 +3,7 @@ package gitwire
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	"github.com/gitfrok/backend/modules/codereview/internal/app"
@@ -32,7 +33,7 @@ func (m *GitImporter) ImportRefs(ctx context.Context, command app.ImportRefsComm
 			RepositoryId: command.RepositoryID,
 			ActorId:      command.ActorID,
 			RequestId:    command.RequestID,
-			ActorRoles:   append([]string(nil), command.ActorRoles...),
+			ActorRoles:   slices.Clone(command.ActorRoles),
 		},
 		SourceUrl:   command.SourceURL,
 		SourceToken: command.SourceToken,

@@ -8,6 +8,7 @@ package grpc
 import (
 	"context"
 	"errors"
+	"slices"
 
 	searchv1 "github.com/gitfrok/backend/gen/proto/search/v1"
 	"github.com/gitfrok/backend/modules/codesearch/api"
@@ -104,7 +105,7 @@ func intoQuery(ctx context.Context, c *searchv1.SearchContext, text string, mode
 	q := api.Query{
 		TenantID:         c.GetTenantId(),
 		ActorID:          c.GetActorId(),
-		ActorRoles:       append([]string(nil), c.GetActorRoles()...),
+		ActorRoles:       slices.Clone(c.GetActorRoles()),
 		RequestID:        c.GetRequestId(),
 		Text:             text,
 		ResultLimit:      resultLimit,

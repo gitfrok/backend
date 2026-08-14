@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -83,7 +84,7 @@ func (s *Server) MergeRef(ctx context.Context, req *gitv1.MergeRefRequest) (*git
 		OldSha:     zeroSHA(current),
 		NewSha:     revision,
 		ActorID:    repository.actorID,
-		ActorRoles: append([]string(nil), repository.actorRoles...),
+		ActorRoles: slices.Clone(repository.actorRoles),
 		OccurredAt: time.Now().UTC(),
 	}); err != nil {
 		return nil, unavailable()

@@ -200,7 +200,7 @@ func namesPack(packs []string, packID string) bool {
 }
 
 func clone(g api.AuditorGrant) api.AuditorGrant {
-	g.PackIDs = append([]string(nil), g.PackIDs...)
+	g.PackIDs = slices.Clone(g.PackIDs)
 	return g
 }
 

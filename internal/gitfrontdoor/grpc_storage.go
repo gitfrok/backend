@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 )
@@ -95,7 +96,7 @@ func bridge(parent context.Context, input io.Reader, output io.Writer, sendFirst
 		for {
 			count, err := input.Read(buffer)
 			if count > 0 {
-				if sendErr := sendData(append([]byte(nil), buffer[:count]...)); sendErr != nil {
+				if sendErr := sendData(slices.Clone(buffer[:count])); sendErr != nil {
 					sendResult <- sendErr
 					return
 				}

@@ -144,7 +144,7 @@ func (s *MemoryStore) Range(ctx context.Context, tenantID string, q api.Historic
 // copy can never mutate each other.
 func cloneRecord(r api.Record) api.Record {
 	if r.SubjectRoles != nil {
-		r.SubjectRoles = append([]string(nil), r.SubjectRoles...)
+		r.SubjectRoles = slices.Clone(r.SubjectRoles)
 	}
 	if r.Context != nil {
 		m := make(map[string]string, len(r.Context))

@@ -5,6 +5,7 @@ package grpc
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	civ1 "github.com/gitfrok/backend/gen/proto/ci/v1"
@@ -71,7 +72,7 @@ func intoEnqueueRequest(req *civ1.EnqueueJobRequest) (api.EnqueueRequest, error)
 	}
 	ctx := req.GetContext()
 	in := api.EnqueueRequest{
-		Context:       api.Context{TenantID: ctx.GetTenantId(), RepositoryID: ctx.GetRepositoryId(), ActorID: ctx.GetActorId(), ActorRoles: append([]string(nil), ctx.GetActorRoles()...), RequestID: ctx.GetRequestId()},
+		Context:       api.Context{TenantID: ctx.GetTenantId(), RepositoryID: ctx.GetRepositoryId(), ActorID: ctx.GetActorId(), ActorRoles: slices.Clone(ctx.GetActorRoles()), RequestID: ctx.GetRequestId()},
 		Ref:           req.GetRef(),
 		CommitSHA:     req.GetCommitSha(),
 		Trigger:       triggerKind(req.GetTriggerKind()),
@@ -88,7 +89,7 @@ func intoContext(ctx context.Context, c *civ1.JobContext) (context.Context, api.
 		return ctx, api.Context{}, errMalformed
 	}
 	scoped := tenancy.WithTenant(ctx, tenancy.ID(c.GetTenantId()))
-	in := api.Context{TenantID: c.GetTenantId(), RepositoryID: c.GetRepositoryId(), ActorID: c.GetActorId(), ActorRoles: append([]string(nil), c.GetActorRoles()...), RequestID: c.GetRequestId()}
+	in := api.Context{TenantID: c.GetTenantId(), RepositoryID: c.GetRepositoryId(), ActorID: c.GetActorId(), ActorRoles: slices.Clone(c.GetActorRoles()), RequestID: c.GetRequestId()}
 	return scoped, in, nil
 }
 
