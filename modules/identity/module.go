@@ -7,11 +7,14 @@ import (
 
 	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
 	"github.com/gitfrok/backend/modules/identity/api"
+	identityapp "github.com/gitfrok/backend/modules/identity/internal/app"
 	identitygrpc "github.com/gitfrok/backend/modules/identity/internal/adapters/grpc"
+	identitymemory "github.com/gitfrok/backend/modules/identity/internal/adapters/memory"
 	identitypg "github.com/gitfrok/backend/modules/identity/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/identity/internal/domain"
 	"github.com/gitfrok/backend/modules/identity/internal/oidc"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/tenancy"
 	"google.golang.org/grpc"
@@ -40,6 +43,31 @@ func NewPostgres(pool *db.Pool, activeKeyID string, keys map[string][]byte, pdp 
 }
 
 func NewGRPCServer(auth api.Authenticator) *identitygrpc.Server { return identitygrpc.NewServer(auth) }
+
+// NewAuditorGrantsInMemory assembles the auditor grant lifecycle on the
+// in-memory store for dev planes and tests (T-0027, SPEC-0033). Lifecycle
+// actions require the PDP port, the witness log AC4 appends to, and the
+// bus the lifecycle events announce on; nil for any is refused. The
+// composition root adapts the tenant's audit trail onto the witness port.
+func NewAuditorGrantsInMemory(pdp policyapi.DecisionPoint, events bus.Bus, witness api.GrantWitness) api.AuditorGrants {
+	return identityapp.New(pdp, events, witness, identitymemory.NewGrantStore())
+}
+
+// NewAuditorGrantsPostgres assembles the durable auditor grant lifecycle on
+// the RLS-isolated identity schema (T-0027, SPEC-0033). Grant records stay
+// tenant-scoped at the row level; state is derived at read time, so a
+// revocation or an expiry takes effect on the next decision by construction.
+func NewAuditorGrantsPostgres(pool *db.Pool, pdp policyapi.DecisionPoint, events bus.Bus, witness api.GrantWitness) api.AuditorGrants {
+	return identityapp.New(pdp, events, witness, identitypg.NewGrantStore(pool))
+}
+
+// NewAuditorGrantGRPCServer exposes the grant surface over
+// contracts/proto/identity/v1's AuditorGrantService. The adapter translates
+// shapes only; authorization, idempotency and audit happen behind
+// api.AuditorGrants, and every failure is the one coarse denial.
+func NewAuditorGrantGRPCServer(grants api.AuditorGrants) identityv1.AuditorGrantServiceServer {
+	return identitygrpc.NewGrantServer(grants)
+}
 func (s service) AuthenticatePAT(_ context.Context, token string) (api.Principal, bool) {
 	p, ok := s.domain.AuthenticatePAT(token)
 	return api.Principal{TenantID: p.TenantID, ActorID: p.ActorID, Roles: p.Roles}, ok

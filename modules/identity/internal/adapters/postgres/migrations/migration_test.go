@@ -37,3 +37,47 @@ func TestCredentialResolverMigrationIsNarrowAndReadOnly(t *testing.T) {
 		}
 	}
 }
+
+// SPEC-0033: auditor grants are tenant-scoped, RLS-isolated and immutable.
+// The migration itself is the reviewable boundary: RLS enabled AND forced,
+// one tenant_isolation policy per table, minimal grants and no deletion path
+// for the application role.
+func TestAuditorGrantsMigrationIsRLSIsolatedAndImmutable(t *testing.T) {
+	b, err := os.ReadFile("0002_identity_auditor_grants.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(b)
+	for _, want := range []string{
+		// RLS markers the arch lint keys off.
+		"-- rls: tenant-key=tenant_id",
+		// Both tables isolated: enabled AND forced, one policy each.
+		"ALTER TABLE identity.auditor_grants ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE identity.auditor_grants FORCE ROW LEVEL SECURITY",
+		"ALTER TABLE identity.auditor_grant_transitions ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE identity.auditor_grant_transitions FORCE ROW LEVEL SECURITY",
+		"CREATE POLICY tenant_isolation ON identity.auditor_grants",
+		"CREATE POLICY tenant_isolation ON identity.auditor_grant_transitions",
+		"tenant_id = current_setting('app.tenant_id', true)",
+		// The lifecycle invariants the schema encodes.
+		"CHECK (range_from <= range_to)",
+		"CHECK (cardinality(pack_ids) > 0)",
+		"PRIMARY KEY (tenant_id, grant_id, kind)",
+		"CREATE UNIQUE INDEX IF NOT EXISTS auditor_grant_issue_replay",
+		// Minimal grants: revocation happens via UPDATE; lifecycle records are
+		// never deleted by the application role.
+		"GRANT SELECT, INSERT, UPDATE ON identity.auditor_grants TO gitfrok_app",
+		"GRANT SELECT, INSERT ON identity.auditor_grant_transitions TO gitfrok_app",
+		"REVOKE DELETE, TRUNCATE ON identity.auditor_grants, identity.auditor_grant_transitions FROM gitfrok_app",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("migration missing %q", want)
+		}
+	}
+	// State is deliberately not stored: expiry is a clock rendering, not a
+	// column to move — a state column would reintroduce the operator action
+	// AC3 removes.
+	if strings.Contains(sql, "state TEXT") || strings.Contains(sql, "\"state\"") {
+		t.Error("grant migration stores a state column — expiry must be the server's clock, not stored state")
+	}
+}

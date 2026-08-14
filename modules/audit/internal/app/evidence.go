@@ -11,10 +11,10 @@
 // with a projection today are classified out of the tenant's own audit chain
 // — the chain IS the projection the owning contexts feed through auditsink —
 // and the access-changes section reads Identity & Access's contract surface
-// through the api.AccessChangesSource port. No such surface exists yet (the
-// auditor-grant lifecycle is a later task), so a plane composes none and the
-// section degrades per contract: an explicit gap marker over the range,
-// never a partial section presented as complete (SPEC-0031 AC10).
+// through the api.AccessChangesSource port, wired since T-0027 to the
+// auditor-grant lifecycle. A plane composing no source still degrades the
+// section per contract: an explicit gap marker over the range, never a
+// partial section presented as complete (SPEC-0031 AC10).
 package app
 
 import (

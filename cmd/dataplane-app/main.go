@@ -290,9 +290,9 @@ func main() {
 	// wired only where the import surface exists — a plane without it has no
 	// imported history, and an empty appendix is then the truthful answer.
 	// The access-changes section reads Identity & Access's auditor-grant
-	// surface; the grant lifecycle has not landed yet (T-0027), so nothing is
-	// composed and the section degrades per contract — an explicit gap over
-	// the range, never a partial section presented as complete.
+	// lifecycle (T-0027, SPEC-0033): every witnessed transition — issuing,
+	// revoking, expiring — becomes a section record citing the immutable audit
+	// record Identity & Access appended for it.
 	var attested auditapi.AttestedHistorySource
 	if dp.imports != nil {
 		attested = audit.NewImportedHistorySource(dp.imports)
@@ -304,7 +304,14 @@ func main() {
 		trail = audit.NewMemoryTrail()
 		auditsink.NewLogSink(trail).Subscribe(dp.bus)
 	}
-	dp.evidence = audit.NewEvidenceService(dp.policy, dp.bus, trail, attested, nil)
+	var grants identityapi.AuditorGrants
+	witness := grantTrailWitness{trail}
+	if dbPool != nil {
+		grants = identity.NewAuditorGrantsPostgres(dbPool, dp.policy, dp.bus, witness)
+	} else {
+		grants = identity.NewAuditorGrantsInMemory(dp.policy, dp.bus, witness)
+	}
+	dp.evidence = audit.NewEvidenceService(dp.policy, dp.bus, trail, attested, audit.NewAccessChangesSource(grants))
 
 	// OIDC login, when this environment has an identity provider. Built before the
 	// doors open so a misconfigured one fails the rollout rather than the first login.
@@ -341,6 +348,11 @@ func main() {
 			identityv1.RegisterCredentialAuthenticatorServer(doors.policyServer,
 				identity.NewGRPCServer(lifecycleContextAuthenticator{authenticator}))
 		}
+		// The auditor grant lifecycle door (T-0027, SPEC-0033): the same seam
+		// the credential door uses — the request context carries the caller's
+		// asserted identity, and every action passes the PDP with it.
+		identityv1.RegisterAuditorGrantServiceServer(doors.policyServer,
+			identity.NewAuditorGrantGRPCServer(grants))
 		if oidcEnabled {
 			if err := identity.RegisterOIDCLogin(doors.policyServer, oidcConfig, http.DefaultClient); err != nil {
 				fmt.Fprintf(os.Stderr, "dataplane OIDC login: %v\n", err)

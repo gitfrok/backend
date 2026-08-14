@@ -8,11 +8,13 @@ import (
 	auditv1 "github.com/gitfrok/backend/gen/proto/audit/v1"
 	"github.com/gitfrok/backend/modules/audit/api"
 	codereviewadapter "github.com/gitfrok/backend/modules/audit/internal/adapters/codereview"
+	identityadapter "github.com/gitfrok/backend/modules/audit/internal/adapters/identity"
 	auditgrpc "github.com/gitfrok/backend/modules/audit/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/audit/internal/adapters/memory"
 	auditpg "github.com/gitfrok/backend/modules/audit/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/audit/internal/app"
 	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
+	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/db"
@@ -50,6 +52,15 @@ func NewEvidenceService(pdp policyapi.DecisionPoint, events bus.Bus, trail api.T
 // and an empty appendix is then the truthful answer.
 func NewImportedHistorySource(imports codereviewapi.ImportService) api.AttestedHistorySource {
 	return codereviewadapter.NewImportedHistorySource(imports)
+}
+
+// NewAccessChangesSource adapts Identity&Access's auditor grant surface to
+// the access-changes port (T-0027, SPEC-0032 assumption, SPEC-0033): the
+// grant lifecycle transitions witnessed within a range, citing the immutable
+// audit records that witnessed them. Composing it makes the section live;
+// a plane that composes none keeps the SPEC-0031 AC10 degraded shape.
+func NewAccessChangesSource(grants identityapi.AuditorGrants) api.AccessChangesSource {
+	return identityadapter.NewAccessChangesSource(grants)
 }
 
 // NewEvidenceGRPCServer exposes the pack surface over contracts/proto/audit/v1
