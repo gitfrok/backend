@@ -36,15 +36,43 @@ func NewSink(pool *db.Pool, events bus.Bus) *Sink {
 	return &Sink{log: auditmodule.NewPostgresLog(pool)}
 }
 
-// Subscribe registers every audit-bearing event this sink knows. Adding a new
-// auditable event is an addition here, never a change to an existing handler.
+// NewLogSink builds the sink over any audit log — the in-memory trail a dev
+// plane composes for the evidence pack surface (T-0026), where module audit
+// events feed the trail the assembler reads. It wires no pool, so no RLS
+// events: those belong to the database and a plane without one has none.
+func NewLogSink(log auditapi.Log) *Sink { return &Sink{log: log} }
+
+// Subscribe registers the sink's single handler for the generic AuditEvent
+// routing key. Every audit-bearing event shares that one name — the contract
+// chose one generic AuditEvent with the specific case in `action` (T-0006) —
+// so dispatch is a type switch here, inside one handler: per-type typed
+// subscriptions would each fire on every audit event and reject the ones they
+// do not match, because the bus routes by name. Adding a new auditable event
+// is an addition to this switch, never a change to an existing case.
 func (s *Sink) Subscribe(events bus.Bus) {
-	bus.SubscribeTyped(events, s.appendDenied)
-	bus.SubscribeTyped(events, s.appendIsolationViolation)
-	bus.SubscribeTyped(events, s.appendApproval)
-	bus.SubscribeTyped(events, s.appendMerge)
-	bus.SubscribeTyped(events, s.appendFindingsScanIngested)
-	bus.SubscribeTyped(events, s.appendFindingsTriaged)
+	events.Subscribe(platformaudit.EventAudit, s.dispatch)
+}
+
+// dispatch routes one audit event to its record shape. Events this sink does
+// not know are ignored, not rejected: the AuditEvent name is open by design,
+// and a new action another emitter publishes is simply not this sink's.
+func (s *Sink) dispatch(ctx context.Context, e bus.Event) error {
+	switch ev := e.(type) {
+	case platformaudit.PolicyDecisionDenied:
+		return s.appendDenied(ctx, ev)
+	case platformaudit.TenantIsolationViolation:
+		return s.appendIsolationViolation(ctx, ev)
+	case platformaudit.MergeRequestApproved:
+		return s.appendApproval(ctx, ev)
+	case platformaudit.MergeRequestMerged:
+		return s.appendMerge(ctx, ev)
+	case platformaudit.FindingsScanIngested:
+		return s.appendFindingsScanIngested(ctx, ev)
+	case platformaudit.FindingsTriaged:
+		return s.appendFindingsTriaged(ctx, ev)
+	default:
+		return nil
+	}
 }
 
 func (s *Sink) appendDenied(ctx context.Context, e platformaudit.PolicyDecisionDenied) error {

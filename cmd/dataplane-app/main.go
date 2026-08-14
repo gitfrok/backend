@@ -18,12 +18,15 @@ import (
 
 	"github.com/gitfrok/backend/cmd/internal/health"
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
+	auditv1 "github.com/gitfrok/backend/gen/proto/audit/v1"
 	civ1 "github.com/gitfrok/backend/gen/proto/ci/v1"
 	codereviewv1 "github.com/gitfrok/backend/gen/proto/codereview/v1"
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
 	securityv1 "github.com/gitfrok/backend/gen/proto/security/v1"
+	"github.com/gitfrok/backend/modules/audit"
+	auditapi "github.com/gitfrok/backend/modules/audit/api"
 	"github.com/gitfrok/backend/modules/ci"
 	"github.com/gitfrok/backend/modules/codereview"
 	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
@@ -59,7 +62,7 @@ const databaseURLEnv = "GITFROK_DATABASE_URL"
 
 // dataplane is the composed plane: every context, held by its api/ port.
 type dataplane struct {
-	bus          *bus.InProcess
+	bus          bus.Bus
 	repositories repoapi.Repositories
 	searchIndex  csapi.Index
 	policy       policyapi.DecisionPoint
@@ -72,6 +75,10 @@ type dataplane struct {
 	// findings is the Security/Findings surface (SPEC-0024, SPEC-0025):
 	// normalized findings ingestion and tenant-scoped reads.
 	findings securityapi.Findings
+	// evidence is the evidence pack export surface (T-0026, SPEC-0031,
+	// SPEC-0032): date-ranged packs assembled from the tenant's own audit
+	// chain and the owning contexts' contract surfaces.
+	evidence auditapi.PackService
 }
 
 // newDataplane wires the plane. Concrete implementations are chosen in main and injected here; the
@@ -84,12 +91,12 @@ type dataplane struct {
 // A nil ciLauncher means this environment records CI jobs but dispatches none.
 // A nil findingsPool means Security/Findings runs on its in-memory store;
 // a configured one runs on the Postgres adapter.
-func newDataplane(pdp policyapi.DecisionPoint, ciConfig ci.RunnerConfig, ciLauncher ci.Launcher, findingsPool *db.Pool) *dataplane {
+// The bus is built in main and handed in: one process, one bus, so every
+// module event and every audit-bearing event flows over the same one.
+func newDataplane(b bus.Bus, pdp policyapi.DecisionPoint, ciConfig ci.RunnerConfig, ciLauncher ci.Launcher, findingsPool *db.Pool) *dataplane {
 	if pdp == nil {
 		panic("dataplane: no PDP — every protected action needs a decision (invariant 2)")
 	}
-
-	b := bus.NewInProcess()
 
 	// Repository context, on the in-memory adapter until the Postgres one lands with the tenancy
 	// baseline (T-0004). Swapping adapters is a change to this line and nothing else.
@@ -183,7 +190,7 @@ func main() {
 		}
 	}
 
-	dp := newDataplane(pdp, ciConfig, ciLauncher, dbPool)
+	dp := newDataplane(b, pdp, ciConfig, ciLauncher, dbPool)
 	// Compile-time proof that the generated contracts compose into this plane alongside the
 	// modules; the agent gateway itself is wired in Phase 3.
 	_ = agentv1.HealthState_HEALTH_STATE_HEALTHY
@@ -276,6 +283,29 @@ func main() {
 		)
 	}
 
+	// The evidence pack surface (T-0026, SPEC-0031, SPEC-0032): the assembler
+	// reads the tenant's own audit chain. A configured plane reads the
+	// Postgres trail the audit sink above feeds; a dev plane composes the
+	// in-memory trail and feeds it from the same bus. The appendix port is
+	// wired only where the import surface exists — a plane without it has no
+	// imported history, and an empty appendix is then the truthful answer.
+	// The access-changes section reads Identity & Access's auditor-grant
+	// surface; the grant lifecycle has not landed yet (T-0027), so nothing is
+	// composed and the section degrades per contract — an explicit gap over
+	// the range, never a partial section presented as complete.
+	var attested auditapi.AttestedHistorySource
+	if dp.imports != nil {
+		attested = audit.NewImportedHistorySource(dp.imports)
+	}
+	var trail auditapi.TrailStore
+	if dbPool != nil {
+		trail = audit.NewPostgresTrail(dbPool)
+	} else {
+		trail = audit.NewMemoryTrail()
+		auditsink.NewLogSink(trail).Subscribe(dp.bus)
+	}
+	dp.evidence = audit.NewEvidenceService(dp.policy, dp.bus, trail, attested, nil)
+
 	// OIDC login, when this environment has an identity provider. Built before the
 	// doors open so a misconfigured one fails the rollout rather than the first login.
 	oidcConfig, oidcEnabled, err := loadOIDCConfig(os.Getenv)
@@ -294,6 +324,7 @@ func main() {
 	if doors.policyServer != nil {
 		civ1.RegisterCIJobServiceServer(doors.policyServer, ci.NewGRPCServer(dp.ci.Jobs()))
 		securityv1.RegisterFindingsServiceServer(doors.policyServer, security.NewGRPCServer(dp.findings))
+		auditv1.RegisterEvidenceServiceServer(doors.policyServer, audit.NewEvidenceGRPCServer(dp.evidence))
 		if dp.codeReview != nil {
 			codereviewv1.RegisterMergeRequestServiceServer(doors.policyServer, codereview.NewGRPCServer(dp.codeReview))
 		}
