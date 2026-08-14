@@ -11,10 +11,13 @@
 // resolved package-creation question).
 //
 // A pack is the compliance-owner's answer to "assemble the audit evidence by
-// hand" (PRD PR-17): one closed date range, four control sections —
-// approvals, policy decisions, scan gates, access changes — and one labelled
-// appendix for attested imported history. Enough for a SOC 2 Type II control
-// walkthrough without engineer involvement (SPEC-0031).
+// hand" (PRD PR-17): one closed date range, five control sections —
+// approvals, policy decisions, scan gates, access changes and residency — and
+// one labelled appendix for attested imported history. Enough for a SOC 2
+// Type II control walkthrough without engineer involvement (SPEC-0031). The
+// residency section is the additive T-0033 / SPEC-0040 addition: it answers
+// "where was this tenant's work during the range" with control-plane-observed
+// facts only.
 //
 // The two structural commitments this schema encodes:
 //
