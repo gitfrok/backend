@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -374,7 +375,7 @@ func (s *Service) allowed(ctx context.Context, principal api.Context, action, re
 		TenantID: principal.TenantID,
 		Subject: policyapi.Subject{
 			ID: principal.ActorID, TenantID: principal.TenantID,
-			Roles: append([]string(nil), principal.ActorRoles...),
+			Roles: slices.Clone(principal.ActorRoles),
 		},
 		Action:   action,
 		Resource: policyapi.Resource{Type: resourceType, ID: resourceID},

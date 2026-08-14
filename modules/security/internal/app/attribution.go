@@ -1,8 +1,10 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"time"
 
@@ -129,7 +131,7 @@ func (s *Service) onScanIngestedAttribution(ctx context.Context, e api.ScanInges
 		}
 	}
 	s.attrMu.Unlock()
-	sort.Strings(targets)
+	slices.Sort(targets)
 	for _, id := range targets {
 		_, _ = s.computeAttribution(ctx, e.TenantID, id, precomputeActor)
 	}
@@ -239,8 +241,8 @@ func (s *Service) computeAttribution(ctx context.Context, tenantID, mergeRequest
 		}
 		rec.views = append(rec.views, view)
 	}
-	sort.Slice(rec.views, func(i, j int) bool {
-		return rec.views[i].finding.ID < rec.views[j].finding.ID
+	slices.SortFunc(rec.views, func(a, b attributedView) int {
+		return cmp.Compare(a.finding.ID, b.finding.ID)
 	})
 
 	key := attributionKey(tenantID, mergeRequestID, mr.HeadRevision, base)

@@ -1,8 +1,10 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -199,7 +201,7 @@ func (m *MemoryStore) applyLifecycle(rec *scanRecord, final IngestParams) ([]api
 	for id := range rec.prepared {
 		reported = append(reported, id)
 	}
-	sort.Strings(reported)
+	slices.Sort(reported)
 
 	opened := []api.Finding{}
 	for _, id := range reported {
@@ -265,8 +267,8 @@ func (m *MemoryStore) applyLifecycle(rec *scanRecord, final IngestParams) ([]api
 		resolved = append(resolved, rec.finding)
 	}
 
-	sort.Slice(opened, func(i, j int) bool { return opened[i].ID < opened[j].ID })
-	sort.Slice(resolved, func(i, j int) bool { return resolved[i].ID < resolved[j].ID })
+	slices.SortFunc(opened, func(a, b api.Finding) int { return cmp.Compare(a.ID, b.ID) })
+	slices.SortFunc(resolved, func(a, b api.Finding) int { return cmp.Compare(a.ID, b.ID) })
 	return opened, resolved
 }
 
@@ -309,7 +311,7 @@ func (m *MemoryStore) ListFindings(_ context.Context, tenantID string, f ListFil
 		}
 		rows = append(rows, rec.finding)
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	slices.SortFunc(rows, func(a, b api.Finding) int { return cmp.Compare(a.ID, b.ID) })
 
 	if f.AfterID != "" {
 		i := sort.Search(len(rows), func(i int) bool { return rows[i].ID > f.AfterID })
@@ -431,7 +433,7 @@ func (m *MemoryStore) RepositoriesWithFindings(_ context.Context, tenantID strin
 	for r := range set {
 		out = append(out, r)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out, nil
 }
 
@@ -496,7 +498,7 @@ func (m *MemoryStore) FindingsSummary(_ context.Context, tenantID string, q Summ
 		for v := range counts[dim] {
 			values = append(values, v)
 		}
-		sort.Strings(values)
+		slices.Sort(values)
 		for _, v := range values {
 			facet.Values = append(facet.Values, api.SummaryFacetValue{Value: v, Count: counts[dim][v]})
 		}
@@ -554,6 +556,6 @@ func (m *MemoryStore) ScanReportAt(_ context.Context, tenantID, repositoryID, re
 		}
 		out = append(out, ReportedFinding{Identity: identity, Finding: tenant[findingID].finding})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Finding.ID < out[j].Finding.ID })
+	slices.SortFunc(out, func(a, b ReportedFinding) int { return cmp.Compare(a.Finding.ID, b.Finding.ID) })
 	return ScanReport{ScanID: best.params.ScanID, Findings: out}, true, nil
 }

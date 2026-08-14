@@ -3,7 +3,7 @@ package app
 import (
 	"context"
 	"errors"
-	"sort"
+	"slices"
 
 	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
 	"github.com/gitfrok/backend/modules/security/api"
@@ -132,6 +132,6 @@ func (s *Service) MergeFindingsFacts(ctx context.Context, tenantID, repositoryID
 	for _, breach := range breaches {
 		facts.ReliedUponTriageIDs = append(facts.ReliedUponTriageIDs, breach.triageID)
 	}
-	sort.Strings(facts.ReliedUponTriageIDs)
+	slices.Sort(facts.ReliedUponTriageIDs)
 	return facts, nil
 }
