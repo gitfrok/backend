@@ -10,6 +10,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/gitfrok/backend/modules/ci/api"
 	"github.com/gitfrok/backend/modules/ci/internal/adapters/grpc"
@@ -19,6 +20,7 @@ import (
 	"github.com/gitfrok/backend/modules/ci/internal/dispatcher"
 	"github.com/gitfrok/backend/modules/ci/internal/kedametrics"
 	"github.com/gitfrok/backend/modules/ci/internal/memory"
+	"github.com/gitfrok/backend/modules/ci/internal/reportstore"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
 )
@@ -40,6 +42,33 @@ type RunnerConfig struct {
 // sandbox. It is aliased here so cmd/ can hold and pass one without naming a
 // package under this module's internal/ tree.
 type Launcher = dispatcher.Launcher
+
+// The scan report store (SPEC-0037, ADR-0059): one durable object per
+// (tenant, repository, job, attempt, scanner class). Aliased for the same
+// reason — cmd/ wires the tier and the Security context reads through the
+// composed port, and neither may name this module's internal tree.
+type (
+	ScanReportStore      = reportstore.Store
+	ScanReportRef        = reportstore.Ref
+	ScanReportTier       = reportstore.Tier
+	MemoryScanReportTier = reportstore.MemoryTier
+)
+
+var (
+	ErrScanReportNotFound = reportstore.ErrScanReportNotFound
+	ErrScanReportTooLarge = reportstore.ErrScanReportTooLarge
+)
+
+// NewScanReportStore builds the report store on one tier; maxBytes is the
+// write-time size limit (SPEC-0037 AC7).
+func NewScanReportStore(tier ScanReportTier, maxBytes int64, now func() time.Time) (*ScanReportStore, error) {
+	return reportstore.New(tier, maxBytes, now)
+}
+
+// NewMemoryReportTier returns the in-process report tier for dev environments
+// without a SeaweedFS object tier, mirroring the module's other memory
+// adapters.
+func NewMemoryReportTier() *MemoryScanReportTier { return reportstore.NewMemoryTier() }
 
 // Runtime is the composed CI context: the job service the gRPC door serves, and
 // the dispatch loop that drains the queue into sandboxes. Both share one queue
