@@ -185,6 +185,10 @@ func (m *MemoryStore) IngestChunk(_ context.Context, p IngestParams) (IngestOutc
 			resolved:         out.Resolved,
 		},
 	}
+	// The audit claim marker is recorded inside the SAME critical section as
+	// the completion — the in-memory stand-in for the Postgres adapter's
+	// in-transaction claim (wave-2 N5): committed ⇒ marker present.
+	m.auditMarkers[auditMarkerKey(p.ScanID, p.ChunkIndex, p.RequestID)] = struct{}{}
 	return out, nil
 }
 
@@ -593,8 +597,9 @@ func auditMarkerKey(scanID string, chunkIndex int, requestID string) string {
 	return scanID + "\x00" + strconv.Itoa(chunkIndex) + "\x00" + requestID
 }
 
-// ClaimIngestAuditMarker records that the ingest's one audit record has
-// landed (SPEC-0025 AC5). Idempotent: a re-claim changes nothing.
+// ClaimIngestAuditMarker is the standalone, idempotent top-up of the audit
+// claim marker (SPEC-0025 AC5); IngestChunk's completion already claims it
+// in-section (wave-2 N5). A re-claim changes nothing.
 func (m *MemoryStore) ClaimIngestAuditMarker(_ context.Context, _, scanID string, chunkIndex int, requestID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -26,6 +26,20 @@ import (
 // cursorKeyBytes is the HMAC key length for signed list cursors.
 const cursorKeyBytes = 32
 
+// reservedRequestIDPrefix is the namespace the store reserves for ingest-audit
+// claim markers: the marker is recorded as a scan_chunks row whose request ID
+// is this prefix joined to the ingest's own. A caller-supplied request ID
+// carrying the prefix would share the marker's key namespace — one crafted ID
+// could suppress a pending backfill or answer as a forged replay (wave-2 N2)
+// — so the boundary refuses it outright.
+const reservedRequestIDPrefix = "audit:"
+
+// validRequestID admits a caller request ID: non-empty, and outside the
+// reserved marker namespace.
+func validRequestID(id string) bool {
+	return id != "" && !strings.HasPrefix(id, reservedRequestIDPrefix)
+}
+
 // Service is the Security/Findings application service (SPEC-0024,
 // SPEC-0025). It is the only place an ingest request meets the PDP, the only
 // place identities are computed, and the only place events and audit records
@@ -48,6 +62,14 @@ type Service struct {
 	mergeRequests map[string]map[string]mergeRequestProjection
 	attributions  map[string]*attributionRecord
 	mergeBase     api.MergeBaseResolver
+
+	// auditWitness reads the tenant's audit trail to tell whether the
+	// ingest's one audit record landed (SPEC-0025 AC5). Optional: a plane
+	// that wires no trail falls back to the claim marker alone, the
+	// pre-witness shape. wMu guards it; attachment happens after
+	// composition, like the merge-base resolver.
+	wMu          sync.RWMutex
+	auditWitness AuditWitness
 }
 
 // Option configures the service for tests and composition.
@@ -63,6 +85,27 @@ func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = 
 // accept each other's cursors.
 func WithCursorKey(key [cursorKeyBytes]byte) Option {
 	return func(s *Service) { s.cursorKey = key }
+}
+
+// WithAuditWitness wires the trail witness the replay path asks whether the
+// ingest's one audit record really landed (tests pin a stand-in).
+func WithAuditWitness(w AuditWitness) Option {
+	return func(s *Service) { s.auditWitness = w }
+}
+
+// SetAuditWitness attaches the trail witness after construction: the plane
+// composes the audit trail after the findings service, so the witness is a
+// post-composition step, exactly like the merge-base resolver.
+func (s *Service) SetAuditWitness(w AuditWitness) {
+	s.wMu.Lock()
+	defer s.wMu.Unlock()
+	s.auditWitness = w
+}
+
+func (s *Service) witness() AuditWitness {
+	s.wMu.RLock()
+	defer s.wMu.RUnlock()
+	return s.auditWitness
 }
 
 // New builds the service. A nil store or PDP is a composition error: without
@@ -109,6 +152,15 @@ func New(store Store, pdp policyapi.DecisionPoint, events bus.Bus, opts ...Optio
 //     events; a completed replay whose audit marker is missing backfills
 //     the record instead (SPEC-0025 AC1/AC5).
 func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) (api.IngestResult, error) {
+	// A request ID in the reserved marker namespace is a malformed request,
+	// refused whole before any decision or write: admitting it would let a
+	// caller squat or forge the audit claim markers the store keys by
+	// "audit:"+request_id (wave-2 N2). The chunk's request ID is the
+	// embedded context's; an ABSENT one stays the coarse context denial
+	// below, unchanged.
+	if strings.HasPrefix(chunk.RequestID, reservedRequestIDPrefix) {
+		return api.IngestResult{}, api.ErrMalformed
+	}
 	if !validContext(chunk.Context) || chunk.Revision == "" {
 		return api.IngestResult{}, api.ErrDenied
 	}
@@ -185,14 +237,13 @@ func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) 
 		Replayed:         outcome.Replayed,
 	}
 	// A replay reports the recorded outcome and creates no event (SPEC-0025
-	// AC1). A completed replay WITHOUT its audit claim marker means the
-	// first attempt committed but its audit record never landed (the publish
-	// failed after commit, or the process crashed in between): backfill the
+	// AC1). A completed replay whose audit record is MISSING — the first
+	// attempt committed but its audit publish never landed — backfills the
 	// one record so a committed ingest can never lack it (SPEC-0025 AC5 —
 	// one, and at least one). The backfill carries this replay's own PDP
 	// decision: every request, replay included, is decided.
 	if outcome.Replayed {
-		if outcome.Completed && !outcome.AuditAlreadyRecorded {
+		if outcome.Completed && s.auditRecordMissing(ctx, chunk, outcome) {
 			if err := s.emitIngestAudit(ctx, chunk, outcome, decision.DecisionID); err != nil {
 				return api.IngestResult{}, err
 			}
@@ -206,8 +257,10 @@ func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) 
 
 	// AC5: the audit record lands FIRST — as close to the ingest commit as
 	// the bus allows — so a committed ingest can never lack its record even
-	// when a later domain-event publish fails. The claim marker recorded
-	// alongside it is what the replay path above reads to tell "already
+	// when a later domain-event publish fails. Its claim marker was already
+	// recorded in the SAME transaction as the chunk commit (committed ⇒
+	// marker present — the claim can no longer lag the commit, wave-2 N5);
+	// the replay path above reads marker and trail to tell "already
 	// appended" from "must backfill".
 	if err := s.emitIngestAudit(ctx, chunk, outcome, decision.DecisionID); err != nil {
 		return api.IngestResult{}, err
@@ -243,13 +296,38 @@ func (s *Service) IngestScanResults(ctx context.Context, chunk api.IngestChunk) 
 	return result, nil
 }
 
+// auditRecordMissing decides whether a completed replay must backfill the
+// ingest's one audit record (SPEC-0025 AC5). The claim marker is no longer
+// sufficient on its own: it is now claimed in the SAME transaction as the
+// chunk commit, so a committed ingest always carries one — even when the
+// audit publish then failed and the record never landed (wave-2 N5). The
+// trail is the truth when a witness is wired: backfill fires only when the
+// record is genuinely absent. A witness that cannot answer falls back to the
+// marker — the pre-witness invariant — and a plane with no witness keeps it.
+func (s *Service) auditRecordMissing(ctx context.Context, chunk api.IngestChunk, outcome IngestOutcome) bool {
+	if w := s.witness(); w != nil {
+		recorded, err := w.IngestAuditRecorded(ctx, chunk.TenantID, chunk.RepositoryID,
+			outcome.ScanID, chunk.RequestID, chunk.Scan.StartedAt)
+		if err == nil {
+			return !recorded
+		}
+		// Witness unavailable: the marker is the fallback signal. With the
+		// in-transaction claim it says "committed", which re-opens only the
+		// pre-witness crash window rather than losing the record to silence.
+	}
+	return !outcome.AuditAlreadyRecorded
+}
+
 // emitIngestAudit appends the one immutable audit record of an accepted
 // ingest — tenant, actor, repository resource, action, outcome, request ID,
-// and decision ID (SPEC-0025 AC5) — then claims its replay marker. The
-// marker is best-effort: a failed claim is swallowed because failing the
-// ingest here would make the caller retry into a replay that backfills a
-// DUPLICATE record, while a missing claim only re-opens the crash window in
-// which a later replay may legitimately backfill.
+// and decision ID (SPEC-0025 AC5). The claim marker itself is recorded in
+// the SAME transaction as the chunk commit (store side), so on the first
+// attempt it is already present when this runs; the top-up claim afterwards
+// is idempotent and exists for rows committed before that guarantee, whose
+// marker may genuinely be absent. Its failure is swallowed deliberately:
+// with the marker claimed at commit time a failed top-up no longer opens the
+// duplicate-backfill window the old publish-then-claim order had — at worst
+// it leaves a pre-fix row for a later replay to top up again.
 func (s *Service) emitIngestAudit(ctx context.Context, chunk api.IngestChunk, outcome IngestOutcome, decisionID string) error {
 	if s.bus != nil {
 		if err := s.bus.Publish(ctx, platformaudit.FindingsScanIngested{
@@ -526,7 +604,7 @@ func (s *Service) GetTriage(ctx context.Context, c api.Context, findingID string
 // org-wide summary is the same request with no repository filter
 // (SPEC-0026 AC1).
 func (s *Service) GetFindingsSummary(ctx context.Context, req api.SummaryRequest) (api.FindingsSummary, error) {
-	if req.TenantID == "" || req.ActorID == "" || req.RequestID == "" {
+	if req.TenantID == "" || req.ActorID == "" || !validRequestID(req.RequestID) {
 		return api.FindingsSummary{}, api.ErrDenied
 	}
 	for _, dim := range req.FacetDimensions {
@@ -579,9 +657,11 @@ func (s *Service) GetFindingsSummary(ctx context.Context, req api.SummaryRequest
 
 // validContext is the verified-identity check every operation applies. An
 // incomplete context is a coarse denial rather than a partial call
-// (SPEC-0025).
+// (SPEC-0025). The request ID must also stay outside the reserved marker
+// namespace (wave-2 N2); the ingest path refuses that shape as malformed
+// before reaching here.
 func validContext(c api.Context) bool {
-	return c.TenantID != "" && c.RepositoryID != "" && c.ActorID != "" && c.RequestID != ""
+	return c.TenantID != "" && c.RepositoryID != "" && c.ActorID != "" && validRequestID(c.RequestID)
 }
 
 // validTenantContext is the relaxed check the tenant-wide read paths apply
@@ -589,7 +669,7 @@ func validContext(c api.Context) bool {
 // a caller-supplied repository is OPTIONAL — tenant, actor, and request ID
 // remain mandatory. Single-repository paths keep validContext.
 func validTenantContext(c api.Context) bool {
-	return c.TenantID != "" && c.ActorID != "" && c.RequestID != ""
+	return c.TenantID != "" && c.ActorID != "" && validRequestID(c.RequestID)
 }
 
 // listScope is the repository scope a list cursor is bound to: the named

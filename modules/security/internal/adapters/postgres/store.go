@@ -159,6 +159,14 @@ func (s *Store) IngestChunk(ctx context.Context, p app.IngestParams) (app.Ingest
 		if err := recordChunk(ctx, tx, p, true); err != nil {
 			return err
 		}
+		// The audit claim marker lands in the SAME transaction as the chunk
+		// commit (wave-2 N5): committed ⇒ marker present, so the claim can
+		// no longer lag the commit and a publish-succeeded/claim-failed
+		// window cannot open. The replay path pairs this with a trail read
+		// to tell "record landed" from "committed but never published".
+		if err := claimAuditMarker(ctx, tx, p.TenantID, p.ScanID, p.ChunkIndex, p.RequestID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE security.scans
 			    SET state = 'COMPLETE', chunk_count = chunk_count + 1, completed_at = now()
@@ -191,25 +199,34 @@ func recordChunk(ctx context.Context, tx pgx.Tx, p app.IngestParams, completed b
 	return nil
 }
 
-// ClaimIngestAuditMarker records that the ingest's one audit record has
-// landed (SPEC-0025 AC5). The marker is a separate append-only row in the
-// idempotency table — the schema grants INSERT only, nothing here is ever
-// updated — keyed by the same (tenant, scan, chunk) tuple with an
-// "audit:"-prefixed request ID, so it can never collide with a chunk's own
-// replay key. ON CONFLICT DO NOTHING keeps a re-claim a no-op.
+// ClaimIngestAuditMarker is the standalone, idempotent top-up of the audit
+// claim marker (SPEC-0025 AC5). The authoritative claim happens inside the
+// final chunk's own transaction (see IngestChunk), so this exists for rows
+// committed before that guarantee, whose marker may genuinely be absent.
 func (s *Store) ClaimIngestAuditMarker(ctx context.Context, tenantID, scanID string, chunkIndex int, requestID string) error {
 	ctx = tenancy.WithTenant(ctx, tenancy.ID(tenantID))
 	return s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO security.scan_chunks
-			   (tenant_id, scan_id, chunk_index, request_id, findings_recorded, completed, outcome_json)
-			 VALUES ($1, $2, $3, 'audit:' || $4, 0, true, '{"audit_marker": true}')
-			 ON CONFLICT (tenant_id, scan_id, chunk_index, request_id) DO NOTHING`,
-			tenantID, scanID, chunkIndex, requestID); err != nil {
-			return fmt.Errorf("claim audit marker: %w", err)
-		}
-		return nil
+		return claimAuditMarker(ctx, tx, tenantID, scanID, chunkIndex, requestID)
 	})
+}
+
+// claimAuditMarker records the ingest's audit claim marker: a separate
+// append-only row in the idempotency table — the schema grants INSERT only,
+// nothing here is ever updated — keyed by the same (tenant, scan, chunk)
+// tuple with an "audit:"-prefixed request ID, so it can never collide with a
+// chunk's own replay key (caller request IDs carrying the reserved prefix
+// are refused at the service boundary, wave-2 N2). ON CONFLICT DO NOTHING
+// keeps a re-claim a no-op.
+func claimAuditMarker(ctx context.Context, tx pgx.Tx, tenantID, scanID string, chunkIndex int, requestID string) error {
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO security.scan_chunks
+		   (tenant_id, scan_id, chunk_index, request_id, findings_recorded, completed, outcome_json)
+		 VALUES ($1, $2, $3, 'audit:' || $4, 0, true, '{"audit_marker": true}')
+		 ON CONFLICT (tenant_id, scan_id, chunk_index, request_id) DO NOTHING`,
+		tenantID, scanID, chunkIndex, requestID); err != nil {
+		return fmt.Errorf("claim audit marker: %w", err)
+	}
+	return nil
 }
 
 // applyLifecycle upserts the scan's staged set into security.findings and

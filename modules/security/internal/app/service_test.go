@@ -50,6 +50,26 @@ type harness struct {
 	// failScanEvents fails every ScanIngested delivery: the stand-in for a
 	// domain-event publish failing after the audit record landed.
 	failScanEvents bool
+	// witnessErr makes the trail witness unable to answer: the replay guard
+	// must then fall back to the claim marker.
+	witnessErr error
+}
+
+// trailWitness is the replay guard's audit-trail stand-in: it reports
+// exactly the audit records the harness's sink collected — the in-test
+// counterpart of the plane's trail read (wave-2 N5).
+type trailWitness struct{ h *harness }
+
+func (w trailWitness) IngestAuditRecorded(_ context.Context, _, _, scanID, requestID string, _ time.Time) (bool, error) {
+	if w.h.witnessErr != nil {
+		return false, w.h.witnessErr
+	}
+	for _, a := range w.h.audits {
+		if a.ScanID == scanID && a.RequestID == requestID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func newHarness(allow bool) *harness {
@@ -89,6 +109,7 @@ func newHarness(allow bool) *harness {
 	h.svc = app.New(store, pdp, events,
 		app.WithIDs(sequenceIDs()),
 		app.WithClock(func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) }),
+		app.WithAuditWitness(trailWitness{h}),
 	)
 	return h
 }
@@ -628,5 +649,132 @@ func TestListCursorIsBoundToTheIssuingActor(t *testing.T) {
 	own, err := h.svc.ListFindings(ctx, api.ListRequest{Context: validContext(), PageSize: 1, PageToken: page1.NextPageToken})
 	if err != nil || len(own.Findings) != 1 {
 		t.Fatalf("the issuing actor's own token must still page: %+v err=%v", own, err)
+	}
+}
+
+// Wave-2 N2 — the store keys ingest-audit claim markers by "audit:"+request
+// ID, so a caller request ID carrying that prefix shares the marker's key
+// namespace. The boundary refuses the shape whole, before any decision or
+// write: malformed for ingest, denied for the tenant-wide reads.
+func TestReservedRequestIDPrefixIsRefused(t *testing.T) {
+	h := newHarness(true)
+	chunk := singleChunk(sastScan(0), "req-1", rawFinding("py-eval", "app.py", "def handler():"))
+	chunk.RequestID = "audit:req-1"
+	if _, err := h.svc.IngestScanResults(context.Background(), chunk); !errors.Is(err, api.ErrMalformed) {
+		t.Fatalf("a reserved-namespace request ID must be refused as malformed, got %v", err)
+	}
+	if len(h.audits) != 0 || len(h.opened) != 0 || len(h.scans) != 0 {
+		t.Fatalf("a refused request must write and emit nothing: audits=%d opened=%d scans=%d",
+			len(h.audits), len(h.opened), len(h.scans))
+	}
+
+	summary := api.SummaryRequest{Context: api.Context{
+		TenantID: "t-1", ActorID: "actor-1", RequestID: "audit:req-1",
+	}}
+	if _, err := h.svc.GetFindingsSummary(context.Background(), summary); !errors.Is(err, api.ErrDenied) {
+		t.Fatalf("a reserved-namespace summary request ID must be denied, got %v", err)
+	}
+}
+
+// Wave-2 N2, attack 1 — suppressed audit record: an ingest squatted under
+// "audit:R" used to plant a scan_chunks row matching R's marker key, so R's
+// backfill would see "already recorded" and stay silent forever. The
+// boundary now refuses the squatting shape, so the real ingest's lost audit
+// publish still backfills its one record.
+func TestAuditNamespaceCannotSuppressABackfill(t *testing.T) {
+	h := newHarness(true)
+	ctx := context.Background()
+
+	squat := singleChunk(sastScan(0), "req-1", rawFinding("squat", "s.py", "fn"))
+	squat.RequestID = "audit:req-1"
+	if _, err := h.svc.IngestScanResults(ctx, squat); !errors.Is(err, api.ErrMalformed) {
+		t.Fatalf("the squatting ingest must be refused, got %v", err)
+	}
+
+	chunk := singleChunk(sastScan(0), "req-1", rawFinding("py-eval", "app.py", "def handler():"))
+	chunk.RequestID = "req-1"
+	h.failAuditOnce = true
+	if _, err := h.svc.IngestScanResults(ctx, chunk); err == nil {
+		t.Fatalf("a failed audit publish must fail the ingest")
+	}
+	res, err := h.svc.IngestScanResults(ctx, chunk)
+	if err != nil || !res.Replayed {
+		t.Fatalf("replay: %+v err=%v", res, err)
+	}
+	if len(h.audits) != 1 {
+		t.Fatalf("the lost publish must still backfill exactly one record, got %d", len(h.audits))
+	}
+}
+
+// Wave-2 N2, attack 2 — forged replay: once R completes with audit record,
+// a replay crafted under "audit:R" used to sit in the marker namespace and
+// answer as if it were the recorded outcome. The boundary refuses it; the
+// recorded audit count is untouched.
+func TestAuditNamespaceCannotForgeAReplay(t *testing.T) {
+	h := newHarness(true)
+	ctx := context.Background()
+	chunk := singleChunk(sastScan(0), "req-1", rawFinding("py-eval", "app.py", "def handler():"))
+	chunk.RequestID = "req-1"
+	if _, err := h.svc.IngestScanResults(ctx, chunk); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	forged := chunk
+	forged.RequestID = "audit:req-1"
+	if _, err := h.svc.IngestScanResults(ctx, forged); !errors.Is(err, api.ErrMalformed) {
+		t.Fatalf("a forged replay in the marker namespace must be refused, got %v", err)
+	}
+	if len(h.audits) != 1 {
+		t.Fatalf("the forged replay must append nothing, got %d", len(h.audits))
+	}
+}
+
+// Wave-2 N5 — the claim marker commits WITH the chunk: when the audit
+// publish fails after the commit, the marker already exists, so a replay
+// whose witness cannot answer falls back to the marker and appends nothing
+// (the claim no longer lags the commit). A healthy witness still sees the
+// genuinely absent record and backfills exactly one.
+func TestAuditMarkerCommitsWithTheChunk(t *testing.T) {
+	h := newHarness(true)
+	ctx := context.Background()
+	chunk := singleChunk(sastScan(0), "req-1", rawFinding("py-eval", "app.py", "def handler():"))
+	chunk.RequestID = "req-1"
+
+	h.failAuditOnce = true
+	if _, err := h.svc.IngestScanResults(ctx, chunk); err == nil {
+		t.Fatalf("a failed audit publish must fail the ingest")
+	}
+	if len(h.audits) != 0 {
+		t.Fatalf("the failed publish must append nothing, got %d", len(h.audits))
+	}
+
+	// Witness down: the replay falls back to the claim marker. Pre-N5 the
+	// marker lagged behind the publish, so this replay would have
+	// backfilled here; now the marker rode in the chunk's own transaction
+	// and the fallback sees it.
+	h.witnessErr = errors.New("trail unavailable")
+	if _, err := h.svc.IngestScanResults(ctx, chunk); err != nil {
+		t.Fatalf("marker-fallback replay: %v", err)
+	}
+	if len(h.audits) != 0 {
+		t.Fatalf("the marker must have committed with the chunk; the fallback must append nothing, got %d", len(h.audits))
+	}
+
+	// Witness healthy: the trail shows the record genuinely absent, so the
+	// replay backfills — exactly one in total.
+	h.witnessErr = nil
+	if _, err := h.svc.IngestScanResults(ctx, chunk); err != nil {
+		t.Fatalf("witnessed replay: %v", err)
+	}
+	if len(h.audits) != 1 {
+		t.Fatalf("the witness must backfill the genuinely absent record exactly once, got %d", len(h.audits))
+	}
+
+	// Marked and witnessed: a further replay is silent.
+	if _, err := h.svc.IngestScanResults(ctx, chunk); err != nil {
+		t.Fatalf("final replay: %v", err)
+	}
+	if len(h.audits) != 1 {
+		t.Fatalf("a recorded replay must append nothing, got %d", len(h.audits))
 	}
 }

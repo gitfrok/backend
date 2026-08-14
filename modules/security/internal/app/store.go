@@ -56,11 +56,12 @@ type IngestOutcome struct {
 	// the caller must emit no event (SPEC-0025 AC1).
 	Replayed bool
 	// AuditAlreadyRecorded reports — on a Replayed COMPLETED chunk — that
-	// the ingest's one audit record already landed (its claim marker
-	// exists). A completed replay WITHOUT it means the first attempt
-	// committed but its audit publish never landed: the replay path must
-	// backfill the missing record so a committed ingest can never lack it
-	// (SPEC-0025 AC5: one, and at least one).
+	// the ingest's claim marker exists. Since the marker is claimed in the
+	// same transaction as the chunk commit, it says "committed"; whether
+	// the audit RECORD itself landed is a trail question the service asks
+	// its AuditWitness when one is wired (wave-2 N5). A completed replay
+	// whose record is genuinely missing must backfill it so a committed
+	// ingest can never lack it (SPEC-0025 AC5: one, and at least one).
 	AuditAlreadyRecorded bool
 	// Opened and Resolved are valid when Completed && !Replayed: the findings
 	// this scan opened (first sight) and resolved (no longer reported),
@@ -215,6 +216,25 @@ type Store interface {
 	// landed for (tenant, scan, chunk, request ID), so a replay of the same
 	// chunk can tell "record already appended" from "first attempt committed
 	// but its audit publish failed — backfill" (SPEC-0025 AC5). The claim is
-	// append-only and idempotent: a re-claim changes nothing.
+	// append-only and idempotent: a re-claim changes nothing. Stores claim
+	// the marker in the SAME transaction as the final chunk's commit —
+	// committed ⇒ marker present — so this standalone call is an idempotent
+	// top-up only (wave-2 N5).
 	ClaimIngestAuditMarker(ctx context.Context, tenantID, scanID string, chunkIndex int, requestID string) error
+}
+
+// AuditWitness reads back whether the ingest's one audit record landed on
+// the tenant's audit trail (SPEC-0025 AC5). Since the claim marker is
+// claimed in the same transaction as the chunk commit, a committed ingest
+// always carries one — even when the audit publish then failed — so the
+// marker alone can no longer tell "record appended" from "record lost"
+// (wave-2 N5). The replay path therefore asks the trail when a witness is
+// wired, and backfills only when the record is genuinely absent. The ctx
+// carries the tenant scope; implementations must refuse an unscoped query.
+type AuditWitness interface {
+	// IngestAuditRecorded reports whether the trail holds the scan-ingest
+	// audit record for (tenant, repository, scan, request ID) witnessed at
+	// or after since. An error means the witness cannot answer; the caller
+	// falls back to the claim marker.
+	IngestAuditRecorded(ctx context.Context, tenantID, repositoryID, scanID, requestID string, since time.Time) (bool, error)
 }

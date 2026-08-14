@@ -327,6 +327,12 @@ func main() {
 		trail = audit.NewMemoryTrail()
 		auditsink.NewLogSink(trail).Subscribe(dp.bus)
 	}
+	// The ingest replay guard reads back from the trail whether the ingest's
+	// one audit record landed: the claim marker is claimed in the same
+	// transaction as the chunk commit, so its presence says "committed", not
+	// "audited" — the trail is the truth the backfill decision needs
+	// (SPEC-0025 AC5, wave-2 N5).
+	security.AttachAuditWitness(dp.findings, security.NewTrailAuditWitness(trail))
 	var grants identityapi.AuditorGrants
 	witness := grantTrailWitness{trail}
 	if dbPool != nil {

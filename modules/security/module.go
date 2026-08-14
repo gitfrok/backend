@@ -10,17 +10,22 @@ package security
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
+	auditapi "github.com/gitfrok/backend/modules/audit/api"
 	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/security/api"
 	securitygrpc "github.com/gitfrok/backend/modules/security/internal/adapters/grpc"
 	secpg "github.com/gitfrok/backend/modules/security/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/security/internal/app"
+	platformaudit "github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/ids"
+	"github.com/gitfrok/backend/platform/tenancy"
 )
 
 // GRPCServer is the module's gRPC door, aliased so cmd/ can hold one
@@ -59,6 +64,71 @@ func AttachMergeBaseResolver(findings api.Findings, resolver api.MergeBaseResolv
 	}
 	sink.SetMergeBaseResolver(resolver)
 	return true
+}
+
+// AttachAuditWitness wires the trail witness the ingest replay path asks
+// whether the ingest's one audit record really landed (SPEC-0025 AC5, wave-2
+// N5). Post-construction for the same reason the resolver is: the audit
+// trail is composed after the findings service. A Findings surface with no
+// witness falls back to the claim marker alone. It reports false when the
+// surface has no ingest service to attach to.
+func AttachAuditWitness(findings api.Findings, witness app.AuditWitness) bool {
+	type witnessSink interface{ SetAuditWitness(app.AuditWitness) }
+	sink, ok := findings.(witnessSink)
+	if !ok {
+		return false
+	}
+	sink.SetAuditWitness(witness)
+	return true
+}
+
+// trailAuditWitness answers the replay path's "did the audit record land?"
+// from the tenant's audit trail itself (wave-2 N5): the claim marker is
+// claimed in the same transaction as the chunk commit, so its presence says
+// "committed", not "audited" — the trail is the truth.
+type trailAuditWitness struct {
+	trail auditapi.TrailReader
+}
+
+// NewTrailAuditWitness builds the audit witness over the plane's trail read
+// port. The witness performs only the one query the replay guard needs —
+// scan-ingest records of one repository since the scan started — never a
+// general trail read.
+func NewTrailAuditWitness(trail auditapi.TrailReader) app.AuditWitness {
+	return trailAuditWitness{trail: trail}
+}
+
+func (w trailAuditWitness) IngestAuditRecorded(ctx context.Context, tenantID, repositoryID, scanID, requestID string, since time.Time) (bool, error) {
+	// The trail read is tenant-scoped like every trail read (SPEC-0001);
+	// the scope comes from the ingest being verified, never broader. The
+	// repository filter is deliberately NOT applied: the trail narrows it by
+	// a detail key the scan-ingest record does not carry (its repository
+	// rides the record's resource), and the (scan_id, request_id) pair
+	// identifies the ingest's record uniquely — scan identity is a
+	// server-computed hash over the tenant and repository among other
+	// descriptor fields, so no other tenant or repository can share it.
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(tenantID))
+	records, truncated, err := w.trail.Query(ctx, auditapi.TrailQuery{
+		From:    since,
+		Actions: []auditapi.Action{auditapi.Action(platformaudit.ActionFindingsScanIngested)},
+	})
+	if err != nil {
+		return false, fmt.Errorf("security: witness trail query: %w", err)
+	}
+	for _, r := range records {
+		if r.Detail["scan_id"] == scanID && r.Detail["request_id"] == requestID {
+			return true, nil
+		}
+	}
+	if truncated {
+		// The matching range holds more records than one read returns, and
+		// the record sought — appended at commit — sits at the TAIL, beyond
+		// the earliest prefix the read yields. Report "cannot answer": the
+		// caller falls back to the claim marker, which at least says
+		// "committed".
+		return false, fmt.Errorf("security: witness trail read truncated before the record could be located")
+	}
+	return false, nil
 }
 
 // mergeFactsSource is the facts assembler this module's service implements
