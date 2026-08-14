@@ -53,7 +53,7 @@ func TestLiveEvidencePackProof(t *testing.T) {
 	// degrades the access-changes section per contract (SPEC-0031 AC10).
 	trail := audit.NewMemoryTrail()
 	auditsink.NewLogSink(trail).Subscribe(b)
-	svc := audit.NewEvidenceService(pdp, b, trail, nil, nil)
+	svc := audit.NewEvidenceService(pdp, b, trail, nil, nil, nil)
 
 	const tenant = "t-live-evidence"
 	now := time.Now().UTC()

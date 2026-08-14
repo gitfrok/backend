@@ -40,9 +40,13 @@ func NewMemoryTrail() api.TrailStore { return memory.New() }
 // context, themselves audited, and sections assemble through contract
 // surfaces and the event-fed projection — never another context's tables.
 // attested and access may be nil; see internal/app for the degraded shapes.
+// grants is Identity & Access's auditor grant surface (T-0027, SPEC-0033):
+// the decision-time facts source auditor pack reads compose fresh on every
+// evidence.pack.read decision; nil fails every auditor read closed.
 func NewEvidenceService(pdp policyapi.DecisionPoint, events bus.Bus, trail api.TrailStore,
-	attested api.AttestedHistorySource, access api.AccessChangesSource) api.PackService {
-	return app.New(pdp, events, trail, attested, access)
+	attested api.AttestedHistorySource, access api.AccessChangesSource,
+	grants identityapi.AuditorGrants) api.PackService {
+	return app.New(pdp, events, trail, attested, access, grants)
 }
 
 // NewImportedHistorySource adapts Code Review's import surface to the

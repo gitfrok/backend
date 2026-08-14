@@ -10,7 +10,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -30,10 +29,11 @@ import (
 // lifecycle against it (issuing is owner-only per the merged Rego), prove the
 // evidence pack's access-changes section is LIVE — citing the witnessed
 // issuance rather than degrading SOURCE_UNAVAILABLE — and prove the pack
-// read decision behaves exactly as the Rego's decision-time conjuncts say:
-// allowed under a valid grant's fresh facts, denied without them, denied the
-// instant the grant is revoked or expired, and denied to an auditor who asks
-// for any repository access at all.
+// read decision behaves exactly as the Rego's decision-time conjuncts say,
+// END-TO-END through the evidence service's decide() path: allowed under a
+// valid grant's fresh facts, denied without them, denied the instant the
+// grant is revoked or expired, and denied to an auditor who asks for any
+// repository access at all.
 //
 // It is a live proof, not a fixture replay: every decision below is made by
 // governance/policies as checked out beside backend/, and the proof skips
@@ -57,7 +57,10 @@ func TestLiveAuditorGrantProof(t *testing.T) {
 	trail := audit.NewMemoryTrail()
 	auditsink.NewLogSink(trail).Subscribe(b)
 	grants := identity.NewAuditorGrantsInMemory(pdp, b, liveWitness{trail})
-	svc := audit.NewEvidenceService(pdp, b, trail, nil, audit.NewAccessChangesSource(grants))
+	// The grants surface is composed twice, exactly as the dataplane does: as
+	// the access-changes section's source AND as the decision-time facts
+	// source auditor pack reads compose fresh on every decision (SPEC-0033 AC7).
+	svc := audit.NewEvidenceService(pdp, b, trail, nil, audit.NewAccessChangesSource(grants), grants)
 
 	const tenant = "t-live-auditor"
 	const auditor = "p-auditor-ext"
@@ -141,57 +144,39 @@ func TestLiveAuditorGrantProof(t *testing.T) {
 		t.Fatalf("access-changes section must cite the issuance with its chain position, got %+v", access.Records)
 	}
 
-	// 5. The read decision, exactly as the PEP composes it: evidence.pack.read
-	// for an auditor principal, with the grant's validity facts read FRESH
-	// from the identity surface (SPEC-0033 AC7).
-	decideRead := func(pack string, decisionTime time.Time) bool {
-		facts, ok, err := grants.GrantFacts(tenancy.WithTenant(ctx, tenant), auditor, pack)
-		if err != nil {
-			t.Fatalf("grant facts: %v", err)
-		}
-		pctx := map[string]string{
-			"pack_range_from": from.UTC().Format(time.RFC3339Nano),
-			"pack_range_to":   to.UTC().Format(time.RFC3339Nano),
-			"decision_time":   decisionTime.UTC().Format(time.RFC3339Nano),
-		}
-		if ok {
-			pctx["auditor_grant_id"] = facts.GrantID
-			pctx["auditor_grant_state"] = string(facts.State)
-			pctx["auditor_grant_tenant"] = facts.TenantID
-			pctx["auditor_grant_expires_at"] = facts.ExpiresAt.UTC().Format(time.RFC3339Nano)
-			pctx["auditor_grant_range_from"] = facts.RangeFrom.UTC().Format(time.RFC3339Nano)
-			pctx["auditor_grant_range_to"] = facts.RangeTo.UTC().Format(time.RFC3339Nano)
-			pctx["auditor_grant_packs"] = strings.Join(facts.Packs, ",")
-		}
-		decision, err := pdp.Decide(ctx, policyapi.Request{
-			TenantID: tenant,
-			Subject:  policyapi.Subject{ID: auditor, TenantID: tenant, Roles: []string{"auditor"}},
-			Action:   "evidence.pack.read",
-			Resource: policyapi.Resource{Type: "evidence_pack", ID: pack},
-			Context:  pctx,
-		})
-		if err != nil {
-			t.Fatalf("read decision: %v", err)
-		}
-		return decision.Allowed
+	// 5. The read decision, END-TO-END through the evidence service's
+	// decide() path: the auditor calls GetPack like any caller, and the
+	// service composes the grant's validity facts FRESH from the identity
+	// surface into the decision the real bundle answers (SPEC-0033 AC7).
+	auditorAPI := func(requestID string) auditapi.Context {
+		return auditapi.Context{TenantID: tenant, ActorID: auditor, ActorRoles: []string{"auditor"}, RequestID: requestID}
+	}
+	readAs := func(c auditapi.Context, pack string) error {
+		_, err := svc.GetPack(ctx, c, pack)
+		return err
 	}
 
-	// Valid facts read the named pack.
-	if !decideRead(packID, time.Now().UTC()) {
-		t.Fatal("the real bundle refused an auditor reading the granted pack under fresh ACTIVE facts")
+	// Valid fresh facts read the named pack.
+	if err := readAs(auditorAPI("req-ag-auditor-1"), packID); err != nil {
+		t.Fatalf("the real bundle refused an auditor reading the granted pack under fresh ACTIVE facts: %v", err)
+	}
+	// Facts are read on EVERY decision, never cached: a second read succeeds
+	// through a second, fresh facts composition.
+	if err := readAs(auditorAPI("req-ag-auditor-2"), packID); err != nil {
+		t.Fatalf("the second auditor read must compose facts fresh again: %v", err)
 	}
 	// A pack the grant does not name is denied (AC6: unnamed, never enumerated).
-	if decideRead("pack-unnamed", time.Now().UTC()) {
+	if err := readAs(auditorAPI("req-ag-auditor-3"), pack2ID); err == nil {
 		t.Fatal("the real bundle let an auditor read a pack the grant does not name")
 	}
 	// An auditor without ANY grant facts is denied fail-closed.
-	if d, err := pdp.Decide(ctx, policyapi.Request{
-		TenantID: tenant,
-		Subject:  policyapi.Subject{ID: "p-stranger", TenantID: tenant, Roles: []string{"auditor"}},
-		Action:   "evidence.pack.read",
-		Resource: policyapi.Resource{Type: "evidence_pack", ID: packID},
-	}); err != nil || d.Allowed {
-		t.Fatalf("an auditor without grant facts must be denied fail-closed, got %+v %v", d, err)
+	if err := readAs(auditapi.Context{TenantID: tenant, ActorID: "p-stranger", ActorRoles: []string{"auditor"}, RequestID: "req-ag-stranger-1"}, packID); err == nil {
+		t.Fatal("an auditor without grant facts must be denied fail-closed")
+	}
+	// Member principals are UNAFFECTED by the facts hook: the owner's read
+	// composes no grant facts and the role-table rule still answers it.
+	if err := readAs(ownerAuditCtx, packID); err != nil {
+		t.Fatalf("the owner's pack read must be unaffected by the auditor facts hook: %v", err)
 	}
 	// AC1: the auditor role carries NO repository read — the role table grants
 	// it nothing, and there is no grant shape that confers it.
@@ -213,14 +198,15 @@ func TestLiveAuditorGrantProof(t *testing.T) {
 	if err != nil || !ok || facts.State != identityapi.GrantRevoked {
 		t.Fatalf("facts after revocation = %+v ok=%v err=%v, want REVOKED", facts, ok, err)
 	}
-	if decideRead(packID, time.Now().UTC()) {
+	if err := readAs(auditorAPI("req-ag-auditor-4"), packID); err == nil {
 		t.Fatal("the real bundle let an auditor read under a REVOKED grant — AC7 immediacy is broken")
 	}
 
 	// 7. AC3: expiry takes effect without an operator action. A second grant
 	// with a very near expiry is ACTIVE one instant and EXPIRED the next —
 	// the facts surface recognizes it on its own clock, and the real bundle
-	// denies the read with no one acting.
+	// denies the read with no one acting. Both reads go end-to-end through
+	// the service's decide() path.
 	issue2 := identityapi.GrantIssue{
 		AuditorPrincipalID: auditor, RangeFrom: from, RangeTo: to,
 		PackIDs: []string{packID}, ExpiresAt: time.Now().UTC().Add(50 * time.Millisecond),
@@ -229,23 +215,24 @@ func TestLiveAuditorGrantProof(t *testing.T) {
 	if err != nil {
 		t.Fatalf("short-lived grant issuance refused: %v", err)
 	}
-	if !decideRead(packID, time.Now().UTC()) {
-		t.Fatal("the real bundle refused the still-ACTIVE short-lived grant")
+	if err := readAs(auditorAPI("req-ag-auditor-5"), packID); err != nil {
+		t.Fatalf("the real bundle refused the still-ACTIVE short-lived grant: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
 	facts2, ok2, err := grants.GrantFacts(tenancy.WithTenant(ctx, tenant), auditor, packID)
 	if err != nil || !ok2 || facts2.State != identityapi.GrantExpired {
 		t.Fatalf("facts past expiry = %+v ok=%v err=%v, want EXPIRED recognized without operator action", facts2, ok2, err)
 	}
-	if decideRead(packID, time.Now().UTC()) {
+	if err := readAs(auditorAPI("req-ag-auditor-6"), packID); err == nil {
 		t.Fatal("the real bundle let an auditor read under an EXPIRED grant — AC3 is broken")
 	}
 	_ = grant2
 
 	t.Logf("live proof: auditor grant lifecycle under the real governance bundle — "+
 		"member issuance refused, owner issuance witnessed into a live access-changes section "+
-		"(grant %s cited at seq %d), read allowed under fresh ACTIVE facts, denied unnamed/"+
-		"factless/revoked/expired and for every repository action",
+		"(grant %s cited at seq %d), end-to-end pack reads through decide() allowed under fresh "+
+		"ACTIVE facts, denied unnamed/factless/revoked/expired and for every repository action, "+
+		"member reads unaffected",
 		grant.GrantID, cited.ChainSeq)
 }
 

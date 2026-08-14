@@ -20,17 +20,25 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gitfrok/backend/modules/audit/api"
 	"github.com/gitfrok/backend/modules/audit/internal/domain"
+	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	platformaudit "github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/ids"
 	"github.com/gitfrok/backend/platform/tenancy"
 )
+
+// auditorRole is the principal kind SPEC-0033 reads evidence through: the
+// role table grants it NOTHING — its pack reads are decided solely on the
+// grant facts this service composes fresh into every evidence.pack.read
+// decision (governance/policies authz.rego, T-0027).
+const auditorRole = "auditor"
 
 // Service is the evidence pack assembler. Safe for concurrent use.
 type Service struct {
@@ -40,6 +48,11 @@ type Service struct {
 	now     func() time.Time
 	attested api.AttestedHistorySource
 	access   api.AccessChangesSource
+	// grants is Identity & Access's auditor grant surface (T-0027, SPEC-0033):
+	// the decision-time facts source an auditor principal's pack read composes
+	// fresh on every decision. nil means the plane has no grant surface, so
+	// every auditor pack read fails closed — member principals are unaffected.
+	grants identityapi.AuditorGrants
 
 	mu   sync.Mutex
 	packs map[string]*packEntry
@@ -63,12 +76,15 @@ type packEntry struct {
 }
 
 // New assembles the service on a decision point, an event bus and the trail
-// it reads and audits to. attested and access may be nil: a nil attested
-// source means the plane has no import surface, so an empty appendix is the
-// truthful answer; a nil access source degrades the access-changes section
-// into an explicit gap (SPEC-0031 AC10).
+// it reads and audits to. attested, access and grants may be nil: a nil
+// attested source means the plane has no import surface, so an empty appendix
+// is the truthful answer; a nil access source degrades the access-changes
+// section into an explicit gap (SPEC-0031 AC10); a nil grants source fails
+// every auditor pack read closed (SPEC-0033), which is the only honest answer
+// for a plane with no grant surface.
 func New(pdp policyapi.DecisionPoint, events bus.Bus, trail api.TrailStore,
-	attested api.AttestedHistorySource, access api.AccessChangesSource) *Service {
+	attested api.AttestedHistorySource, access api.AccessChangesSource,
+	grants identityapi.AuditorGrants) *Service {
 	return &Service{
 		pdp:      pdp,
 		events:   events,
@@ -76,6 +92,7 @@ func New(pdp policyapi.DecisionPoint, events bus.Bus, trail api.TrailStore,
 		now:      func() time.Time { return time.Now().UTC() },
 		attested: attested,
 		access:   access,
+		grants:   grants,
 		packs:    map[string]*packEntry{},
 		byIDKey:  map[string]string{},
 	}
@@ -282,7 +299,20 @@ func (s *Service) authorizedPack(ctx context.Context, c api.Context, packID stri
 // decide asks the PDP with the verified subject the context carries. A
 // non-nil error is a refusal, not an answer to inspect (ADR-0006): the zero
 // Decision denies, and this service maps both to the coarse shape.
+//
+// T-0027 / SPEC-0033 AC7: when an auditor principal asks to read a pack, the
+// decision is composed with the grant's validity facts read FRESH from
+// Identity & Access on this very request — never cached, never a caller
+// claim. A facts source that is absent or failing refuses the decision here,
+// fail-closed, before the PDP is ever asked.
 func (s *Service) decide(ctx context.Context, c api.Context, action string, res policyapi.Resource, pctx map[string]string) (policyapi.Decision, error) {
+	if action == platformaudit.ActionEvidencePackRead && res.Type == "evidence_pack" && hasRole(c.ActorRoles, auditorRole) { //arch:allow-inline-authz selects which facts the PDP decision is composed with; only the PDP decides access
+		composed, ok := s.composeGrantFacts(ctx, c, res.ID, pctx)
+		if !ok {
+			return policyapi.Decision{}, nil
+		}
+		pctx = composed
+	}
 	return s.pdp.Decide(ctx, policyapi.Request{
 		TenantID: c.TenantID,
 		Subject:  policyapi.Subject{ID: c.ActorID, TenantID: c.TenantID, Roles: c.ActorRoles},
@@ -290,6 +320,60 @@ func (s *Service) decide(ctx context.Context, c api.Context, action string, res 
 		Resource: res,
 		Context:  pctx,
 	})
+}
+
+// composeGrantFacts renders the decision-time grant facts the merged policy's
+// auditor grant rule consumes (governance/policies authz.rego, T-0027) into a
+// copy of the decision context: grant identity, state, tenant, expiry, range
+// bounds and named packs, plus the pack's own range and the instant the
+// decision was requested. The read goes to Identity & Access on every call —
+// a revoked or expired grant therefore fails this very decision by
+// construction, because its state arrives here fresh (SPEC-0033 AC7).
+//
+// ok is false only when the facts SOURCE is absent or failing — a fail-closed
+// refusal. A principal with no matching grant is distinct: absent facts still
+// travel to the PDP, so deny-by-default denies and the denial is recorded by
+// the policy surface like every other decision (SPEC-0033).
+func (s *Service) composeGrantFacts(ctx context.Context, c api.Context, packID string, pctx map[string]string) (map[string]string, bool) {
+	if s.grants == nil {
+		return nil, false
+	}
+	// The pack's own bounds, as this service derived them from its records —
+	// the policy compares them against the grant's range (SPEC-0033 AC6).
+	packFrom, packTo := pctx["range_from"], pctx["range_to"]
+	if packFrom == "" || packTo == "" {
+		return nil, false
+	}
+	facts, ok, err := s.grants.GrantFacts(tenancy.WithTenant(ctx, tenancy.ID(c.TenantID)), c.ActorID, packID)
+	if err != nil {
+		return nil, false
+	}
+	composed := make(map[string]string, len(pctx)+10)
+	for k, v := range pctx {
+		composed[k] = v
+	}
+	composed["decision_time"] = s.now().UTC().Format(time.RFC3339Nano)
+	composed["pack_range_from"] = packFrom
+	composed["pack_range_to"] = packTo
+	if ok {
+		composed["auditor_grant_id"] = facts.GrantID
+		composed["auditor_grant_state"] = string(facts.State)
+		composed["auditor_grant_tenant"] = facts.TenantID
+		composed["auditor_grant_expires_at"] = facts.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		composed["auditor_grant_range_from"] = facts.RangeFrom.UTC().Format(time.RFC3339Nano)
+		composed["auditor_grant_range_to"] = facts.RangeTo.UTC().Format(time.RFC3339Nano)
+		composed["auditor_grant_packs"] = strings.Join(facts.Packs, ",")
+	}
+	return composed, true
+}
+
+func hasRole(roles []string, want string) bool { //arch:allow-inline-authz input-shape selection for the PDP request, never an access decision
+	for _, r := range roles {
+		if r == want {
+			return true
+		}
+	}
+	return false
 }
 
 // assemble builds one pack's sections, updating the live status as each

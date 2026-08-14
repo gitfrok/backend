@@ -311,7 +311,10 @@ func main() {
 	} else {
 		grants = identity.NewAuditorGrantsInMemory(dp.policy, dp.bus, witness)
 	}
-	dp.evidence = audit.NewEvidenceService(dp.policy, dp.bus, trail, attested, audit.NewAccessChangesSource(grants))
+	// The grants surface is also the decision-time facts source for auditor
+	// pack reads (SPEC-0033 AC7): the evidence service reads grant validity
+	// fresh from it on every evidence.pack.read decision an auditor makes.
+	dp.evidence = audit.NewEvidenceService(dp.policy, dp.bus, trail, attested, audit.NewAccessChangesSource(grants), grants)
 
 	// OIDC login, when this environment has an identity provider. Built before the
 	// doors open so a misconfigured one fails the rollout rather than the first login.
