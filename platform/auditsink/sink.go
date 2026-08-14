@@ -13,6 +13,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	auditmodule "github.com/gitfrok/backend/modules/audit"
 	auditapi "github.com/gitfrok/backend/modules/audit/api"
@@ -74,6 +75,22 @@ func (s *Sink) dispatch(ctx context.Context, e bus.Event) error {
 		return s.appendCIScanReportIngested(ctx, ev)
 	case platformaudit.FindingsScanReportRejected:
 		return s.appendFindingsScanReportRejected(ctx, ev)
+	case platformaudit.AgentTokenIssued:
+		return s.appendAgentTokenIssued(ctx, ev)
+	case platformaudit.AgentTokenRevoked:
+		return s.appendAgentTokenRevoked(ctx, ev)
+	case platformaudit.AgentEnrolment:
+		return s.appendAgentEnrolment(ctx, ev)
+	case platformaudit.AgentCertificateIssued:
+		return s.appendAgentCertificateIssued(ctx, ev)
+	case platformaudit.AgentCertificateRotation:
+		return s.appendAgentCertificateRotation(ctx, ev)
+	case platformaudit.AgentDataPlaneRevoked:
+		return s.appendAgentDataPlaneRevoked(ctx, ev)
+	case platformaudit.AgentConnectionRefused:
+		return s.appendAgentConnectionRefused(ctx, ev)
+	case platformaudit.AgentIdentityOverrideRefused:
+		return s.appendAgentIdentityOverrideRefused(ctx, ev)
 	default:
 		return nil
 	}
@@ -220,6 +237,134 @@ func (s *Sink) appendFindingsScanReportRejected(ctx context.Context, e platforma
 			"job_id": e.JobID, "attempt_id": e.AttemptID,
 			"scanner_class": e.ScannerClass, "reason": e.Reason,
 		},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendAgentTokenIssued records an enrolment token's issuance (T-0030, SPEC-0038). The
+// secret never enters the record — the token is named by its ID only (AC2).
+func (s *Sink) appendAgentTokenIssued(ctx context.Context, e platformaudit.AgentTokenIssued) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID:   e.TenantID,
+		Action:     auditapi.Action(platformaudit.ActionAgentTokenIssued),
+		ActorID:    e.ActorID,
+		Resource:   "enrolment_token/" + e.TokenID,
+		Outcome:    auditapi.OutcomeAllowed,
+		Detail:     map[string]string{"expires_at": e.ExpiresAt.UTC().Format(time.RFC3339Nano)},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendAgentTokenRevoked records an operator revoking an unspent enrolment token.
+func (s *Sink) appendAgentTokenRevoked(ctx context.Context, e platformaudit.AgentTokenRevoked) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID:   e.TenantID,
+		Action:     auditapi.Action(platformaudit.ActionAgentTokenRevoked),
+		ActorID:    e.ActorID,
+		Resource:   "enrolment_token/" + e.TokenID,
+		Outcome:    auditapi.OutcomeAllowed,
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendAgentEnrolment records one enrolment attempt (SPEC-0038 AC7): the allowed act names
+// the minted data plane, the refused one the coarse reason — exactly the shape the presenter
+// saw on the wire, nothing more (SPEC-0001).
+func (s *Sink) appendAgentEnrolment(ctx context.Context, e platformaudit.AgentEnrolment) error {
+	detail := map[string]string{}
+	if e.TokenID != "" {
+		detail["token_id"] = e.TokenID
+	}
+	if e.Reason != "" {
+		detail["reason"] = e.Reason
+	}
+	resource := "tenant/" + e.TenantID
+	if e.DataPlaneID != "" {
+		resource = "data_plane/" + e.DataPlaneID
+	}
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID:   e.TenantID,
+		Action:     auditapi.Action(platformaudit.ActionAgentEnrolment),
+		Resource:   resource,
+		Outcome:    auditapi.Outcome(e.Outcome),
+		Detail:     detail,
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendAgentCertificateIssued records the first certificate a data plane received on
+// enrolment. ID and expiry only — the credential itself stays on the channel (AC2).
+func (s *Sink) appendAgentCertificateIssued(ctx context.Context, e platformaudit.AgentCertificateIssued) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID: e.TenantID,
+		Action:   auditapi.Action(platformaudit.ActionAgentCertificateIssued),
+		Resource: "data_plane/" + e.DataPlaneID,
+		Outcome:  auditapi.OutcomeAllowed,
+		Detail: map[string]string{
+			"certificate_id": e.CertificateID,
+			"expires_at":     e.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendAgentCertificateRotation records one rotation act over the established stream
+// (SPEC-0038 AC4): applied rotations and failed ones alike, one record per act.
+func (s *Sink) appendAgentCertificateRotation(ctx context.Context, e platformaudit.AgentCertificateRotation) error {
+	detail := map[string]string{"certificate_id": e.CertificateID}
+	if e.Reason != "" {
+		detail["reason"] = e.Reason
+	}
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID:   e.TenantID,
+		Action:     auditapi.Action(platformaudit.ActionAgentCertificateRotation),
+		Resource:   "data_plane/" + e.DataPlaneID,
+		Outcome:    auditapi.Outcome(e.Outcome),
+		Detail:     detail,
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendAgentDataPlaneRevoked records the control-plane act of revoking a data plane's
+// identity (ADR-0060 §5).
+func (s *Sink) appendAgentDataPlaneRevoked(ctx context.Context, e platformaudit.AgentDataPlaneRevoked) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID:   e.TenantID,
+		Action:     auditapi.Action(platformaudit.ActionAgentDataPlaneRevoked),
+		ActorID:    e.ActorID,
+		Resource:   "data_plane/" + e.DataPlaneID,
+		Outcome:    auditapi.OutcomeAllowed,
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendAgentConnectionRefused records a refused connection (SPEC-0038 AC7 names refused
+// connections explicitly). Tenant and data plane are present when the credential resolved
+// far enough to name them; the reason stays coarse.
+func (s *Sink) appendAgentConnectionRefused(ctx context.Context, e platformaudit.AgentConnectionRefused) error {
+	resource := "tenant/" + e.TenantID
+	if e.DataPlaneID != "" {
+		resource = "data_plane/" + e.DataPlaneID
+	}
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID:   e.TenantID,
+		Action:     auditapi.Action(platformaudit.ActionAgentConnectionRefused),
+		Resource:   resource,
+		Outcome:    auditapi.OutcomeDenied,
+		Detail:     map[string]string{"reason": e.Reason},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendAgentIdentityOverrideRefused records a payload that claimed another tenant's
+// identity on a certified stream (SPEC-0038 AC3): ignored at the time, audited here.
+func (s *Sink) appendAgentIdentityOverrideRefused(ctx context.Context, e platformaudit.AgentIdentityOverrideRefused) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID:   e.TenantID,
+		Action:     auditapi.Action(platformaudit.ActionAgentIdentityOverrideRefused),
+		Resource:   "data_plane/" + e.DataPlaneID,
+		Outcome:    auditapi.OutcomeDenied,
+		Detail:     map[string]string{"claimed_tenant": e.ClaimedTenant, "message_id": e.MessageID},
 		OccurredAt: e.OccurredAt,
 	})
 }
