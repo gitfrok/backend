@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
+	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/security/api"
 	"github.com/gitfrok/backend/modules/security/internal/domain"
-	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	platformaudit "github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/ids"
@@ -372,9 +372,9 @@ func (s *Service) SetTriage(ctx context.Context, req api.TriageTransition) (api.
 		Action:   "findings.triage",
 		Resource: policyapi.Resource{Type: "finding", ID: req.FindingID},
 		Context: map[string]string{
-			"repository":         f.RepositoryID,
-			"scanner_class":      string(f.ScannerClass),
-			"severity":           string(f.Severity),
+			"repository":           f.RepositoryID,
+			"scanner_class":        string(f.ScannerClass),
+			"severity":             string(f.Severity),
 			"current_triage_state": string(current.State),
 		},
 	})

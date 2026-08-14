@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/security/api"
 	"github.com/gitfrok/backend/modules/security/internal/app"
-	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	platformaudit "github.com/gitfrok/backend/platform/audit"
 	"github.com/gitfrok/backend/platform/bus"
 )
@@ -34,15 +34,15 @@ func (f *fakePDP) Decide(_ context.Context, req policyapi.Request) (policyapi.De
 // harness wires the service over the memory store and a real in-process bus
 // with collectors for every event and the audit record.
 type harness struct {
-	svc      *app.Service
-	pdp      *fakePDP
-	store    *app.MemoryStore
-	bus      bus.Bus
-	opened   []api.FindingOpened
-	resolved []api.FindingResolved
-	scans    []api.ScanIngested
+	svc        *app.Service
+	pdp        *fakePDP
+	store      *app.MemoryStore
+	bus        bus.Bus
+	opened     []api.FindingOpened
+	resolved   []api.FindingResolved
+	scans      []api.ScanIngested
 	attributed []api.FindingsAttributed
-	audits   []platformaudit.FindingsScanIngested
+	audits     []platformaudit.FindingsScanIngested
 }
 
 func newHarness(allow bool) *harness {
@@ -105,9 +105,9 @@ func sastScan(startOffset time.Duration) api.Scan {
 
 func rawFinding(rule, path, content string) api.RawFinding {
 	return api.RawFinding{
-		RuleID:   rule,
-		Severity: api.SeverityHigh,
-		Location: api.Location{ArtifactPath: path, EnclosingContent: content},
+		RuleID:              rule,
+		Severity:            api.SeverityHigh,
+		Location:            api.Location{ArtifactPath: path, EnclosingContent: content},
 		Provenance:          []byte(`{"native":"payload"}`),
 		ProvenanceMediaType: "application/json",
 	}

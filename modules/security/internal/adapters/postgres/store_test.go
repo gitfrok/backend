@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gitfrok/backend/modules/security/api"
-	"github.com/gitfrok/backend/modules/security/internal/app"
 	secpg "github.com/gitfrok/backend/modules/security/internal/adapters/postgres"
+	"github.com/gitfrok/backend/modules/security/internal/app"
 	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/ids"
 )

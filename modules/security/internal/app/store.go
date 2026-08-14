@@ -30,7 +30,7 @@ type IngestParams struct {
 	// Revision is the opaque revision the scan ran against, recorded so reads
 	// can name what was scanned. Identity is invariant to it (SPEC-0024).
 	Revision string
-	Scan       api.Scan
+	Scan     api.Scan
 	// ScanID is the server-derived opaque identity of the scan record. It is
 	// a deterministic function of the scan descriptor, so a redelivered chunk
 	// of the same scan lands on the same record.

@@ -252,7 +252,7 @@ func toFindingProto(f api.Finding) *securityv1.Finding {
 			Component:        f.Location.Component,
 			ComponentVersion: f.Location.ComponentVersion,
 		},
-		Lifecycle: toLifecycleProto(f.Lifecycle),
+		Lifecycle:       toLifecycleProto(f.Lifecycle),
 		FirstSeenScanId: f.FirstSeenScanID, LastSeenScanId: f.LastSeenScanID,
 		Provenance: f.Provenance, ProvenanceMediaType: f.ProvenanceMediaType,
 	}
@@ -379,14 +379,14 @@ func toMergeRequestFindingViewProto(v api.MergeRequestFindingView) *securityv1.M
 
 func toAttributionSummaryProto(s api.AttributionSummary) *securityv1.AttributionSummary {
 	return &securityv1.AttributionSummary{
-		Status:              toAttributionProto(s.Status),
-		UnavailableReason:   toAttributionReasonProto(s.UnavailableReason),
-		HeadRevision:        s.HeadRevision,
-		MergeBaseRevision:   s.MergeBaseRevision,
-		Stale:               s.Stale,
-		AttributedLow:       s.AttributedLow,
-		AttributedMedium:    s.AttributedMedium,
-		AttributedHigh:      s.AttributedHigh,
-		AttributedCritical:  s.AttributedCritical,
+		Status:             toAttributionProto(s.Status),
+		UnavailableReason:  toAttributionReasonProto(s.UnavailableReason),
+		HeadRevision:       s.HeadRevision,
+		MergeBaseRevision:  s.MergeBaseRevision,
+		Stale:              s.Stale,
+		AttributedLow:      s.AttributedLow,
+		AttributedMedium:   s.AttributedMedium,
+		AttributedHigh:     s.AttributedHigh,
+		AttributedCritical: s.AttributedCritical,
 	}
 }

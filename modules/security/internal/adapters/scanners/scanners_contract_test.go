@@ -121,7 +121,7 @@ func TestGitleaksNormalizes(t *testing.T) {
 		"6844fe3349774789fafe7496a430690c004af00e", // commit
 		"Jane Doe", "jane@example.com", // author/email
 		"ghp_R8qXv2LmPzWnTbYcDfGhJkQs5173", // secret
-		"4.9375", // entropy
+		"4.9375",                           // entropy
 	)
 	assertProvenance(t, f, "RuleID")
 }

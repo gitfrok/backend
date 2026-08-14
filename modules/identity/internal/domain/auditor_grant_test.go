@@ -39,10 +39,10 @@ func TestValidateIssueRejectsMalformedShapes(t *testing.T) {
 		"inverted range": func(r *api.GrantIssue) {
 			r.RangeFrom, r.RangeTo = r.RangeTo, r.RangeFrom.Add(time.Hour)
 		},
-		"no packs":     func(r *api.GrantIssue) { r.PackIDs = nil },
-		"empty pack":   func(r *api.GrantIssue) { r.PackIDs = []string{"pack-1", ""} },
-		"zero expiry":  func(r *api.GrantIssue) { r.ExpiresAt = time.Time{} },
-		"past expiry":  func(r *api.GrantIssue) { r.ExpiresAt = now.Add(-time.Second) },
+		"no packs":      func(r *api.GrantIssue) { r.PackIDs = nil },
+		"empty pack":    func(r *api.GrantIssue) { r.PackIDs = []string{"pack-1", ""} },
+		"zero expiry":   func(r *api.GrantIssue) { r.ExpiresAt = time.Time{} },
+		"past expiry":   func(r *api.GrantIssue) { r.ExpiresAt = now.Add(-time.Second) },
 		"expiry at now": func(r *api.GrantIssue) { r.ExpiresAt = now },
 	} {
 		t.Run(name, func(t *testing.T) {

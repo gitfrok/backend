@@ -7,10 +7,10 @@ import (
 
 	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
 	"github.com/gitfrok/backend/modules/identity/api"
-	identityapp "github.com/gitfrok/backend/modules/identity/internal/app"
 	identitygrpc "github.com/gitfrok/backend/modules/identity/internal/adapters/grpc"
 	identitymemory "github.com/gitfrok/backend/modules/identity/internal/adapters/memory"
 	identitypg "github.com/gitfrok/backend/modules/identity/internal/adapters/postgres"
+	identityapp "github.com/gitfrok/backend/modules/identity/internal/app"
 	"github.com/gitfrok/backend/modules/identity/internal/domain"
 	"github.com/gitfrok/backend/modules/identity/internal/oidc"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"

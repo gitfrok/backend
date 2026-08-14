@@ -17,10 +17,10 @@ import (
 // row-level boundary the Postgres store enforces with RLS.
 type GrantStore struct {
 	mu          sync.Mutex
-	grants      map[string]storedGrant   // keyed by grant ID
-	byRequest   map[string]string        // "tenant|requestID" -> grant ID
-	transitions []api.GrantTransition    // in witness order
-	transitionK map[string]struct{}      // "tenant|grant|kind" seen
+	grants      map[string]storedGrant // keyed by grant ID
+	byRequest   map[string]string      // "tenant|requestID" -> grant ID
+	transitions []api.GrantTransition  // in witness order
+	transitionK map[string]struct{}    // "tenant|grant|kind" seen
 }
 
 type storedGrant struct {

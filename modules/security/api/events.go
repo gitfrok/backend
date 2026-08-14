@@ -141,17 +141,17 @@ func (e FindingTriaged) Tenant() string { return e.TenantID }
 // here it carries opaque identifiers and severity counts — never finding
 // identities, provenance bytes, source code, or a policy outcome.
 type FindingsAttributed struct {
-	EventID           string
-	TenantID          string
-	RepositoryID      string
-	MergeRequestID    string
-	HeadRevision      string
-	BaseRevision      string
-	AttributedLow     int64
-	AttributedMedium  int64
-	AttributedHigh    int64
+	EventID            string
+	TenantID           string
+	RepositoryID       string
+	MergeRequestID     string
+	HeadRevision       string
+	BaseRevision       string
+	AttributedLow      int64
+	AttributedMedium   int64
+	AttributedHigh     int64
 	AttributedCritical int64
-	OccurredAt        time.Time
+	OccurredAt         time.Time
 }
 
 // EventName is the routing key, matching the contracts/events message full name.

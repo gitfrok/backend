@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
+	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/security/api"
 	"github.com/gitfrok/backend/modules/security/internal/adapters/scanners"
 	"github.com/gitfrok/backend/modules/security/internal/app"
-	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
 )
 

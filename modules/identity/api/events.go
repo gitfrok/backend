@@ -70,7 +70,7 @@ type AuditorGrantRevoked struct {
 	// PDP-authorized.
 	ActorID string
 	// GrantedBy is the admin who originally issued the grant.
-	GrantedBy string
+	GrantedBy          string
 	AuditorPrincipalID string
 	// DecisionID is the PDP decision that authorized the revocation.
 	DecisionID string
@@ -88,10 +88,10 @@ func (e AuditorGrantRevoked) Tenant() string  { return e.TenantID }
 // under the grant is denied by construction: expiry arrives as a
 // decision-time fact.
 type AuditorGrantExpired struct {
-	EventID  string
-	TenantID string
-	GrantID  string
-	GrantedBy string
+	EventID            string
+	TenantID           string
+	GrantID            string
+	GrantedBy          string
 	AuditorPrincipalID string
 	OccurredAt         time.Time
 }

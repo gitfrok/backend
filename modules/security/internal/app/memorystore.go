@@ -65,9 +65,9 @@ type findingRecord struct {
 // resolved-not-deleted lifecycle (SPEC-0024 AC9, SPEC-0025), and the
 // append-only, version-guarded triage history (SPEC-0026 AC5).
 type MemoryStore struct {
-	mu     sync.Mutex
-	scans  map[string]*scanRecord
-	finds  map[string]map[string]*findingRecord // tenant -> finding ID -> record
+	mu    sync.Mutex
+	scans map[string]*scanRecord
+	finds map[string]map[string]*findingRecord // tenant -> finding ID -> record
 	// byIdentity indexes findings by their SPEC-0024 identity so a re-report
 	// lands on the same record: the dedup the Postgres adapter gets from
 	// UNIQUE (tenant_id, repository_id, identity).
@@ -219,18 +219,18 @@ func (m *MemoryStore) applyLifecycle(rec *scanRecord, final IngestParams) ([]api
 		}
 		findingID := m.nextID()
 		f := api.Finding{
-			ID:           findingID,
-			TenantID:     final.TenantID,
-			RepositoryID: final.RepositoryID,
-			ScannerClass: final.Scan.ScannerClass,
-			ToolName:     final.Scan.ToolName,
-			ToolVersion:  final.Scan.ToolVersion,
-			RuleID:       pf.Raw.RuleID,
-			Severity:     pf.Raw.Severity,
-			Location:     pf.Raw.Location,
-			Lifecycle:    api.LifecycleOpen,
-			FirstSeenScanID: final.ScanID,
-			LastSeenScanID:  final.ScanID,
+			ID:                  findingID,
+			TenantID:            final.TenantID,
+			RepositoryID:        final.RepositoryID,
+			ScannerClass:        final.Scan.ScannerClass,
+			ToolName:            final.Scan.ToolName,
+			ToolVersion:         final.Scan.ToolVersion,
+			RuleID:              pf.Raw.RuleID,
+			Severity:            pf.Raw.Severity,
+			Location:            pf.Raw.Location,
+			Lifecycle:           api.LifecycleOpen,
+			FirstSeenScanID:     final.ScanID,
+			LastSeenScanID:      final.ScanID,
 			Provenance:          pf.Raw.Provenance,
 			ProvenanceMediaType: pf.Raw.ProvenanceMediaType,
 		}

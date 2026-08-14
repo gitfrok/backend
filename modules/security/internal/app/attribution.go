@@ -59,9 +59,9 @@ type attributionRecord struct {
 	medium int64
 	high   int64
 	// critical counts ATTRIBUTED findings of critical severity.
-	critical  int64
-	emitted   bool
-	computed  time.Time
+	critical int64
+	emitted  bool
+	computed time.Time
 }
 
 // attributionOutcome is what one comparison attempt produced. record is nil

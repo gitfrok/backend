@@ -285,7 +285,7 @@ type AttestedProvenance struct {
 	// principal, never resolvable as one (ADR-0029 §4).
 	ForeignHandle string
 	// DeclaredAt is the source-asserted time, display-only.
-	DeclaredAt time.Time
+	DeclaredAt    time.Time
 	PayloadDigest string
 }
 
@@ -298,7 +298,7 @@ type AttestedRecord struct {
 	// "approval", "thread" — a label for the reader, never a control claim.
 	RecordKind string
 	// Payload is the embedded rendering of the imported record.
-	Payload []byte
+	Payload    []byte
 	Provenance AttestedProvenance
 }
 
@@ -306,15 +306,15 @@ type AttestedRecord struct {
 // pack (events/audit/v1.HistoryImported, ADR-0029 §3). Field names mirror the
 // event's; the event itself is what the appendix's records reconcile against.
 type HistoryImportedRef struct {
-	EventID         string
-	ActorID         string
-	RepositoryID    string
-	ImportID        string
-	SourceSystem    string
-	SourceInstance  string
-	RecordCounts    map[string]int64
-	ManifestDigest  string
-	OccurredAt      time.Time
+	EventID        string
+	ActorID        string
+	RepositoryID   string
+	ImportID       string
+	SourceSystem   string
+	SourceInstance string
+	RecordCounts   map[string]int64
+	ManifestDigest string
+	OccurredAt     time.Time
 }
 
 // AttestedGroup is one import's contribution to the appendix: the admitting
@@ -389,11 +389,11 @@ type PackRequest struct {
 
 // PackStatus is one pack's live assembly view (SPEC-0031 non-functional).
 type PackStatus struct {
-	State          PackState
-	FailureReason  string
-	RangeFrom      time.Time
-	RangeTo        time.Time
-	RepositoryID   string
+	State         PackState
+	FailureReason string
+	RangeFrom     time.Time
+	RangeTo       time.Time
+	RepositoryID  string
 	// SectionCounts and SectionGaps are keyed per section, in assembly order;
 	// counts are live while assembly runs and final once READY.
 	SectionCounts []SectionStatus
@@ -404,9 +404,9 @@ type PackStatus struct {
 
 // SectionStatus is one section's observable assembly state.
 type SectionStatus struct {
-	Type         SectionType
-	RecordCount  int64
-	Gaps         []SectionGap
+	Type        SectionType
+	RecordCount int64
+	Gaps        []SectionGap
 }
 
 // ErrInvalidPackRequest reports a request that is malformed: an empty context,

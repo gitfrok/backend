@@ -276,15 +276,15 @@ func appendixOf(a api.Appendix) *auditv1.AttestedAppendix {
 	for _, g := range a.Groups {
 		group := &auditv1.AttestedImportGroup{
 			HistoryImported: &auditv1.HistoryImportedReference{
-				EventId:         g.Import.EventID,
-				ActorId:         g.Import.ActorID,
-				RepositoryId:    g.Import.RepositoryID,
-				ImportId:        g.Import.ImportID,
-				SourceSystem:    g.Import.SourceSystem,
-				SourceInstance:  g.Import.SourceInstance,
-				RecordCounts:    g.Import.RecordCounts,
-				ManifestDigest:  g.Import.ManifestDigest,
-				OccurredAt:      timestamppb.New(g.Import.OccurredAt),
+				EventId:        g.Import.EventID,
+				ActorId:        g.Import.ActorID,
+				RepositoryId:   g.Import.RepositoryID,
+				ImportId:       g.Import.ImportID,
+				SourceSystem:   g.Import.SourceSystem,
+				SourceInstance: g.Import.SourceInstance,
+				RecordCounts:   g.Import.RecordCounts,
+				ManifestDigest: g.Import.ManifestDigest,
+				OccurredAt:     timestamppb.New(g.Import.OccurredAt),
 			},
 		}
 		for _, r := range g.Records {

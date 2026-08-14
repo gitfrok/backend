@@ -42,10 +42,10 @@ const auditorRole = "auditor"
 
 // Service is the evidence pack assembler. Safe for concurrent use.
 type Service struct {
-	pdp     policyapi.DecisionPoint
-	events  bus.Bus
-	trail   api.TrailStore
-	now     func() time.Time
+	pdp      policyapi.DecisionPoint
+	events   bus.Bus
+	trail    api.TrailStore
+	now      func() time.Time
 	attested api.AttestedHistorySource
 	access   api.AccessChangesSource
 	// grants is Identity & Access's auditor grant surface (T-0027, SPEC-0033):
@@ -54,7 +54,7 @@ type Service struct {
 	// every auditor pack read fails closed — member principals are unaffected.
 	grants identityapi.AuditorGrants
 
-	mu   sync.Mutex
+	mu    sync.Mutex
 	packs map[string]*packEntry
 	// idempotency keys (tenant|requestID|range|scope) onto pack IDs: replaying
 	// a request returns the same pack and creates no second pack or audit
@@ -216,11 +216,11 @@ func (s *Service) PackStatus(ctx context.Context, c api.Context, packID string) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := api.PackStatus{
-		State:        entry.state,
+		State:         entry.state,
 		FailureReason: entry.failureReason,
-		RangeFrom:    entry.pack.RangeFrom,
-		RangeTo:      entry.pack.RangeTo,
-		RepositoryID: entry.pack.RepositoryID,
+		RangeFrom:     entry.pack.RangeFrom,
+		RangeTo:       entry.pack.RangeTo,
+		RepositoryID:  entry.pack.RepositoryID,
 	}
 	for _, section := range api.AllSectionTypes {
 		ss := api.SectionStatus{Type: section, RecordCount: entry.liveCounts[section], Gaps: entry.liveGaps[section]}

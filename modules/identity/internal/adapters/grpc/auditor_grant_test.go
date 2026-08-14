@@ -162,10 +162,10 @@ func sameCoarse(err error) bool {
 // the surface does not report.
 func TestGrantProtoRendersEveryState(t *testing.T) {
 	for state, want := range map[api.GrantState]identityv1.AuditorGrantState{
-		api.GrantActive:     identityv1.AuditorGrantState_AUDITOR_GRANT_STATE_ACTIVE,
-		api.GrantRevoked:    identityv1.AuditorGrantState_AUDITOR_GRANT_STATE_REVOKED,
-		api.GrantExpired:    identityv1.AuditorGrantState_AUDITOR_GRANT_STATE_EXPIRED,
-		api.GrantState(""):  identityv1.AuditorGrantState_AUDITOR_GRANT_STATE_UNSPECIFIED,
+		api.GrantActive:    identityv1.AuditorGrantState_AUDITOR_GRANT_STATE_ACTIVE,
+		api.GrantRevoked:   identityv1.AuditorGrantState_AUDITOR_GRANT_STATE_REVOKED,
+		api.GrantExpired:   identityv1.AuditorGrantState_AUDITOR_GRANT_STATE_EXPIRED,
+		api.GrantState(""): identityv1.AuditorGrantState_AUDITOR_GRANT_STATE_UNSPECIFIED,
 	} {
 		g := sampleGrant()
 		g.State = state

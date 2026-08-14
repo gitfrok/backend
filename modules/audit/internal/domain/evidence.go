@@ -34,14 +34,14 @@ const policyModeEnforced = "ENFORCED"
 // Detail keys the classifier reads from trail records. These are the keys
 // auditsink writes; they are server-produced facts, never caller claims.
 const (
-	detailPolicyMode        = "policy_mode"
-	detailDecisionID        = "decision_id"
-	detailPolicyRevision    = "policy_revision"
-	detailInputDigest       = "input_digest"
-	detailScanID            = "scan_id"
-	detailProtectionRuleID  = "protection_rule_id"
-	detailReliedUponTriage  = "relied_upon_triage_ids"
-	detailRepositoryID      = "repository_id"
+	detailPolicyMode       = "policy_mode"
+	detailDecisionID       = "decision_id"
+	detailPolicyRevision   = "policy_revision"
+	detailInputDigest      = "input_digest"
+	detailScanID           = "scan_id"
+	detailProtectionRuleID = "protection_rule_id"
+	detailReliedUponTriage = "relied_upon_triage_ids"
+	detailRepositoryID     = "repository_id"
 )
 
 // Classify maps one witnessed trail record to the control-section record it is
