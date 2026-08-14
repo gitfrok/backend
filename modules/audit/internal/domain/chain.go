@@ -11,7 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -58,7 +58,7 @@ func (f Fields) Canonical() string {
 	for k := range f.Detail {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys) // Go map order is randomised; unsorted keys would make the hash unstable
+	slices.Sort(keys) // Go map order is randomised; unsorted keys would make the hash unstable
 	for _, k := range keys {
 		write("detail."+k, f.Detail[k])
 	}

@@ -11,7 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -106,8 +106,8 @@ func Classify(r api.Record) (api.SectionRecord, api.SectionType, bool) {
 // resource ("merge_request/mr-1" -> "mr-1"). A resource without a prefix is
 // returned whole.
 func resourceID(resource string) string {
-	if i := strings.IndexByte(resource, '/'); i >= 0 {
-		return resource[i+1:]
+	if _, after, ok := strings.Cut(resource, "/"); ok {
+		return after
 	}
 	return resource
 }
@@ -237,7 +237,7 @@ func writeCanonicalRecord(h interface{ Write([]byte) (int, error) }, r api.Secti
 		write("scan.merge_request_id", r.ScanGate.MergeRequestID)
 		write("scan.scan_id", r.ScanGate.ScanID)
 		triage := append([]string(nil), r.ScanGate.ReliedUponTriageIDs...)
-		sort.Strings(triage)
+		slices.Sort(triage)
 		write("scan.relied_upon_triage_ids", strings.Join(triage, ","))
 	case r.AccessChange != nil:
 		write("detail", "access_change")

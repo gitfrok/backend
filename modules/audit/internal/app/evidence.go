@@ -20,6 +20,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -447,12 +448,7 @@ func (s *Service) composeGrantFacts(ctx context.Context, c api.Context, packID s
 }
 
 func hasRole(roles []string, want string) bool { //arch:allow-inline-authz input-shape selection for the PDP request, never an access decision
-	for _, r := range roles {
-		if r == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(roles, want)
 }
 
 // assemble builds one pack's sections, updating the live status as each
@@ -470,6 +466,11 @@ func (s *Service) assemble(packID string) {
 	pack := entry.pack
 	s.mu.Unlock()
 
+	// Detached context, deliberately: assembly runs on its own goroutine after the request that
+	// started it has returned, so there is no caller context to inherit. The tenant scope is
+	// reconstructed from the pack itself — exactly the pack's tenant, nothing broader — so every
+	// tenant-scoped read below stays under RLS for that tenant (SPEC-0036: comment-only
+	// clarification, no behavior change).
 	ctx := tenancy.WithTenant(context.Background(), tenancy.ID(pack.TenantID))
 	sections, appendix, appendixRecords, failReason := s.assembleSections(ctx, entry, pack)
 
