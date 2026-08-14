@@ -69,6 +69,25 @@ func New(refs RefMover, pdp policyapi.DecisionPoint, events bus.Bus) api.MergeRe
 	return service
 }
 
+// AttachFindingsFacts wires the findings-facts provider the security merge
+// gate assembles its input from (T-0025, SPEC-0029, SPEC-0030). It is a
+// post-construction step because the provider exists only once the
+// composition root has composed Security/Findings alongside Code Review,
+// while this context is composed before it; a merge surface with no provider
+// leaves the security gate disengaged rather than engaged on nothing. It
+// reports false when the surface has no merge gate to attach to.
+func AttachFindingsFacts(requests api.MergeRequests, provider api.FindingsFactsProvider) bool {
+	type factsSink interface {
+		SetFindingsFacts(api.FindingsFactsProvider)
+	}
+	sink, ok := requests.(factsSink)
+	if !ok {
+		return false
+	}
+	sink.SetFindingsFacts(provider)
+	return true
+}
+
 // NewGRPCServer wraps the in-process merge-request surface in its gRPC adapter,
 // ready to register on the plane binary's gRPC server.
 func NewGRPCServer(requests api.MergeRequests) *codereviewgrpc.Server {

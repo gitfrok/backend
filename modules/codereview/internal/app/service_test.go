@@ -755,3 +755,231 @@ func TestTargetRevisionComesFromRepositoryGitNotTheCaller(t *testing.T) {
 		t.Fatalf("target revision = %q, want the revision announced for that ref", other.TargetRevision)
 	}
 }
+
+// --- T-0025 / SPEC-0029 / SPEC-0030: the security merge gate's findings facts ---
+
+// fakeFactsProvider assembles the findings facts from test state, exactly the
+// way Security/Findings' assembler would: the merge service never knows which.
+type fakeFactsProvider struct {
+	facts api.FindingsGateFacts
+	err   error
+	calls int
+	last  struct{ tenant, repository, actor, mergeRequest string }
+}
+
+func (f *fakeFactsProvider) FindingsFacts(_ context.Context, tenantID, repositoryID, actorID, mergeRequestID string) (api.FindingsGateFacts, error) {
+	f.calls++
+	f.last.tenant, f.last.repository = tenantID, repositoryID
+	f.last.actor, f.last.mergeRequest = actorID, mergeRequestID
+	return f.facts, f.err
+}
+
+// protectedWithApproval sets the one-approval rule, opens a merge request, and
+// records one first-party approval at the current head — the base state every
+// findings-gate test composes its facts onto.
+func protectedWithApproval(t *testing.T, service *Service) api.MergeRequest {
+	t.Helper()
+	ctx := t.Context()
+	if _, err := service.SetProtection(ctx, api.ProtectionRequest{
+		Context:   principal("tenant-a", "admin-a", "request-protect", "owner"),
+		TargetRef: "refs/heads/main", RequiredApprovals: 1,
+	}); err != nil {
+		t.Fatalf("SetProtection: %v", err)
+	}
+	mr := openOne(t, service, "request-open")
+	reviewed, err := service.Review(ctx, api.ReviewRequest{
+		Context:        principal("tenant-a", "actor-b", "request-review", "member"),
+		MergeRequestID: mr.ID, Disposition: api.DispositionApprove,
+		HeadRevision: mr.HeadRevision, ExpectedVersion: mr.Version,
+	})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	return reviewed
+}
+
+// The security gate COMPOSES with the approval gate (SPEC-0029 AC5): one
+// decision carries both fact sets, and the findings facts ride the reviewed
+// context-key vocabulary, never a caller-supplied value.
+func TestMergeGateComposesFindingsFactsWithApprovalFacts(t *testing.T) {
+	service, pdp, _, _ := newService(t)
+	provider := &fakeFactsProvider{facts: api.FindingsGateFacts{
+		Low: 2, Medium: 0, High: 1, Critical: 0,
+		HighestAttributedSeverity: "HIGH",
+	}}
+	service.SetFindingsFacts(provider)
+	mr := protectedWithApproval(t, service)
+
+	if _, err := service.Merge(t.Context(), api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
+	}); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("facts assembled %d times, want exactly one per merge decision", provider.calls)
+	}
+	if provider.last.tenant != "tenant-a" || provider.last.repository != "repo-a" ||
+		provider.last.actor != "actor-a" || provider.last.mergeRequest != mr.ID {
+		t.Fatalf("facts assembled under %+v, want the merge's own identity", provider.last)
+	}
+	req, ok := pdp.lastFor("merge_request.merge")
+	if !ok {
+		t.Fatal("no merge decision was asked")
+	}
+	// The SPEC-0019 facts stand, unchanged.
+	if req.Context["valid_approvals"] != "1" || req.Context["required_approvals"] != "1" {
+		t.Fatalf("approval facts = %v, want the composed SPEC-0019 facts", req.Context)
+	}
+	// The findings facts join them under the reviewed vocabulary.
+	want := map[string]string{
+		api.ContextKeyFindingsGate:            "true",
+		api.ContextKeyFindingsHighestSeverity: "HIGH",
+		api.ContextKeyFindingsLow:             "2",
+		api.ContextKeyFindingsMedium:          "0",
+		api.ContextKeyFindingsHigh:            "1",
+		api.ContextKeyFindingsCritical:        "0",
+	}
+	for key, value := range want {
+		if req.Context[key] != value {
+			t.Fatalf("context[%q] = %q, want %q (full context %v)", key, req.Context[key], value, req.Context)
+		}
+	}
+	if _, present := req.Context[api.ContextKeyReliedUponTriageIDs]; present {
+		t.Fatalf("no exemption was applied, yet relied-upon triage was presented: %v", req.Context)
+	}
+}
+
+// An exemption the facts carry is presented as the relied-upon triage IDs, so
+// the decision records WHICH triage records it relied on (SPEC-0029 AC4).
+func TestMergeGatePresentsReliedUponTriageIDs(t *testing.T) {
+	service, pdp, _, _ := newService(t)
+	service.SetFindingsFacts(&fakeFactsProvider{facts: api.FindingsGateFacts{
+		High: 1, HighestAttributedSeverity: "HIGH",
+		ReliedUponTriageIDs: []string{"triage-2", "triage-1"},
+	}})
+	mr := protectedWithApproval(t, service)
+
+	if _, err := service.Merge(t.Context(), api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
+	}); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	req, _ := pdp.lastFor("merge_request.merge")
+	if got := req.Context[api.ContextKeyReliedUponTriageIDs]; got != "triage-2,triage-1" {
+		t.Fatalf("relied_upon_triage_ids = %q, want the facts' IDs in their assembly order", got)
+	}
+}
+
+// A fact that cannot be assembled FAILS CLOSED (SPEC-0029 AC9): the gate is
+// engaged with no facts — the shape the reviewed policy denies — never a
+// fail-open default and never a disengaged gate.
+func TestMergeGateFailsClosedWhenFactsDoNotAssemble(t *testing.T) {
+	service, pdp, _, _ := newService(t)
+	service.SetFindingsFacts(&fakeFactsProvider{err: errors.New("facts unavailable")})
+	mr := protectedWithApproval(t, service)
+
+	if _, err := service.Merge(t.Context(), api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
+	}); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	req, _ := pdp.lastFor("merge_request.merge")
+	if req.Context[api.ContextKeyFindingsGate] != "true" {
+		t.Fatalf("a failed assembly must still engage the gate: %v", req.Context)
+	}
+	if _, present := req.Context[api.ContextKeyFindingsHighestSeverity]; present {
+		t.Fatalf("a failed assembly must present NO facts: %v", req.Context)
+	}
+}
+
+// No provider wired: the SPEC-0019 gate stands alone, exactly as before
+// T-0025 — the security gate applies only when engaged.
+func TestMergeGateDisengagedWithoutAFactsProvider(t *testing.T) {
+	service, pdp, _, _ := newService(t)
+	mr := protectedWithApproval(t, service)
+
+	if _, err := service.Merge(t.Context(), api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
+	}); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	req, _ := pdp.lastFor("merge_request.merge")
+	if _, present := req.Context[api.ContextKeyFindingsGate]; present {
+		t.Fatalf("an unwired provider must leave the gate disengaged: %v", req.Context)
+	}
+}
+
+// approvingHistoryImporter imports one merge request whose approval names the
+// first-party merge request under review: history the platform did not
+// witness, as ATTESTED_IMPORT (ADR-0029).
+type approvingHistoryImporter struct {
+	records        api.ImportedRecordStore
+	mergeRequestID string
+}
+
+func (a approvingHistoryImporter) ImportHistory(ctx context.Context, command ImportHistoryCommand) (HistoryResult, error) {
+	err := a.records.PutImport(ctx, command.ImportID, []api.ImportedMergeRequest{{
+		MergeRequestID: "source-mr-9",
+		State:          "merged",
+		Approvals: []api.ImportedApproval{{
+			ApprovalID:     "approval-1",
+			MergeRequestID: a.mergeRequestID,
+			DeclaredActor:  "imported-approver",
+			DeclaredAt:     time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+			Provenance:     api.Provenance{Class: api.AttestImported, ImportID: command.ImportID, SourceSystem: "github"},
+		}},
+		Provenance: api.Provenance{Class: api.AttestImported, ImportID: command.ImportID, SourceSystem: "github"},
+	}})
+	return HistoryResult{Counts: map[string]int64{"merge_requests": 1, "approvals": 1}}, err
+}
+
+// An imported approval NEVER satisfies the approval requirement (ADR-0029 §4,
+// SPEC-0029 AC6): a merge whose only approval is imported presents
+// valid_approvals=0 and is denied. This is the structural proof — the
+// ATTESTED_IMPORT record exists in this context's own import store, named to
+// the very merge request, and still no context fact makes it count.
+func TestMergeWhoseOnlyApprovalIsImportedIsDenied(t *testing.T) {
+	service, pdp, _, got := newService(t)
+	ctx := t.Context()
+	if _, err := service.SetProtection(ctx, api.ProtectionRequest{
+		Context:   principal("tenant-a", "admin-a", "request-protect", "owner"),
+		TargetRef: "refs/heads/main", RequiredApprovals: 1,
+	}); err != nil {
+		t.Fatalf("SetProtection: %v", err)
+	}
+	mr := openOne(t, service, "request-open")
+
+	// The import completes on this plane's bus with an approval naming the
+	// first-party merge request.
+	records := NewMemoryRecordStore()
+	imports := NewImportService(newStubImportStore(), records,
+		&stubGitImporter{moved: []RefUpdate{{Ref: "refs/heads/main", Revision: "abc123"}}},
+		approvingHistoryImporter{records: records, mergeRequestID: mr.ID},
+		stubPDP{}, got.events)
+	imp, err := imports.Create(ctx, importRequest())
+	if err != nil || imp.State != api.ImportComplete {
+		t.Fatalf("import did not complete: %+v, %v", imp, err)
+	}
+	stored, err := records.ListImport(ctx, imp.ID)
+	if err != nil || len(stored) != 1 || len(stored[0].Approvals) != 1 {
+		t.Fatalf("the imported approval is not in this context's record store: %+v, %v", stored, err)
+	}
+
+	if _, err := service.Merge(ctx, api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
+	}); !errors.Is(err, api.ErrDenied) {
+		t.Fatalf("a merge whose only approval is imported must be denied, got %v", err)
+	}
+	req, ok := pdp.lastFor("merge_request.merge")
+	if !ok {
+		t.Fatal("no merge decision was asked")
+	}
+	if req.Context["valid_approvals"] != "0" || req.Context["required_approvals"] != "1" {
+		t.Fatalf("an imported approval must present valid_approvals=0: %v", req.Context)
+	}
+}

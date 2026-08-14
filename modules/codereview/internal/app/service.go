@@ -88,6 +88,12 @@ type Service struct {
 	bus   bus.Bus
 	newID func() string
 	now   func() time.Time
+	// findings assembles the server-derived findings facts a merge decision
+	// presents to the security gate (T-0025, SPEC-0029). Nil — and nil alone
+	// — means this plane wired no facts provider: the security gate stays
+	// disengaged and the SPEC-0019 approval gate stands alone, exactly as
+	// before T-0025.
+	findings api.FindingsFactsProvider
 }
 
 type Option func(*Service)
@@ -109,6 +115,16 @@ func New(store Store, refs RefMover, pdp policyapi.DecisionPoint, events bus.Bus
 // actually observed (invariant 14).
 func (s *Service) SubscribeRefUpdates(events bus.Bus) {
 	bus.SubscribeTyped(events, s.onRefUpdated)
+}
+
+// SetFindingsFacts attaches the findings-facts provider the security merge
+// gate assembles its input from (T-0025, SPEC-0029, SPEC-0030). It is a
+// post-construction step, exactly like Security/Findings' merge-base
+// resolver: the provider exists only once the composition root has composed
+// both contexts, and a service composed without one leaves the security gate
+// disengaged rather than engaged on nothing.
+func (s *Service) SetFindingsFacts(provider api.FindingsFactsProvider) {
+	s.findings = provider
 }
 
 func (s *Service) onRefUpdated(ctx context.Context, event repoapi.RefUpdated) error {
@@ -324,12 +340,13 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 	if err != nil {
 		return api.MergeRequest{}, api.ErrDenied
 	}
-	decision, allowed := s.decide(ctx, req.Context, "merge_request.merge", "merge_request", mr.ID, map[string]string{
-		"target_ref":         mr.TargetRef,
-		"protected":          strconv.FormatBool(protected),
-		"valid_approvals":    strconv.Itoa(valid),
-		"required_approvals": strconv.Itoa(int(protection.RequiredApprovals)),
-	})
+	decision, allowed := s.decide(ctx, req.Context, "merge_request.merge", "merge_request", mr.ID,
+		s.mergeGateContext(ctx, mr, req.ActorID, map[string]string{
+			"target_ref":         mr.TargetRef,
+			"protected":          strconv.FormatBool(protected),
+			"valid_approvals":    strconv.Itoa(valid),
+			"required_approvals": strconv.Itoa(int(protection.RequiredApprovals)),
+		}))
 	if !allowed {
 		return api.MergeRequest{}, api.ErrDenied
 	}
@@ -416,6 +433,34 @@ func (s *Service) SetProtection(ctx context.Context, req api.ProtectionRequest) 
 		ActorID: req.Context.ActorID, ActorRoles: append([]string(nil), req.Context.ActorRoles...),
 		OccurredAt: s.now().UTC(),
 	})
+}
+
+// mergeGateContext composes the merge decision's server-derived context
+// (SPEC-0029 AC5): the SPEC-0019 protection and approval facts first, then —
+// only when this plane wired a findings-facts provider — the security gate's
+// findings facts. The security gate COMPOSES with the approval gate, never
+// replaces it: both sets of facts ride one decision, and either can deny it.
+//
+// Engaging the gate and failing to assemble its facts are deliberately
+// indistinguishable to the caller: the gate is engaged with NO facts, which
+// the reviewed policy denies (SPEC-0029 AC9). A fact that cannot be assembled
+// fails closed — never a fail-open default, and never a synchronous
+// cross-context read to recover it. The facts assemble under the merge's own
+// verified actor: the merge-base read the comparison needs is resolved under
+// the identity being decided about, never under a privileged server handle.
+func (s *Service) mergeGateContext(ctx context.Context, mr api.MergeRequest, actorID string, base map[string]string) map[string]string {
+	if s.findings == nil {
+		return base
+	}
+	base[api.ContextKeyFindingsGate] = "true"
+	facts, err := s.findings.FindingsFacts(ctx, mr.TenantID, mr.RepositoryID, actorID, mr.ID)
+	if err != nil {
+		return base
+	}
+	for key, value := range facts.Context() {
+		base[key] = value
+	}
+	return base
 }
 
 // validApprovals counts approvals made against the merge request's current head

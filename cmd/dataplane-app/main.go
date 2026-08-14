@@ -219,6 +219,19 @@ func main() {
 		// contract, and a plane without storage reports attribution as
 		// unavailable rather than guessing (SPEC-0028).
 		security.AttachMergeBaseResolver(dp.findings, security.NewMergeBaseResolver(repositoryv1.NewRepositoryReaderClient(doors.conn)))
+		// The security merge gate (T-0025, SPEC-0029, SPEC-0030): Code Review's
+		// merge decision presents server-derived findings facts to the reviewed
+		// policy, and the facts assemble from Security/Findings' own
+		// attribution and triage state. This wiring — and only this wiring —
+		// engages the gate: the facts provider crosses the module boundary at
+		// the two api/ surfaces, so neither module imports the other's
+		// internals. A plane that cannot compose the provider fails the
+		// rollout rather than silently merging with the gate disengaged.
+		findingsFacts := security.NewFindingsFactsProvider(dp.findings)
+		if findingsFacts == nil || !codereview.AttachFindingsFacts(dp.codeReview, findingsFacts) {
+			fmt.Fprintln(os.Stderr, "dataplane: merge gate findings facts did not compose (T-0025)")
+			os.Exit(1)
+		}
 		// Ref updates cross the process boundary in the other direction: the
 		// receive-pack path announces RefUpdated on git-storaged's bus, and this
 		// plane subscribes and republishes so the repository projection, search,

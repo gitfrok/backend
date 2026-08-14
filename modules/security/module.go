@@ -12,11 +12,12 @@ import (
 	"context"
 
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
+	codereviewapi "github.com/gitfrok/backend/modules/codereview/api"
+	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/security/api"
 	securitygrpc "github.com/gitfrok/backend/modules/security/internal/adapters/grpc"
 	secpg "github.com/gitfrok/backend/modules/security/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/security/internal/app"
-	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/ids"
@@ -58,6 +59,40 @@ func AttachMergeBaseResolver(findings api.Findings, resolver api.MergeBaseResolv
 	}
 	sink.SetMergeBaseResolver(resolver)
 	return true
+}
+
+// mergeFactsSource is the facts assembler this module's service implements
+// (T-0025, SPEC-0029, SPEC-0030). Named here — not on api.Findings — because
+// it is not a caller-facing operation: it performs no PDP decision of its
+// own, and its only legitimate consumer is the merge decision whose input it
+// assembles. The composition root is the only place the two meet.
+type mergeFactsSource interface {
+	MergeFindingsFacts(ctx context.Context, tenantID, repositoryID, actorID, mergeRequestID string) (codereviewapi.FindingsGateFacts, error)
+}
+
+// mergeFactsAdapter presents the assembler on Code Review's port: the port
+// speaks the merge decision's vocabulary (FindingsFacts), the assembler
+// speaks this context's (MergeFindingsFacts), and the adapter is the whole
+// translation.
+type mergeFactsAdapter struct{ source mergeFactsSource }
+
+func (a mergeFactsAdapter) FindingsFacts(ctx context.Context, tenantID, repositoryID, actorID, mergeRequestID string) (codereviewapi.FindingsGateFacts, error) {
+	return a.source.MergeFindingsFacts(ctx, tenantID, repositoryID, actorID, mergeRequestID)
+}
+
+// NewFindingsFactsProvider adapts the Findings surface to Code Review's
+// merge-gate findings-facts port (T-0025, SPEC-0029, SPEC-0030): the
+// attributed-findings facts a merge decision presents to the reviewed
+// security gate, assembled from this context's own attribution and triage
+// state. A nil return means the surface has no facts assembler — the
+// composition root must treat that as a startup failure, because a merge
+// gate wired without its facts provider is a gate silently disengaged.
+func NewFindingsFactsProvider(findings api.Findings) codereviewapi.FindingsFactsProvider {
+	source, ok := findings.(mergeFactsSource)
+	if !ok {
+		return nil
+	}
+	return mergeFactsAdapter{source: source}
 }
 
 // grpcMergeBaseResolver adapts repository.v1.RepositoryReader.GetMergeBase
