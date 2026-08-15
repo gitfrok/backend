@@ -83,17 +83,17 @@ func TestVerifyChainTrustAndExpiry(t *testing.T) {
 	}
 	leaf := firstLeafDER(t, cert.PEM)
 
-	// Trusted and unexpired.
-	gotLeaf, expired, err := ca.VerifyChain([][]byte{leaf}, now.Add(30*time.Minute))
-	if err != nil || expired || !bytes.Equal(gotLeaf, leaf) {
-		t.Fatalf("VerifyChain = %x, expired=%v, err=%v; want trusted leaf", gotLeaf, expired, err)
+	// Trusted and inside its window.
+	gotLeaf, validity, err := ca.VerifyChain([][]byte{leaf}, now.Add(30*time.Minute))
+	if err != nil || validity != api.ValidNow || !bytes.Equal(gotLeaf, leaf) {
+		t.Fatalf("VerifyChain = %x, validity=%v, err=%v; want trusted leaf", gotLeaf, validity, err)
 	}
 
 	// Trusted chain, expired certificate: distinguishable, not an opaque failure (the
 	// admission path audits and refuses it — SPEC-0038 AC5).
-	_, expired, err = ca.VerifyChain([][]byte{leaf}, now.Add(2*time.Hour))
-	if err != nil || !expired {
-		t.Fatalf("VerifyChain of expired cert = expired=%v, err=%v; want expired=true, no error", expired, err)
+	_, validity, err = ca.VerifyChain([][]byte{leaf}, now.Add(2*time.Hour))
+	if err != nil || validity != api.ValidityExpired {
+		t.Fatalf("VerifyChain of expired cert = validity=%v, err=%v; want ValidityExpired, no error", validity, err)
 	}
 
 	// Clock skew leeway backdates NotBefore, so a mildly skewed clock accepts a fresh cert.
@@ -154,3 +154,54 @@ func selfSigned(t *testing.T, now time.Time) []byte {
 }
 
 var _ api.CertificateIssuer = (*DevCA)(nil)
+
+// A forged chain is untrusted whether or not its leaf is inside its own validity window.
+// Classifying the window before establishing trust is what made a self-signed certificate
+// carrying a victim's subject come back with no error at all (phase-3 review H1).
+func TestVerifyChainRejectsForgedLeafOutsideItsWindow(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	ours := newTestCA(t, now)
+	rogue := newTestCA(t, now)
+	id := api.Identity{TenantID: "acme", DataPlaneID: "dp-1"}
+
+	// Issued by another CA and already expired at now.
+	stale, err := rogue.Issue(context.Background(), id, now.Add(-2*time.Hour), time.Hour, 0)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if leaf, validity, err := ours.VerifyChain([][]byte{firstLeafDER(t, stale.PEM)}, now); err == nil {
+		t.Fatalf("an expired FOREIGN certificate verified: validity=%v leaf=%x", validity, leaf)
+	}
+
+	// Issued by another CA and not yet valid at now.
+	future, err := rogue.Issue(context.Background(), id, now.Add(2*time.Hour), time.Hour, 0)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if leaf, validity, err := ours.VerifyChain([][]byte{firstLeafDER(t, future.PEM)}, now); err == nil {
+		t.Fatalf("a not-yet-valid FOREIGN certificate verified: validity=%v leaf=%x", validity, leaf)
+	}
+}
+
+// A certificate this CA did sign, presented before its NotBefore, is trusted but not yet
+// usable: reported as such so admission can refuse and audit it as clock skew rather than
+// as an attack (SPEC-0038 AC5 and its clock-skew non-functional).
+func TestVerifyChainReportsNotYetValid(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	ca := newTestCA(t, now)
+	id := api.Identity{TenantID: "acme", DataPlaneID: "dp-1"}
+	cert, err := ca.Issue(context.Background(), id, now.Add(time.Hour), time.Hour, 0)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	leaf, validity, err := ca.VerifyChain([][]byte{firstLeafDER(t, cert.PEM)}, now)
+	if err != nil {
+		t.Fatalf("a certificate we signed must be trusted even before its window: %v", err)
+	}
+	if validity != api.ValidityNotYetValid {
+		t.Fatalf("validity = %v, want ValidityNotYetValid", validity)
+	}
+	if len(leaf) == 0 {
+		t.Fatal("the leaf must come back so admission can name the identity it refuses")
+	}
+}

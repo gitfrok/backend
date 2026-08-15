@@ -174,16 +174,22 @@ func (ca *DevCA) Inspect(leafDER []byte) (api.Identity, time.Time, error) {
 	return id, cert.NotAfter, nil
 }
 
-// VerifyChain checks a peer chain against this CA at the given instant. A trusted chain
-// whose leaf is past NotAfter reports expired=true without an error — the admission path
-// audits and refuses it rather than treating expiry like an attack (AC5).
-func (ca *DevCA) VerifyChain(rawCerts [][]byte, now time.Time) ([]byte, bool, error) {
+// VerifyChain checks a peer chain against this CA at the given instant.
+//
+// TRUST FIRST, THEN THE WINDOW. A chain is only ever classified as expired or not-yet-valid
+// once this CA is known to have signed it; anything else is an error. The order matters: a
+// forged, self-signed certificate carrying a victim's subject is outside its window as
+// easily as inside it, and classifying before verifying would hand such a leaf back with no
+// error at all. Admission then refuses both non-valid states and audits them, rather than
+// treating a rotation that did not happen — or a skewed cluster clock — like an attack
+// (SPEC-0038 AC5, AC7).
+func (ca *DevCA) VerifyChain(rawCerts [][]byte, now time.Time) ([]byte, api.Validity, error) {
 	if len(rawCerts) == 0 {
-		return nil, false, errors.New("pki: no peer certificates")
+		return nil, api.ValidNow, errors.New("pki: no peer certificates")
 	}
 	leaf, err := x509.ParseCertificate(rawCerts[0])
 	if err != nil {
-		return nil, false, fmt.Errorf("pki: unparsable peer leaf: %w", err)
+		return nil, api.ValidNow, fmt.Errorf("pki: unparsable peer leaf: %w", err)
 	}
 	intermediates := x509.NewCertPool()
 	for _, raw := range rawCerts[1:] {
@@ -191,19 +197,29 @@ func (ca *DevCA) VerifyChain(rawCerts [][]byte, now time.Time) ([]byte, bool, er
 			intermediates.AddCert(c)
 		}
 	}
-	_, err = leaf.Verify(x509.VerifyOptions{
-		Roots:         ca.pool,
-		Intermediates: intermediates,
-		CurrentTime:   now,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	})
-	if err == nil {
-		return leaf.Raw, false, nil
+	verifyAt := func(instant time.Time) error {
+		_, vErr := leaf.Verify(x509.VerifyOptions{
+			Roots:         ca.pool,
+			Intermediates: intermediates,
+			CurrentTime:   instant,
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		})
+		return vErr
 	}
-	if !now.Before(leaf.NotAfter) || now.Before(leaf.NotBefore) {
-		return leaf.Raw, !now.Before(leaf.NotAfter), nil
+	if err := verifyAt(now); err == nil {
+		return leaf.Raw, api.ValidNow, nil
 	}
-	return nil, false, fmt.Errorf("pki: chain does not verify: %w", err)
+	// The chain did not verify AT NOW. Re-verify at an instant inside the leaf's own window
+	// to separate the two reasons that can cause: an untrusted chain, or a trusted one whose
+	// window does not contain now. Only the second is a classification.
+	inWindow := leaf.NotBefore.Add(leaf.NotAfter.Sub(leaf.NotBefore) / 2)
+	if err := verifyAt(inWindow); err != nil {
+		return nil, api.ValidNow, fmt.Errorf("pki: chain does not verify: %w", err)
+	}
+	if now.Before(leaf.NotBefore) {
+		return leaf.Raw, api.ValidityNotYetValid, nil
+	}
+	return leaf.Raw, api.ValidityExpired, nil
 }
 
 // subjectFor encodes the identity into the certificate subject; identityFromSubject is its

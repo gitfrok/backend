@@ -353,7 +353,7 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 // not, because nothing about it is attributable to a tenant.
 func (s *Service) AdmitPeerCertificates(ctx context.Context, rawCerts [][]byte) (api.Identity, error) {
 	now := s.cfg.Now()
-	leafDER, expired, err := s.issuer.VerifyChain(rawCerts, now)
+	leafDER, validity, err := s.issuer.VerifyChain(rawCerts, now)
 	if err != nil {
 		return api.Identity{}, err
 	}
@@ -361,8 +361,15 @@ func (s *Service) AdmitPeerCertificates(ctx context.Context, rawCerts [][]byte) 
 	if err != nil {
 		return api.Identity{}, err
 	}
-	if expired {
+	// Both non-valid states refuse. They are audited apart because they mean different
+	// things to whoever reads the trail: a rotation that did not happen, versus a clock
+	// the customer's cluster cannot be trusted on (SPEC-0038 non-functional).
+	switch validity {
+	case api.ValidityExpired:
 		s.refuseConnection(ctx, id, "certificate_expired", now)
+		return api.Identity{}, api.ErrNotFound
+	case api.ValidityNotYetValid:
+		s.refuseConnection(ctx, id, "certificate_not_yet_valid", now)
 		return api.Identity{}, api.ErrNotFound
 	}
 	d, ok, err := s.registry.DataPlane(ctx, id.TenantID, id.DataPlaneID)
