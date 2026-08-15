@@ -447,3 +447,81 @@ func TestUnavailableStoreRefusesNeverAdmits(t *testing.T) {
 		t.Fatalf("declare against an unreadable constraint = %v, want the coarse failure", err)
 	}
 }
+
+// placementsFailStore wraps a working store whose ObservedPlacements read
+// alone fails — the contradiction sweep's input read, exercised in isolation
+// by the Wave-3 review W1 tests.
+type placementsFailStore struct{ Store }
+
+func (placementsFailStore) ObservedPlacements(context.Context, string) ([]api.ObservedPlacement, error) {
+	return nil, errors.New("placements read down")
+}
+
+// TestDeclareFailsClosedWhenTheSweepReadFailsBeforeCommit is the fail-closed
+// half of the Wave-3 review W1 fix: the contradiction sweep's input is read
+// BEFORE the declaration is committed, so a failing read still refuses the
+// act — nothing witnessed, nothing stored — instead of committing first and
+// discovering the failure after.
+func TestDeclareFailsClosedWhenTheSweepReadFailsBeforeCommit(t *testing.T) {
+	f := newFixture(t)
+	svc := New(f.pdp, f.wit, placementsFailStore{Store: memory.New()}, api.Config{
+		DetectionWindow:   5 * time.Minute,
+		MaxReportInterval: 24 * time.Hour,
+		Now:               f.clock,
+	}, nil)
+	if _, err := svc.Declare(scopedCtx("acme"), "acme", "owner-1", []string{"owner"}, "gke", "europe-west1"); !errors.Is(err, api.ErrResidencyUnavailable) {
+		t.Fatalf("declare with a failing pre-commit sweep read = %v, want the coarse refusal", err)
+	}
+	for _, e := range f.wit.entries {
+		if !e.Denied {
+			t.Fatalf("nothing allowed may be witnessed when the pre-commit read fails: %+v", e)
+		}
+	}
+	if _, ok, err := svc.Declaration(scopedCtx("acme"), "acme"); err != nil || ok {
+		t.Fatalf("a refused declaration stores nothing: ok=%v err=%v", ok, err)
+	}
+}
+
+// contradictionFailingWitness accepts every record EXCEPT the contradiction
+// one — the shape of a trail that fails mid-sweep, after the declaration
+// already committed.
+type contradictionFailingWitness struct{ *fakeWitness }
+
+func (w contradictionFailingWitness) AppendResidencyRecord(ctx context.Context, e api.WitnessEntry) (api.WitnessRecord, error) {
+	if e.Action == platformaudit.ActionResidencyPlacementContradiction {
+		return api.WitnessRecord{}, errors.New("trail refuses the contradiction record")
+	}
+	return w.fakeWitness.AppendResidencyRecord(ctx, e)
+}
+
+// TestDeclareStandsWhenContradictionWitnessingFails is the stands-committed
+// half of the Wave-3 review W1 fix: the only witness work left AFTER the
+// commit is the contradiction record, and a trail that refuses it leaves the
+// declaration in force — Declare reports success, because reporting failure
+// would invite a retry of an act that already stands.
+func TestDeclareStandsWhenContradictionWitnessingFails(t *testing.T) {
+	f := newFixture(t)
+	wit := contradictionFailingWitness{&fakeWitness{}}
+	svc := New(f.pdp, wit, memory.New(), api.Config{
+		DetectionWindow:   5 * time.Minute,
+		MaxReportInterval: 24 * time.Hour,
+		Now:               f.clock,
+	}, nil)
+	// An already-observed placement the new declaration contradicts.
+	if err := svc.ObservePlacement(scopedCtx("acme"), "acme", "plane-1", "aws", "us-east1"); err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	decl, err := svc.Declare(scopedCtx("acme"), "acme", "owner-1", []string{"owner"}, "gke", "europe-west1")
+	if err != nil {
+		t.Fatalf("declare must stand when post-commit contradiction witnessing fails: %v", err)
+	}
+	got, ok, err := svc.Declaration(scopedCtx("acme"), "acme")
+	if err != nil || !ok || got != decl {
+		t.Fatalf("the declaration must be in force: %+v,%v,%v", got, ok, err)
+	}
+	for _, e := range wit.entries {
+		if e.Action == platformaudit.ActionResidencyPlacementContradiction {
+			t.Fatalf("the failing witness took nothing: %+v", e)
+		}
+	}
+}

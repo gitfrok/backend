@@ -101,6 +101,17 @@ func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles [
 		return api.Declaration{}, api.ErrResidencyUnavailable
 	}
 
+	// AC3's sweep input is read BEFORE the declaration takes effect (Wave-3
+	// review W1): with everything the sweep needs in hand before the commit,
+	// no post-commit store failure can report failure for an act that already
+	// stands — and fail-closed is preserved, because this read fails while
+	// nothing is committed yet. A declaration that cannot know what it
+	// contradicts does not happen.
+	planes, err := s.store.ObservedPlacements(ctx, tenantID)
+	if err != nil {
+		return api.Declaration{}, api.ErrResidencyUnavailable
+	}
+
 	// The declaration is witnessed BEFORE it takes effect: the record's effective time is
 	// the server's clock at witness time — the only instant a pack cites (AC1, AC6). A
 	// witness that cannot take the record fails the declaration; an unrecorded declaration
@@ -123,11 +134,10 @@ func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles [
 	// AC3: a declaration taking effect against an already-observed placement raises the
 	// violation state NOW — detection is synchronous at declaration time, so it lands
 	// inside any configured detection window by construction. Each contradicting plane
-	// gets its own witnessed contradiction record naming both placements.
-	planes, err := s.store.ObservedPlacements(ctx, tenantID)
-	if err != nil {
-		return api.Declaration{}, api.ErrResidencyUnavailable
-	}
+	// gets its own witnessed contradiction record naming both placements. The sweep runs
+	// over the placements read BEFORE the commit (Wave-3 review W1): the only failure
+	// left on this side of the commit is a witness the trail refuses, and that is
+	// logged, never reported — the declaration already stands.
 	for _, p := range planes {
 		if !domain.Contradiction(cloud, region, p.Cloud, p.Region) {
 			continue
