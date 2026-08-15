@@ -318,9 +318,16 @@ type EnvelopeDesiredState struct {
 // only when Coverage is CoverageMetered and TelemetryGap is false: the shape
 // cannot represent "unmeasured" as a number (SPEC-0041 AC2, AC3).
 type DimensionView struct {
-	Dimension      Dimension
-	Coverage       Coverage
-	State          State
+	Dimension Dimension
+	Coverage  Coverage
+	State     State
+	// Trend names the direction this row's counter moved relative to the
+	// interval before it, sourced from the SAME derivation the SPEC-0041 AC4
+	// notices cite (SPEC-0046 AC2): the state visible to the customer names
+	// its dimension, its trend and which envelope behaviour follows. It is
+	// meaningful only when Coverage is CoverageMetered and TelemetryGap is
+	// false; an unknown past is TrendFlat, never estimated.
+	Trend          Trend
 	TelemetryGap   bool
 	Gaps           []Interval
 	Value          float64
@@ -330,12 +337,32 @@ type DimensionView struct {
 	DeferredReason string
 }
 
+// ThrottleObservation is SPEC-0046 AC3's end-to-end observability of the
+// fair-use throttle: the envelope the control plane METERED and delivered as
+// desired state, and what the data plane acked as APPLIED (T-0035), each
+// shown with its own numbers — never smoothed into one. Present is false
+// until the tenant has at least one evaluation; HasAppliedAck is false until
+// an ack is recorded — absence renders as absence, never as zero or as
+// "applied" (the AC3-gaps discipline applied to state).
+type ThrottleObservation struct {
+	Present                 bool
+	DesiredGeneration       int64
+	DesiredMaxCIConcurrency int32 // 0 = the evaluation throttled nothing
+	DesiredQueueDepthCap    int64 // queued jobs are delayed, never dropped
+	HasAppliedAck           bool
+	AppliedGeneration       int64
+	Applied                 bool
+	AppliedError            string
+	AckedAt                 time.Time
+}
+
 // View is the tenant's usage view: the same ledger every envelope decision
 // was made from (SPEC-0041 AC10).
 type View struct {
 	Dimensions  []DimensionView
 	Divergences []Divergence
 	Notices     []Notice
+	Throttle    ThrottleObservation
 	GeneratedAt time.Time
 }
 

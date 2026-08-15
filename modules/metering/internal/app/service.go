@@ -485,6 +485,11 @@ func (s *Service) UsageView(ctx context.Context, tenantID string) (api.View, err
 			row.Value = value
 			row.Window = window
 			row.State = stateOf(value, limits[dim])
+			// SPEC-0046 AC2: the row names its trend with the SAME derivation
+			// the AC4 notices cite (trendOf) — the view and the notification
+			// read from one ledger, and an unknown past is flat, never
+			// estimated (SPEC-0041 AC10).
+			row.Trend = trendOf(dim, value, window, samples)
 		}
 		// Gaps: one per silent data plane, each starting at its last
 		// RECORDED window end (AC3). When every plane is silent — or none
@@ -520,6 +525,35 @@ func (s *Service) UsageView(ctx context.Context, tenantID string) (api.View, err
 	}
 	if view.Notices, err = s.store.Notices(ctx, tenantID); err != nil {
 		return api.View{}, err
+	}
+	// SPEC-0046 AC3: the throttle's end-to-end observability — the METERED
+	// desired state the control plane delivered, and the APPLIED ack the data
+	// plane recorded (T-0035), each with its own numbers, never smoothed into
+	// one. Absent until the tenant has an evaluation; the applied half stays
+	// absent until an ack is recorded — absence renders as absence.
+	desired, evaluated, err := s.LatestDesiredState(ctx, tenantID)
+	if err != nil {
+		return api.View{}, err
+	}
+	if evaluated {
+		view.Throttle = api.ThrottleObservation{
+			Present:                 true,
+			DesiredGeneration:       desired.Generation,
+			DesiredMaxCIConcurrency: desired.MaxCIConcurrency,
+			DesiredQueueDepthCap:    desired.QueueDepthCap,
+		}
+		acks, err := s.Acks(ctx, tenantID)
+		if err != nil {
+			return api.View{}, err
+		}
+		if n := len(acks); n > 0 {
+			last := acks[n-1]
+			view.Throttle.HasAppliedAck = true
+			view.Throttle.AppliedGeneration = last.Generation
+			view.Throttle.Applied = last.Applied
+			view.Throttle.AppliedError = last.Error
+			view.Throttle.AckedAt = last.AckedAt
+		}
 	}
 	return view, nil
 }

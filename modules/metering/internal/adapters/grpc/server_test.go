@@ -37,6 +37,10 @@ func newServer(t *testing.T, pdp policyapi.DecisionPoint) (*Server, *app.Service
 	cfg := api.Config{
 		Now:      func() time.Time { return time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC) },
 		GapAfter: 15 * time.Minute,
+		// The AC5 enforcement values a breached CI dimension produces; the
+		// SPEC-0046 AC3 wire test proves they ride the observation unsmoothed.
+		ThrottledConcurrency: 2,
+		QueueDepthCap:        50,
 		DefaultThresholds: map[api.Dimension]api.Threshold{
 			api.DimensionCIMinutes: {Notify: 80, Envelope: 100},
 		},
@@ -120,6 +124,72 @@ func TestGetUsageViewMapsDerivedCounter(t *testing.T) {
 	}
 	if ci.GetWindowStart() == nil || ci.GetWindowEnd() == nil {
 		t.Fatal("a derived counter must cite the interval it was made from")
+	}
+	// SPEC-0046 AC2: the metered, non-gap row carries its trend alongside the
+	// number it describes (one interval has no past: flat, never estimated).
+	if ci.GetTrend() != usagev1.EnvelopeTrend_ENVELOPE_TREND_FLAT {
+		t.Fatalf("trend: got %v, want ENVELOPE_TREND_FLAT", ci.GetTrend())
+	}
+}
+
+// SPEC-0046 AC3 on the wire: the envelope throttle observation rides the view
+// only once the tenant has an evaluation, with its metered and applied halves
+// kept separate; before any evaluation it is absent, never zero-filled.
+func TestGetUsageViewMapsEnvelopeThrottleObservation(t *testing.T) {
+	srv, svc := newServer(t, &allowPDP{})
+	ctxBg := context.Background()
+
+	// No evaluation: the field stays absent.
+	resp, err := srv.GetUsageView(ctxBg, &usagev1.GetUsageViewRequest{Context: ctx("tenant-a", "actor-1")})
+	if err != nil {
+		t.Fatalf("GetUsageView: %v", err)
+	}
+	if resp.GetEnvelopeThrottle() != nil {
+		t.Fatal("no evaluation: the wire must carry no throttle observation")
+	}
+
+	// Breach (105 ≥ envelope 100): the metered half maps with the AC5 values,
+	// the applied half still absent.
+	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	w := api.Interval{Start: now.Add(-time.Hour), End: now}
+	for _, s := range []api.Telemetry{
+		{MessageID: "s1", Window: w, Counters: map[string]float64{domain.MetricCIMinutes: 0}},
+		{MessageID: "s2", Window: w, Counters: map[string]float64{domain.MetricCIMinutes: 105}},
+	} {
+		if err := svc.IngestTelemetry(ctxBg, "tenant-a", "plane-1", s); err != nil {
+			t.Fatalf("IngestTelemetry: %v", err)
+		}
+	}
+	resp, err = srv.GetUsageView(ctxBg, &usagev1.GetUsageViewRequest{Context: ctx("tenant-a", "actor-1")})
+	if err != nil {
+		t.Fatalf("GetUsageView: %v", err)
+	}
+	obs := resp.GetEnvelopeThrottle()
+	if obs == nil {
+		t.Fatal("an evaluated tenant must carry the throttle observation on the wire")
+	}
+	if obs.GetDesiredMaxCiConcurrency() != 2 || obs.GetDesiredQueueDepthCap() != 50 {
+		t.Fatalf("metered half: got max=%d cap=%d, want 2/50", obs.GetDesiredMaxCiConcurrency(), obs.GetDesiredQueueDepthCap())
+	}
+	if obs.GetHasAppliedAck() {
+		t.Fatal("the applied half must stay absent until an ack is recorded")
+	}
+
+	// The data plane acks: the applied half maps with its own numbers.
+	if err := svc.AckDesiredState(ctxBg, "tenant-a", obs.GetDesiredGeneration(), true, ""); err != nil {
+		t.Fatalf("AckDesiredState: %v", err)
+	}
+	resp, err = srv.GetUsageView(ctxBg, &usagev1.GetUsageViewRequest{Context: ctx("tenant-a", "actor-1")})
+	if err != nil {
+		t.Fatalf("GetUsageView: %v", err)
+	}
+	obs = resp.GetEnvelopeThrottle()
+	if !obs.GetHasAppliedAck() || !obs.GetApplied() || obs.GetAppliedGeneration() != obs.GetDesiredGeneration() {
+		t.Fatalf("applied half: has=%v applied=%v gen=%d, want ack of generation %d",
+			obs.GetHasAppliedAck(), obs.GetApplied(), obs.GetAppliedGeneration(), obs.GetDesiredGeneration())
+	}
+	if obs.GetAckedAt() == nil {
+		t.Fatal("an acked observation must cite when it was acked")
 	}
 }
 

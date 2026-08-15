@@ -74,6 +74,23 @@ func toViewProto(v api.View) *usagev1.GetUsageViewResponse {
 			WindowEnd:              timestamppb.New(d.Window.End),
 		})
 	}
+	// SPEC-0046 AC3: the end-to-end throttle observation rides the view only
+	// once the tenant has an evaluation — absence stays absent on the wire.
+	if v.Throttle.Present {
+		obs := &usagev1.EnvelopeThrottleObservation{
+			DesiredGeneration:       v.Throttle.DesiredGeneration,
+			DesiredMaxCiConcurrency: v.Throttle.DesiredMaxCIConcurrency,
+			DesiredQueueDepthCap:    v.Throttle.DesiredQueueDepthCap,
+			HasAppliedAck:           v.Throttle.HasAppliedAck,
+		}
+		if v.Throttle.HasAppliedAck {
+			obs.AppliedGeneration = v.Throttle.AppliedGeneration
+			obs.Applied = v.Throttle.Applied
+			obs.AppliedError = v.Throttle.AppliedError
+			obs.AckedAt = timestamppb.New(v.Throttle.AckedAt)
+		}
+		out.EnvelopeThrottle = obs
+	}
 	return out
 }
 
@@ -95,6 +112,9 @@ func toDimensionProto(row api.DimensionView) *usagev1.UsageDimensionView {
 		out.CurrentValue = row.Value
 		out.WindowStart = timestamppb.New(row.Window.Start)
 		out.WindowEnd = timestamppb.New(row.Window.End)
+		// SPEC-0046 AC2: the trend is meaningful alongside the number it
+		// describes — never on a deferred or gapped row.
+		out.Trend = wireTrend(row.Trend)
 	}
 	for _, g := range row.Gaps {
 		out.Gaps = append(out.Gaps, &usagev1.UsageGap{
@@ -150,5 +170,18 @@ func wireState(s api.State) agentpb.EnvelopeState {
 		return agentpb.EnvelopeState_ENVELOPE_STATE_EXCEEDED
 	default:
 		return agentpb.EnvelopeState_ENVELOPE_STATE_UNSPECIFIED
+	}
+}
+
+func wireTrend(tr api.Trend) usagev1.EnvelopeTrend {
+	switch tr {
+	case api.TrendRising:
+		return usagev1.EnvelopeTrend_ENVELOPE_TREND_RISING
+	case api.TrendFalling:
+		return usagev1.EnvelopeTrend_ENVELOPE_TREND_FALLING
+	case api.TrendFlat:
+		return usagev1.EnvelopeTrend_ENVELOPE_TREND_FLAT
+	default:
+		return usagev1.EnvelopeTrend_ENVELOPE_TREND_UNSPECIFIED
 	}
 }

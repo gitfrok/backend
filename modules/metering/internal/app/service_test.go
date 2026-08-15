@@ -306,6 +306,132 @@ func TestThresholdNoticeBeforeBreachAndOnBreach(t *testing.T) {
 	}
 }
 
+// SPEC-0046 AC2: the NEAR row names its dimension, its state and its trend
+// with the SAME derivation the AC4 notice cites — and while the state is
+// NEAR (before breach) the desired state throttles nothing.
+func TestUsageViewNamesNearStateAndTrendBeforeBreach(t *testing.T) {
+	f := newFixture(t, ciThresholds())
+	ctx := context.Background()
+	w := window(f.now.Add(-time.Hour), f.now)
+
+	// Value 85: past Notify (80), under Envelope (100) → NEAR, no throttle.
+	ingest(t, f.svc, "tenant-a", "plane-1", sampleWithCounter("s1", "plane-1", w, 0))
+	ingest(t, f.svc, "tenant-a", "plane-1", sampleWithCounter("s2", "plane-1", w, 85))
+
+	view, err := f.svc.UsageView(ctx, "tenant-a")
+	if err != nil {
+		t.Fatalf("UsageView: %v", err)
+	}
+	var ci api.DimensionView
+	for _, row := range view.Dimensions {
+		if row.Dimension == api.DimensionCIMinutes {
+			ci = row
+		}
+	}
+	if ci.State != api.StateNear {
+		t.Fatalf("state: got %v, want NEAR", ci.State)
+	}
+	// One interval has no past: the trend is flat — honest, never estimated.
+	if ci.Trend != api.TrendFlat {
+		t.Fatalf("trend: got %v, want flat (an unknown past is never estimated)", ci.Trend)
+	}
+	if len(view.Notices) != 1 || view.Notices[0].State != api.StateNear {
+		t.Fatalf("notices: got %d, want the one NEAR notice", len(view.Notices))
+	}
+	// The view and the notification read from one ledger: same derivation.
+	if view.Notices[0].Trend != ci.Trend {
+		t.Fatalf("view trend %v must equal the notice trend %v (one derivation)", ci.Trend, view.Notices[0].Trend)
+	}
+	// NEAR warns; it does not enforce: the desired state throttles nothing.
+	desired, ok, err := f.svc.LatestDesiredState(ctx, "tenant-a")
+	if err != nil || !ok {
+		t.Fatalf("LatestDesiredState: ok=%v err=%v", ok, err)
+	}
+	if desired.MaxCIConcurrency != 0 || desired.QueueDepthCap != 0 {
+		t.Fatalf("NEAR must not throttle: got max=%d cap=%d", desired.MaxCIConcurrency, desired.QueueDepthCap)
+	}
+}
+
+// SPEC-0046 AC3: the throttle observation shows the METERED desired state and
+// the APPLIED ack as separate halves — absent until an evaluation, the applied
+// half absent until an ack, and a failed ack cited, never smoothed away.
+func TestThrottleObservationEndToEnd(t *testing.T) {
+	f := newFixture(t, ciThresholds())
+	ctx := context.Background()
+	w := window(f.now.Add(-time.Hour), f.now)
+	ci := func(view api.View) api.DimensionView {
+		t.Helper()
+		for _, row := range view.Dimensions {
+			if row.Dimension == api.DimensionCIMinutes {
+				return row
+			}
+		}
+		t.Fatal("usage view must carry a CI-minutes row")
+		return api.DimensionView{}
+	}
+
+	// No evaluation yet: absence renders as absence, never as zero state.
+	view, err := f.svc.UsageView(ctx, "tenant-a")
+	if err != nil {
+		t.Fatalf("UsageView: %v", err)
+	}
+	if view.Throttle.Present {
+		t.Fatal("a tenant with no evaluation must carry no throttle observation")
+	}
+
+	// Breach (105 ≥ 100): the evaluation meters a throttle (AC5 values).
+	ingest(t, f.svc, "tenant-a", "plane-1", sampleWithCounter("s1", "plane-1", w, 0))
+	ingest(t, f.svc, "tenant-a", "plane-1", sampleWithCounter("s2", "plane-1", w, 105))
+	view, err = f.svc.UsageView(ctx, "tenant-a")
+	if err != nil {
+		t.Fatalf("UsageView: %v", err)
+	}
+	if ci(view).State != api.StateExceeded {
+		t.Fatalf("state: got %v, want EXCEEDED", ci(view).State)
+	}
+	th := view.Throttle
+	if !th.Present {
+		t.Fatal("an evaluated tenant must carry the throttle observation")
+	}
+	if th.DesiredMaxCIConcurrency != 2 || th.DesiredQueueDepthCap != 50 {
+		t.Fatalf("metered desired state: got max=%d cap=%d, want 2/50", th.DesiredMaxCIConcurrency, th.DesiredQueueDepthCap)
+	}
+	if th.HasAppliedAck {
+		t.Fatal("the applied half must stay absent until an ack is recorded")
+	}
+
+	// The data plane acks the generation as applied: both halves now cite
+	// their own numbers.
+	if err := f.svc.AckDesiredState(ctx, "tenant-a", th.DesiredGeneration, true, ""); err != nil {
+		t.Fatalf("AckDesiredState: %v", err)
+	}
+	view, err = f.svc.UsageView(ctx, "tenant-a")
+	if err != nil {
+		t.Fatalf("UsageView: %v", err)
+	}
+	th = view.Throttle
+	if !th.HasAppliedAck || !th.Applied || th.AppliedGeneration != th.DesiredGeneration {
+		t.Fatalf("applied ack: has=%v applied=%v gen=%d, want ack of generation %d", th.HasAppliedAck, th.Applied, th.AppliedGeneration, th.DesiredGeneration)
+	}
+	if !th.AckedAt.Equal(f.now) {
+		t.Fatalf("acked_at: got %v, want %v", th.AckedAt, f.now)
+	}
+
+	// A failed ack is shown with its coarse error prose — never smoothed
+	// into "applied".
+	if err := f.svc.AckDesiredState(ctx, "tenant-a", th.DesiredGeneration, false, "scaler unavailable"); err != nil {
+		t.Fatalf("AckDesiredState: %v", err)
+	}
+	view, err = f.svc.UsageView(ctx, "tenant-a")
+	if err != nil {
+		t.Fatalf("UsageView: %v", err)
+	}
+	th = view.Throttle
+	if th.Applied || th.AppliedError != "scaler unavailable" {
+		t.Fatalf("failed ack must be cited: applied=%v err=%q", th.Applied, th.AppliedError)
+	}
+}
+
 // AC5 + AC7 + AC8: a breached CI dimension throttles CI concurrency with a
 // queue cap — and the enforcement vocabulary structurally cannot block git
 // or make a repository read-only.
