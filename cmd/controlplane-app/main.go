@@ -23,10 +23,13 @@ import (
 
 	"github.com/gitfrok/backend/cmd/internal/health"
 	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
+	residencyv1 "github.com/gitfrok/backend/gen/proto/residency/v1"
 	usagev1 "github.com/gitfrok/backend/gen/proto/usage/v1"
 	"github.com/gitfrok/backend/modules/agent"
 	"github.com/gitfrok/backend/modules/audit"
 	auditapi "github.com/gitfrok/backend/modules/audit/api"
+	"github.com/gitfrok/backend/modules/identity"
+	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	"github.com/gitfrok/backend/modules/metering"
 	"github.com/gitfrok/backend/modules/policy"
 	"github.com/gitfrok/backend/modules/residency"
@@ -53,15 +56,19 @@ const (
 
 // agentDoor is one running AgentGateway listener and everything it was composed from.
 type agentDoor struct {
-	server *ggrpc.Server
-	usage  *ggrpc.Server // the UsageService door, when GITFROK_USAGE_GRPC_ADDR is set
-	pool   *db.Pool
+	server    *ggrpc.Server
+	usage     *ggrpc.Server // the UsageService door, when GITFROK_USAGE_GRPC_ADDR is set
+	residency *ggrpc.Server // the residency Declare door, when GITFROK_RESIDENCY_GRPC_ADDR is set
+	pool      *db.Pool
 }
 
 func (d *agentDoor) close() {
 	d.server.Stop()
 	if d.usage != nil {
 		d.usage.Stop()
+	}
+	if d.residency != nil {
+		d.residency.Stop()
 	}
 	if d.pool != nil {
 		d.pool.Close()
@@ -195,6 +202,46 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		fmt.Printf("controlplane-app: UsageService listening on %s\n", mcfg.usageAddr)
 	}
 
+	// The residency Declare admin door (T-0038, SPEC-0043, ADR-0063). It mirrors the
+	// UsageService door's registration, but differs in one deliberate way: the door
+	// verifies its caller through the identity seam BEFORE any policy decision — the
+	// subject is a PAT-resolved principal carried in the request context, never a
+	// wire claim (SPEC-0043 AC6). The verifier key is required when the door is
+	// open (loadResidencyDoorConfig), and the authenticator is durable whenever the
+	// plane's stores are: it resolves the credential against the same identity
+	// schema the data plane issues from (ADR-0043's narrow gateway).
+	rcfg, err := loadResidencyDoorConfig(os.Getenv)
+	if err != nil {
+		if pool != nil {
+			pool.Close()
+		}
+		return nil, err
+	}
+	var residencyServer *ggrpc.Server
+	if rcfg.addr != "" {
+		var authenticator identityapi.Authenticator
+		if pool != nil {
+			authenticator = identity.NewPostgres(pool, "default", map[string][]byte{"default": rcfg.patKey}, pdp)
+		} else {
+			authenticator = identity.NewInMemory(rcfg.patKey, pdp)
+		}
+		lis, err := net.Listen("tcp", rcfg.addr)
+		if err != nil {
+			if pool != nil {
+				pool.Close()
+			}
+			return nil, fmt.Errorf("residency service listen %s: %w", rcfg.addr, err)
+		}
+		residencyServer = ggrpc.NewServer()
+		residencyv1.RegisterResidencyServiceServer(residencyServer, residency.NewGRPCServer(residencySvc, authenticator, logf))
+		go func() {
+			if serveErr := residencyServer.Serve(lis); serveErr != nil {
+				logf("residency service stopped: %v", serveErr)
+			}
+		}()
+		fmt.Printf("controlplane-app: ResidencyService listening on %s\n", rcfg.addr)
+	}
+
 	serverCert, err := ca.IssueServer("agent-gateway", cfg.serverNames, time.Now(), 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("agent gateway server certificate: %w", err)
@@ -217,7 +264,7 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		}
 	}()
 	fmt.Printf("controlplane-app: AgentGateway listening on %s (dev CA custody)\n", cfg.grpcAddr)
-	return &agentDoor{server: server, usage: usageServer, pool: pool}, nil
+	return &agentDoor{server: server, usage: usageServer, residency: residencyServer, pool: pool}, nil
 }
 
 func main() {

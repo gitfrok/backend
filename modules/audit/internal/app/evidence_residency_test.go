@@ -155,6 +155,57 @@ func TestResidencySectionCitesDeclarationInForceAndPlacements(t *testing.T) {
 	}
 }
 
+// TestResidencySectionRendersContradictionAsControlObservation is SPEC-0043 AC2's pack
+// half: a declaration-versus-witnessed-placement contradiction reaches the section as the
+// existing vocabulary — a PLACEMENT_REFUSED attempt beside a PLACEMENT_CONTRADICTION
+// violation state, both cited denied, both naming the pinned and the observed placement.
+// Declare introduces no parallel error channel: the pack assembles READY with the facts on
+// the tenant's chain, and the contradiction counts as a report (the plane is not
+// additionally rendered silent). PINNING stays the control-plane act; the contradiction is
+// a control-plane observation (T-0039 matrix scenario 2).
+func TestResidencySectionRendersContradictionAsControlObservation(t *testing.T) {
+	svc, trail, owner, req := residencyFixture(t, 24*time.Hour)
+	seedResidency(t, trail, "residency.declaration.set", "tenant/tenant-a", api.OutcomeAllowed,
+		map[string]string{"pinned_cloud": "gke", "pinned_region": "europe-west1"}, factsNow.Add(-48*time.Hour))
+	contradicting := map[string]string{
+		"pinned_cloud": "gke", "pinned_region": "europe-west1",
+		"observed_cloud": "aws", "observed_region": "us-east1",
+	}
+	seedResidency(t, trail, "residency.placement.refused", "data_plane/plane-1", api.OutcomeDenied,
+		contradicting, req.RangeFrom)
+	seedResidency(t, trail, "residency.placement.contradiction", "data_plane/plane-1", api.OutcomeDenied,
+		contradicting, req.RangeFrom)
+
+	sec := residencyChunkOf(t, readyPackChunks(t, svc, owner, req))
+	kinds := map[api.ResidencyFactKind]int{}
+	for _, r := range sec.Records {
+		if r.Residency == nil {
+			continue
+		}
+		kinds[r.Residency.FactKind]++
+		switch r.Residency.FactKind {
+		case api.ResidencyFactPlacementRefused, api.ResidencyFactPlacementContradiction:
+			if r.Allowed {
+				t.Fatalf("%v must cite the witnessed denial", r.Residency.FactKind)
+			}
+			if r.Residency.PinnedCloud != "gke" || r.Residency.ObservedCloud != "aws" {
+				t.Fatalf("%v names BOTH placements: %+v", r.Residency.FactKind, r.Residency)
+			}
+		}
+	}
+	if kinds[api.ResidencyFactPinning] != 1 || kinds[api.ResidencyFactPlacementRefused] != 1 ||
+		kinds[api.ResidencyFactPlacementContradiction] != 1 {
+		t.Fatalf("the section cites one pinning, one refused attempt and one contradiction: %v", kinds)
+	}
+	// The contradiction is a report: inside the reporting window the range stays complete.
+	if !sec.Complete || len(sec.Gaps) != 0 {
+		t.Fatalf("a reporting (contradicted) plane renders no silence gap: %+v", sec.Gaps)
+	}
+	if ok, reason := domain.VerifySection(sec); !ok {
+		t.Fatalf("the residency section must verify like every other: %s", reason)
+	}
+}
+
 // TestResidencySectionShowsDeclarationChangeWithEffectiveTime is SPEC-0040
 // AC6: a declaration change appears as a second PINNING record with its own
 // effective time — the pack shows a change, never just the current value.
@@ -219,6 +270,68 @@ func TestResidencySectionSilenceIsGapNotCompliance(t *testing.T) {
 			t.Fatalf("a declared tenant with zero reports gaps the whole range: %+v", sec)
 		}
 	})
+}
+
+// TestResidencySectionRendersContradictionAndRefusalAsFindings is SPEC-0043
+// AC2: a declaration-versus-witnessed-placement contradiction renders in the
+// section as a PLACEMENT_CONTRADICTION fact and an enrolment-time refusal as
+// PLACEMENT_REFUSED — the existing ResidencyFactKind vocabulary, cited with
+// the witnessed DENIED outcome and BOTH placements. No parallel error
+// channel: they are section records like every other residency fact, and
+// PINNING stays the control-plane act. Refusals and contradictions are also
+// proof of reporting, so they bound the silence window — a plane whose only
+// reports were refusals is not silent.
+func TestResidencySectionRendersContradictionAndRefusalAsFindings(t *testing.T) {
+	svc, trail, owner, req := residencyFixture(t, 24*time.Hour)
+	seedResidency(t, trail, "residency.declaration.set", "tenant/tenant-a", api.OutcomeAllowed,
+		map[string]string{"pinned_cloud": "gke", "pinned_region": "europe-west1"}, factsNow.Add(-48*time.Hour))
+	// A matching observation, a refused enrolment attempt and the raised
+	// contradiction state — every record carries both placements.
+	seedResidency(t, trail, "residency.placement.observed", "data_plane/plane-1", api.OutcomeAllowed,
+		bothPlacements, req.RangeFrom)
+	contradicting := map[string]string{
+		"pinned_cloud": "gke", "pinned_region": "europe-west1",
+		"observed_cloud": "aws", "observed_region": "us-east1",
+	}
+	seedResidency(t, trail, "residency.placement.refused", "data_plane/plane-1", api.OutcomeDenied,
+		contradicting, req.RangeFrom.Add(time.Minute))
+	seedResidency(t, trail, "residency.placement.contradiction", "data_plane/plane-1", api.OutcomeDenied,
+		contradicting, req.RangeFrom.Add(2*time.Minute))
+
+	sec := residencyChunkOf(t, readyPackChunks(t, svc, owner, req))
+	kinds := map[api.ResidencyFactKind]api.SectionRecord{}
+	for _, r := range sec.Records {
+		if r.Residency == nil {
+			t.Fatalf("every residency record carries its fact: %+v", r)
+		}
+		kinds[r.Residency.FactKind] = r
+	}
+	for _, want := range []api.ResidencyFactKind{api.ResidencyFactPinning, api.ResidencyFactPlacement,
+		api.ResidencyFactPlacementRefused, api.ResidencyFactPlacementContradiction} {
+		if _, ok := kinds[want]; !ok {
+			t.Fatalf("the section must cite a %s fact, got kinds %v", want, kinds)
+		}
+	}
+	for _, denied := range []api.ResidencyFactKind{api.ResidencyFactPlacementRefused, api.ResidencyFactPlacementContradiction} {
+		rec := kinds[denied]
+		if rec.Allowed {
+			t.Fatalf("%s cites the witnessed DENIED outcome: %+v", denied, rec)
+		}
+		if rec.Residency.PinnedCloud != "gke" || rec.Residency.ObservedCloud != "aws" {
+			t.Fatalf("%s names the declared AND the attempted placement: %+v", denied, rec.Residency)
+		}
+	}
+	if !kinds[api.ResidencyFactPinning].Allowed {
+		t.Fatalf("PINNING stays the control-plane act it was witnessed as: %+v", kinds[api.ResidencyFactPinning])
+	}
+	// Refusals and contradictions count as reporting: the plane reported
+	// inside the window, so the range renders without a silence gap.
+	if !sec.Complete || len(sec.Gaps) != 0 {
+		t.Fatalf("a plane whose reports were refusals is not silent: %+v", sec)
+	}
+	if ok, reason := domain.VerifySection(sec); !ok {
+		t.Fatalf("the residency section must verify like every other: %s", reason)
+	}
 }
 
 // TestResidencySectionUndeclaredTenantIsComplete: no pinning means placement

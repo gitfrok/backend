@@ -8,18 +8,19 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/gitfrok/backend/modules/residency/api"
 	"github.com/gitfrok/backend/platform/tenancy"
 )
 
-// Store is the tenant-keyed residency state: one declaration in force per tenant and the
-// latest observed placement per data plane. Every read and write is tenant-scoped
+// Store is the tenant-keyed residency state: the retained declaration HISTORY per tenant
+// and the latest observed placement per data plane. Every read and write is tenant-scoped
 // (SPEC-0001): a lookup under one tenant's scope can never return another tenant's record,
 // which is the store-side half of AC8.
 type Store struct {
 	mu           sync.RWMutex
-	declarations map[string]api.Declaration
+	declarations map[string][]api.Declaration
 	observations map[string]map[string]observation
 }
 
@@ -32,7 +33,7 @@ type observation struct {
 // New builds an empty store.
 func New() *Store {
 	return &Store{
-		declarations: map[string]api.Declaration{},
+		declarations: map[string][]api.Declaration{},
 		observations: map[string]map[string]observation{},
 	}
 }
@@ -45,26 +46,42 @@ func scoped(ctx context.Context, tenantID string) bool {
 	return ok && string(t) == tenantID && tenantID != ""
 }
 
-// PutDeclaration stores the tenant's declaration in force.
+// PutDeclaration appends one declaration to the tenant's retained history: a replace
+// keeps the row it supersedes, exactly as the durable adapter's INSERT-only shape does
+// (SPEC-0042 AC3).
 func (s *Store) PutDeclaration(ctx context.Context, d api.Declaration) error {
 	if !scoped(ctx, d.TenantID) {
 		return api.ErrResidencyUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.declarations[d.TenantID] = d
+	s.declarations[d.TenantID] = append(s.declarations[d.TenantID], d)
 	return nil
 }
 
-// Declaration returns the tenant's declaration in force; ok is false when none exists.
-func (s *Store) Declaration(ctx context.Context, tenantID string) (api.Declaration, bool, error) {
+// DeclarationAt returns the declaration in force at one instant: the history row with
+// the maximum effective time <= at. Ties on the effective instant break deterministically
+// on chain_seq — the LATER chain position wins, the same rule the durable store's
+// ORDER BY effective_at DESC, chain_seq DESC encodes (T-0039, SPEC-0042 AC3). ok is
+// false when the tenant has declared nothing in force at that instant.
+func (s *Store) DeclarationAt(ctx context.Context, tenantID string, at time.Time) (api.Declaration, bool, error) {
 	if !scoped(ctx, tenantID) {
 		return api.Declaration{}, false, api.ErrResidencyUnavailable
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	d, ok := s.declarations[tenantID]
-	return d, ok, nil
+	var inForce api.Declaration
+	found := false
+	for _, d := range s.declarations[tenantID] {
+		if d.EffectiveAt.After(at) {
+			continue
+		}
+		if !found || d.EffectiveAt.After(inForce.EffectiveAt) ||
+			(d.EffectiveAt.Equal(inForce.EffectiveAt) && d.ChainSeq > inForce.ChainSeq) {
+			inForce, found = d, true
+		}
+	}
+	return inForce, found, nil
 }
 
 // PutObservation records the latest observed placement for one data plane.

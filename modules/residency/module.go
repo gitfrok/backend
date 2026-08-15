@@ -9,8 +9,11 @@
 package residency
 
 import (
+	residencyv1 "github.com/gitfrok/backend/gen/proto/residency/v1"
+	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/residency/api"
+	residencygrpc "github.com/gitfrok/backend/modules/residency/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/residency/internal/adapters/memory"
 	residencypg "github.com/gitfrok/backend/modules/residency/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/residency/internal/app"
@@ -52,4 +55,17 @@ func NewWithStore(pdp policyapi.DecisionPoint, witness api.Witness, store app.St
 // observed placements survive a kill-and-restart (T-0037, SPEC-0042 AC3, ADR-0062).
 func NewPostgresStore(pool *db.Pool) Store {
 	return residencypg.New(pool)
+}
+
+// GRPCServer is the residency Declare admin door's server type, aliased so cmd/ can
+// register it without naming a package under this module's internal/ tree (ADR-0025).
+type GRPCServer = residencygrpc.Server
+
+// NewGRPCServer adapts the residency Service port onto the residency/v1 ResidencyService
+// contract (T-0038, SPEC-0043, ADR-0063). The returned door is a PEP: it verifies the
+// caller through the identity seam — auth is the credential verification gateway the
+// composition root composes (ADR-0043); nil fails closed — before any policy decision,
+// and renders every refusal coarse.
+func NewGRPCServer(svc *Service, auth identityapi.Authenticator, logf func(format string, args ...any)) residencyv1.ResidencyServiceServer {
+	return residencygrpc.NewServer(svc, auth, logf)
 }

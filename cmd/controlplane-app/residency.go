@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"time"
 
 	"github.com/gitfrok/backend/modules/agent/api"
@@ -22,6 +24,45 @@ const residencyDetectionWindowEnv = "GITFROK_RESIDENCY_DETECTION_WINDOW"
 // (T-0033, SPEC-0040 AC5). Unset or unparseable means zero — fail-safe: every interval
 // renders as a gap and no silence is ever read as compliance.
 const residencyReportIntervalEnv = "GITFROK_RESIDENCY_MAX_REPORT_INTERVAL"
+
+// residencyGRPCAddrEnv opens the residency Declare admin door (T-0038, SPEC-0043,
+// ADR-0063) when set; an empty value means the control plane serves no residency
+// surface. Unlike the Phase-2 doors, this one verifies its caller before any
+// policy decision — the subject is a verified principal, never a wire claim
+// (SPEC-0043 AC6).
+const residencyGRPCAddrEnv = "GITFROK_RESIDENCY_GRPC_ADDR"
+
+// residencyDoorConfig is the residency Declare door's configuration as one unit:
+// a door address without a verifier key is a half-configured boundary and fails
+// the rollout (ADR-0006 fail-fast), exactly like the Git front door's.
+type residencyDoorConfig struct {
+	addr   string
+	patKey []byte
+}
+
+// loadResidencyDoorConfig validates the door's environment: the PAT verifier key
+// (the same credential shape the data plane's Git front door verifies, ADR-0043)
+// is REQUIRED whenever the door is open, because a door that cannot verify its
+// caller has no business serving a surface that writes control state (SPEC-0043
+// AC6). An unconfigured door is fine — the plane then serves no residency surface.
+func loadResidencyDoorConfig(getenv func(string) string) (residencyDoorConfig, error) {
+	cfg := residencyDoorConfig{addr: getenv(residencyGRPCAddrEnv)}
+	if cfg.addr == "" {
+		return cfg, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(getenv(patVerifierKeyEnv))
+	if err != nil || len(key) < 32 {
+		return cfg, fmt.Errorf("%s requires %s holding base64 of at least 32 bytes: the declare "+
+			"door verifies its caller before any policy decision (SPEC-0043 AC6)", residencyGRPCAddrEnv, patVerifierKeyEnv)
+	}
+	cfg.patKey = key
+	return cfg, nil
+}
+
+// patVerifierKeyEnv is the shared PAT verifier key the data plane's Git front
+// door already reads (cmd/dataplane-app): one credential shape, one key, verified
+// through the same narrow gateway on both planes (ADR-0043).
+const patVerifierKeyEnv = "GITFROK_PAT_VERIFIER_KEY"
 
 // residencyDuration parses one residency window from the environment; unset or
 // unparseable values fall back to zero, which each consumer treats as its fail-safe.

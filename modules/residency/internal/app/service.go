@@ -20,11 +20,14 @@ import (
 )
 
 // Store is the residency state the service reads and writes, in the app's own terms. The
-// in-memory adapter implements it; a durable store is future work and a composition-line
-// change (invariant 13).
+// read is effective-dated: DeclarationAt answers "the declaration in force at this
+// instant" from retained history, and same-instant rows tie-break on the LATER chain
+// position — the deterministic read the PlacementGate's enforcement consults (T-0039,
+// SPEC-0042 AC3, ADR-0062). The in-memory adapter implements it; the durable Postgres
+// adapter is a composition-line change (invariant 13).
 type Store interface {
 	PutDeclaration(ctx context.Context, d api.Declaration) error
-	Declaration(ctx context.Context, tenantID string) (api.Declaration, bool, error)
+	DeclarationAt(ctx context.Context, tenantID string, at time.Time) (api.Declaration, bool, error)
 	PutObservation(ctx context.Context, tenantID, dataPlaneID, cloud, region string) error
 	ObservedPlacements(ctx context.Context, tenantID string) ([]api.ObservedPlacement, error)
 }
@@ -56,17 +59,29 @@ func New(pdp policyapi.DecisionPoint, witness api.Witness, store Store, cfg api.
 	return &Service{pdp: pdp, witness: witness, store: store, now: cfg.Now, logf: logf}
 }
 
-// Declare implements api.Service (SPEC-0040 AC1, AC3, AC6).
+// Declare implements api.Service (SPEC-0040 AC1, AC3, AC6; SPEC-0043 AC1).
 func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles []string, cloud, region string) (api.Declaration, error) {
 	if tenantID == "" || actorID == "" || cloud == "" || region == "" {
 		// A malformed declaration is indistinguishable from any other failure
-		// (SPEC-0001): the surface gives nothing back to probe with.
+		// (SPEC-0001): the surface gives nothing back to probe with. Nothing is
+		// witnessed: a shapeless attempt names no tenant to audit under.
 		return api.Declaration{}, api.ErrResidencyUnavailable
 	}
 
-	// Declaring is a PDP decision asked about the tenant (authz.rego: owner-only,
-	// resource kind tenant). A denial and an unreachable PDP are the same coarse shape;
-	// neither is witnessed (ADR-0006).
+	// The declaration in force before this act, if any: every record this act
+	// appends — allowed or refused — names previous and new pinning on the one
+	// record (SPEC-0043 AC1). A read failure is the coarse failure; a declaration
+	// that cannot know what it replaces does not happen.
+	prev, hasPrev, err := s.store.DeclarationAt(ctx, tenantID, s.now())
+	if err != nil {
+		return api.Declaration{}, api.ErrResidencyUnavailable
+	}
+
+	// Declaring is a PDP decision asked about the tenant (authz.rego: the tenant's
+	// owner and its tenant-scoped platform operator, resource kind tenant). A denial
+	// and an unreachable PDP are the same coarse shape — and both are witnessed as
+	// exactly one DENIED record naming the actor and both pinnings, because a
+	// refusal is the more investigation-relevant half (SPEC-0043 AC1, G5).
 	decision, err := s.pdp.Decide(ctx, policyapi.Request{
 		TenantID: tenantID,
 		Subject:  policyapi.Subject{ID: actorID, TenantID: tenantID, Roles: roles},
@@ -78,6 +93,11 @@ func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles [
 		},
 	})
 	if err != nil || !decision.Allowed {
+		if _, werr := s.witness.AppendResidencyRecord(ctx, declarationRecord(tenantID, actorID, cloud, region, prev, hasPrev, true, s.now())); werr != nil {
+			// A refusal that cannot be recorded is a failure, not a silent denial
+			// (package invariant): the caller sees the same coarse shape either way.
+			return api.Declaration{}, api.ErrResidencyUnavailable
+		}
 		return api.Declaration{}, api.ErrResidencyUnavailable
 	}
 
@@ -86,17 +106,7 @@ func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles [
 	// witness that cannot take the record fails the declaration; an unrecorded declaration
 	// is a worse failure than a refused one.
 	now := s.now()
-	rec, err := s.witness.AppendResidencyRecord(ctx, api.WitnessEntry{
-		TenantID: tenantID,
-		Action:   platformaudit.ActionResidencyDeclarationSet,
-		ActorID:  actorID,
-		Resource: "tenant/" + tenantID,
-		Detail: map[string]string{
-			platformaudit.DetailResidencyPinnedCloud:  cloud,
-			platformaudit.DetailResidencyPinnedRegion: region,
-		},
-		OccurredAt: now,
-	})
+	rec, err := s.witness.AppendResidencyRecord(ctx, declarationRecord(tenantID, actorID, cloud, region, prev, hasPrev, false, now))
 	if err != nil {
 		return api.Declaration{}, api.ErrResidencyUnavailable
 	}
@@ -143,13 +153,39 @@ func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles [
 	return decl, nil
 }
 
+// declarationRecord is the one witness entry a declaration act appends — allowed or
+// refused. It names tenant, actor, previous and new pinning, and the server's effective
+// time (SPEC-0043 AC1); the record and the enforcement cannot disagree because both are
+// built from the same verified facts.
+func declarationRecord(tenantID, actorID, cloud, region string, prev api.Declaration, hasPrev, denied bool, at time.Time) api.WitnessEntry {
+	detail := map[string]string{
+		platformaudit.DetailResidencyPinnedCloud:  cloud,
+		platformaudit.DetailResidencyPinnedRegion: region,
+	}
+	if hasPrev {
+		detail[platformaudit.DetailResidencyPreviousCloud] = prev.Cloud
+		detail[platformaudit.DetailResidencyPreviousRegion] = prev.Region
+	}
+	return api.WitnessEntry{
+		TenantID:   tenantID,
+		Action:     platformaudit.ActionResidencyDeclarationSet,
+		ActorID:    actorID,
+		Resource:   "tenant/" + tenantID,
+		Detail:     detail,
+		Denied:     denied,
+		OccurredAt: at,
+	}
+}
+
 // Declaration implements api.Service. The caller's tenant scope is enforced by the store:
-// a cross-tenant read is the same coarse denial as an absent declaration (SPEC-0001).
+// a cross-tenant read is the same coarse denial as an absent declaration (SPEC-0001). The
+// read is the effective-dated one at the service's clock — the same instant enforcement
+// consults (T-0039).
 func (s *Service) Declaration(ctx context.Context, tenantID string) (api.Declaration, bool, error) {
 	if tenantID == "" {
 		return api.Declaration{}, false, api.ErrResidencyUnavailable
 	}
-	return s.store.Declaration(ctx, tenantID)
+	return s.store.DeclarationAt(ctx, tenantID, s.now())
 }
 
 // ObservePlacement implements api.Service (SPEC-0040 AC2, AC4). The caller's tenant scope
@@ -159,11 +195,15 @@ func (s *Service) ObservePlacement(ctx context.Context, tenantID, dataPlaneID, c
 	if tenantID == "" || dataPlaneID == "" {
 		return api.ErrResidencyUnavailable
 	}
-	decl, ok, err := s.store.Declaration(ctx, tenantID)
+	now := s.now()
+	// The gate consults the effective-dated declaration at the service's clock — the
+	// durable store's DeclarationAt read, same-instant rows tie-broken on the later
+	// chain position (T-0039, SPEC-0042 AC3). A read failure is the coarse failure: an
+	// unavailable constraint refuses, never admits (SPEC-0043 AC4).
+	decl, ok, err := s.store.DeclarationAt(ctx, tenantID, now)
 	if err != nil {
 		return api.ErrResidencyUnavailable
 	}
-	now := s.now()
 
 	if ok && domain.Contradiction(decl.Cloud, decl.Region, cloud, region) {
 		// AC2: the attempt is refused AND witnessed with the declared and the attempted

@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -96,7 +97,13 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	clock := &fakeClock{t: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	// The clock anchors to the WALL instant the rig is built, and every decision below
+	// advances RELATIVELY from it: the dev CA is dated on the wall clock, so the
+	// app-layer chain verification (which reads cfg.Now) must start at the same instant —
+	// a fixed past date reads the wall-dated CA as not-yet-valid once the machine's clock
+	// passes it, refusing chains without an audit record for a reason unrelated to the
+	// behavior under test.
+	clock := &fakeClock{t: time.Now()}
 	logs := &strings.Builder{}
 	logf := func(format string, args ...any) { fmt.Fprintf(logs, format+"\n", args...) }
 
@@ -357,7 +364,25 @@ func TestRevocationRefusesNextConnection(t *testing.T) {
 		t.Fatal("a revoked data plane must not be admitted")
 	}
 	if got := len(r.audits.of(platformaudit.ActionAgentConnectionRefused)); got != 1 {
-		t.Fatalf("connection-refused audit records = %d, want 1", got)
+		var names []string
+		r.audits.mu.Lock()
+		for _, e := range r.audits.events {
+			names = append(names, fmt.Sprintf("%T", e))
+		}
+		r.audits.mu.Unlock()
+		// Diagnose the wire failure directly: replay the same leaf through the app-layer
+		// admission and report its verdict, separating a TLS-transport anomaly from an
+		// unaudited refusal path.
+		var verdict string
+		block, _ := pem.Decode(ack.GetIssuedCertificate().GetCertificatePem())
+		if block != nil {
+			if _, err := r.svc.AdmitPeerCertificates(context.Background(), [][]byte{block.Bytes}); err != nil {
+				verdict = err.Error()
+			} else {
+				verdict = "admitted"
+			}
+		}
+		t.Fatalf("connection-refused audit records = %d, want 1; logs=%q events=%v direct-admit=%s", got, r.logs.String(), names, verdict)
 	}
 	if ev := r.audits.of(platformaudit.ActionAgentConnectionRefused)[0]; ev.Tenant() != "acme" {
 		t.Fatalf("refusal record tenant = %q, want acme", ev.Tenant())

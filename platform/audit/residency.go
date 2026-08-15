@@ -37,13 +37,18 @@ const (
 )
 
 // Detail keys the residency witness writes onto its trail records. The evidence pack's
-// residency classifier reads exactly these keys; they are server-produced facts, never
-// caller claims. Every residency record carries both placements it relates — pinned
-// (the declaration in force) and observed (the placement reported or attempted) — so a
-// consumer never needs a second record to judge either side (SPEC-0040 AC2, AC4).
+// residency classifier reads exactly the pinned/observed pair; they are server-produced
+// facts, never caller claims. Every residency record carries both placements it relates —
+// pinned (the declaration in force) and observed (the placement reported or attempted) —
+// so a consumer never needs a second record to judge either side (SPEC-0040 AC2, AC4).
+// Declaration records additionally carry the previous pinning when one was in force, so a
+// declaration, a replacement and a refusal each name previous and new pinning on the one
+// record (SPEC-0043 AC1); adding a key is additive by construction.
 const (
 	DetailResidencyPinnedCloud    = "pinned_cloud"
 	DetailResidencyPinnedRegion   = "pinned_region"
 	DetailResidencyObservedCloud  = "observed_cloud"
 	DetailResidencyObservedRegion = "observed_region"
+	DetailResidencyPreviousCloud  = "previous_cloud"
+	DetailResidencyPreviousRegion = "previous_region"
 )
