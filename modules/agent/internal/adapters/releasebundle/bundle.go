@@ -185,7 +185,14 @@ func (b *Bundle) RemoveKey(keyID string) error {
 		return fmt.Errorf("releasebundle: refusing to remove the SIGNING key %q before a successor is staged: %w", keyID, ErrKeyStillNeeded)
 	}
 	for i := range b.keys {
-		if b.keys[i].ID == keyID {
+		// Only the LIVE occurrence is stamped. Stage permits an ID whose
+		// every occurrence is retired to be staged again, so the bundle can
+		// hold several entries for one ID — and an entry retired earlier
+		// keeps the instant it stopped being trusted. Keys() is the
+		// operator-visible rotation state and it rides into Snapshot: a
+		// later removal that restamped it would falsify the record of when
+		// a key left trust.
+		if b.keys[i].ID == keyID && b.keys[i].RemovedAt.IsZero() {
 			b.keys[i].RemovedAt = b.now()
 		}
 	}
@@ -344,18 +351,34 @@ func (b *Bundle) Snapshot() Snapshot {
 }
 
 // Restore rebuilds the bundle's state from a snapshot, re-validating every
-// key's PEM.
+// key's PEM and the snapshot's own consistency: a bundle that holds live keys
+// must name one of them as its signing key. A snapshot failing either check is
+// refused WHOLE — a half-restored bundle would publish a signing key ID absent
+// from the key set it distributes, telling the fleet to expect signatures by a
+// key it was never given.
 func (b *Bundle) Restore(snap Snapshot) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	keys := make([]Key, 0, len(snap.Keys))
+	signingIsLive := false
+	live := 0
 	for _, sk := range snap.Keys {
 		if _, err := parsePublicKey(sk.PublicKeyPEM); err != nil {
 			return fmt.Errorf("releasebundle: restore key %q: %w", sk.ID, err)
 		}
+		if sk.RemovedAt.IsZero() {
+			live++
+			if sk.ID == snap.SigningKeyID {
+				signingIsLive = true
+			}
+		}
 		pemCopy := make([]byte, len(sk.PublicKeyPEM))
 		copy(pemCopy, sk.PublicKeyPEM)
 		keys = append(keys, Key{ID: sk.ID, PublicKeyPEM: pemCopy, StagedAt: sk.StagedAt, RemovedAt: sk.RemovedAt})
+	}
+	if live > 0 && !signingIsLive {
+		return fmt.Errorf("releasebundle: restore: signing key %q is not live in the snapshot's %d key(s)",
+			snap.SigningKeyID, live)
 	}
 	b.keys, b.signingKeyID, b.revision, b.stagingRev = keys, snap.SigningKeyID, snap.Revision, snap.StagingRevision
 	return nil

@@ -70,6 +70,15 @@ type Bundle struct {
 	signer Signer
 	now    func() time.Time
 
+	// firstRootMu serializes the two acts that claim the bundle's FIRST root
+	// — Bootstrap and ReattachRoot. Both must decide "the bundle is empty"
+	// and act on that decision as one step, and both cross the custody seam
+	// in between (GenerateKey / PublicKey / self-sign), which mu must not be
+	// held across. This lock covers the whole act; mu still guards the state
+	// itself, and the emptiness is re-checked under it at the append point,
+	// so a Stage racing a Bootstrap cannot slip a root in between either.
+	firstRootMu sync.Mutex
+
 	mu     sync.Mutex
 	roots  []Root         // oldest first; the LAST live root is the issuance root
 	issued []issuedRecord // every certificate this control plane issued through the bundle
@@ -119,15 +128,53 @@ func NewBundle(signer Signer, now func() time.Time) (*Bundle, error) {
 }
 
 // Bootstrap stages the FIRST root of a fresh bundle under key name. A bundle
-// bootstraps exactly once in its life; afterwards rotation is Stage.
+// bootstraps exactly once in its life; afterwards rotation is Stage. The
+// emptiness decision and the staging are ONE act: two concurrent bootstraps
+// can never both observe an empty bundle and both stage a root, which would
+// leave two "first" roots, an issuance root chosen by append order, and a
+// custody key generated for each.
 func (b *Bundle) Bootstrap(ctx context.Context, name string) (KeyRef, error) {
-	b.mu.Lock()
-	live := b.liveRootsLocked()
-	b.mu.Unlock()
-	if len(live) > 0 {
-		return "", fmt.Errorf("custody: bundle already bootstrapped; rotate with Stage")
+	b.firstRootMu.Lock()
+	defer b.firstRootMu.Unlock()
+	if err := b.requireEmpty("bundle already bootstrapped; rotate with Stage"); err != nil {
+		return "", err
 	}
-	return b.Stage(ctx, name)
+	root, err := b.buildRoot(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return b.appendFirstRoot(root, "bundle already bootstrapped; rotate with Stage")
+}
+
+// requireEmpty refuses when the bundle already holds a live root. It is the
+// first-root precondition, read under mu and stated once for both claimants.
+func (b *Bundle) requireEmpty(because string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.liveRootsLocked()) > 0 {
+		return fmt.Errorf("custody: %s", because)
+	}
+	return nil
+}
+
+// appendFirstRoot commits a first root, re-checking under mu that the bundle
+// is still empty: the custody seam call between the precondition and here is
+// where a concurrent Stage could otherwise have landed a root. The freshly
+// generated custody key is left behind on that path — the key is inert
+// without a root that references it, and inventing a delete on the custody
+// seam to clean it up would be a wider posture than ADR-0064 grants.
+func (b *Bundle) appendFirstRoot(root Root, because string) (KeyRef, error) {
+	b.mu.Lock()
+	if len(b.liveRootsLocked()) > 0 {
+		b.mu.Unlock()
+		return "", fmt.Errorf("custody: %s", because)
+	}
+	b.roots = append(b.roots, root)
+	b.revision++
+	b.stagingRev++
+	b.mu.Unlock()
+	b.changed()
+	return root.Ref, nil
 }
 
 // Stage brings one NEW custody key into the bundle beside the current root:
@@ -216,12 +263,15 @@ func (b *Bundle) buildRoot(ctx context.Context, name string) (Root, error) {
 // rebuilt certificate is redistributed and the fleet re-converges on it —
 // and the lost issuance ledger is the honest price of the lost snapshot.
 // The composition logs this branch loudly; re-attach is never silent.
+// It claims the first root under the same one-act discipline Bootstrap does:
+// the emptiness decision and the append are one step, so a disaster-recovery
+// path racing itself cannot rebuild two first roots.
 func (b *Bundle) ReattachRoot(ctx context.Context, name string) (KeyRef, error) {
-	b.mu.Lock()
-	live := b.liveRootsLocked()
-	b.mu.Unlock()
-	if len(live) > 0 {
-		return "", fmt.Errorf("custody: bundle already holds live roots; re-attach applies to an empty bundle only")
+	const because = "bundle already holds live roots; re-attach applies to an empty bundle only"
+	b.firstRootMu.Lock()
+	defer b.firstRootMu.Unlock()
+	if err := b.requireEmpty(because); err != nil {
+		return "", err
 	}
 	pub, err := b.signer.PublicKey(ctx, KeyRef(name))
 	if err != nil {
@@ -231,13 +281,7 @@ func (b *Bundle) ReattachRoot(ctx context.Context, name string) (KeyRef, error) 
 	if err != nil {
 		return "", err
 	}
-	b.mu.Lock()
-	b.roots = append(b.roots, root)
-	b.revision++
-	b.stagingRev++
-	b.mu.Unlock()
-	b.changed()
-	return root.Ref, nil
+	return b.appendFirstRoot(root, because)
 }
 
 // signRootCert self-signs one CA certificate through the referenced custody
@@ -411,7 +455,14 @@ func (b *Bundle) RemoveRoot(ref KeyRef) error {
 		return fmt.Errorf("custody: %d live certificate(s) still chain to root %q: %w", liveCount, ref, ErrRootStillNeeded)
 	}
 	for i := range b.roots {
-		if b.roots[i].Ref == ref {
+		// Only the LIVE entry is stamped. A root already retired keeps the
+		// instant it stopped being trusted: Roots() is the operator-visible
+		// rotation state and it rides into the durable snapshot, so a later
+		// removal must never rewrite an earlier one's history. (The API
+		// cannot currently produce two entries for one reference — the
+		// custody service refuses a name it already holds — so this is the
+		// invariant stated, not a bug repaired.)
+		if b.roots[i].Ref == ref && b.roots[i].RemovedAt.IsZero() {
 			b.roots[i].RemovedAt = now
 		}
 	}

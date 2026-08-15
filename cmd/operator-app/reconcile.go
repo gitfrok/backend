@@ -63,6 +63,15 @@ type Reconciler struct {
 	Now       func() time.Time
 	Logf      func(format string, args ...any)
 	SyncEvery time.Duration
+
+	// lastObserved is the version the workload was last REPORTED to be
+	// running — the answer a refusal must keep giving. The CR's status is
+	// written as a whole map (kubePlane.WriteStatus), so a refusal that
+	// reported an empty observed version would DELETE the fact rather than
+	// leave it standing, and the operator would lose the one thing the CR
+	// exists to answer (SPEC-0039 AC6). It advances only on a pass that
+	// observed or converged the workload, never on a refusal.
+	lastObserved string
 }
 
 // Run loops until the context ends. A reconciliation error is reported on the
@@ -88,21 +97,21 @@ func (r *Reconciler) Run(ctx context.Context) error {
 func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	version, err := r.Desired.DesiredVersion(ctx)
 	if err != nil {
-		return r.fail(ctx, "", fmt.Sprintf("desired version unreadable: %v", err))
+		return r.fail(ctx, fmt.Sprintf("desired version unreadable: %v", err))
 	}
 	rel, err := r.Manifests.Manifest(ctx, r.Component, version)
 	if err != nil {
-		return r.fail(ctx, "", fmt.Sprintf("release %s@%s not applicable: %v", r.Component, version, err))
+		return r.fail(ctx, fmt.Sprintf("release %s@%s not applicable: %v", r.Component, version, err))
 	}
 	// VERIFY BEFORE APPLY (SPEC-0039 AC3): an unsigned or mis-signed release
 	// is refused here, before the workload is touched.
 	if err := r.Bundle.Verify(rel.CanonicalIdentity(), rel.SignatureDER); err != nil {
-		return r.fail(ctx, "", err.Error())
+		return r.fail(ctx, err.Error())
 	}
 	pin := rel.CanonicalIdentity()
 	current, ok, err := r.Applier.CurrentWorkloadImage(ctx)
 	if err != nil {
-		return r.fail(ctx, "", fmt.Sprintf("workload image unreadable: %v", err))
+		return r.fail(ctx, fmt.Sprintf("workload image unreadable: %v", err))
 	}
 	if ok && current == pin {
 		// Idempotent convergence: the desired signed release already runs —
@@ -113,7 +122,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		})
 	}
 	if err := r.Applier.ApplyWorkloadImage(ctx, pin); err != nil {
-		return r.fail(ctx, "", fmt.Sprintf("applying %s: %v", pin, err))
+		return r.fail(ctx, fmt.Sprintf("applying %s: %v", pin, err))
 	}
 	r.Logf("operator-app: converged workload onto %s", pin)
 	return r.report(ctx, StatusReport{
@@ -122,18 +131,27 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	})
 }
 
-// fail reports a Failed phase. The observed version is NEVER advanced on a
-// refusal: the CR reads what is actually running, not what was attempted
-// (SPEC-0039 AC6). The report's own write error wins, because a reconciler
-// that cannot report is flying blind.
-func (r *Reconciler) fail(ctx context.Context, observed, message string) error {
-	if err := r.report(ctx, StatusReport{ObservedVersion: observed, Phase: PhaseFailed, Message: message}); err != nil {
+// fail reports a Failed phase carrying the version the workload is STILL
+// running. The observed version is never advanced on a refusal — the CR reads
+// what is actually running, not what was attempted (SPEC-0039 AC6) — but it is
+// not cleared either: the status is written as a whole map, so an empty value
+// would erase the fact instead of leaving it. Before any successful pass the
+// last observed version is genuinely unknown and stays empty. The report's own
+// write error wins, because a reconciler that cannot report is flying blind.
+func (r *Reconciler) fail(ctx context.Context, message string) error {
+	if err := r.report(ctx, StatusReport{ObservedVersion: r.lastObserved, Phase: PhaseFailed, Message: message}); err != nil {
 		return err
 	}
 	return fmt.Errorf("%s", message)
 }
 
+// report writes one status and, when the report names a version the workload
+// was observed or converged onto, remembers it as the answer a later refusal
+// must keep giving.
 func (r *Reconciler) report(ctx context.Context, rep StatusReport) error {
+	if rep.Phase != PhaseFailed && rep.ObservedVersion != "" {
+		r.lastObserved = rep.ObservedVersion
+	}
 	rep.LastHeartbeatTime = r.Now()
 	return r.Status.WriteStatus(ctx, rep)
 }

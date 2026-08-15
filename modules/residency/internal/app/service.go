@@ -205,10 +205,15 @@ func grantedRole(roles []string) string {
 	return "owner"
 }
 
-// Declaration implements api.Service. The caller's tenant scope is enforced by the store:
-// a cross-tenant read is the same coarse denial as an absent declaration (SPEC-0001). The
-// read is the effective-dated one at the service's clock — the same instant enforcement
-// consults (T-0039).
+// Declaration implements api.Service. The tenant is the CALLER'S OWN — established at the
+// door from a verified principal, or from the enrolment token on the observation path — and
+// that is where the scope is enforced: the durable store scopes its transaction from this
+// argument, so RLS is evaluated for the tenant asked about and can never itself refuse a
+// caller who asks about someone else. What the store does add is a refusal of the one shape
+// no caller may express: a tenant argument that contradicts the tenant already on the
+// context (postgres.scoped). A cross-tenant read is then the same coarse denial as an absent
+// declaration (SPEC-0001). The read is the effective-dated one at the service's clock — the
+// same instant enforcement consults (T-0039).
 func (s *Service) Declaration(ctx context.Context, tenantID string) (api.Declaration, bool, error) {
 	if tenantID == "" {
 		return api.Declaration{}, false, api.ErrResidencyUnavailable

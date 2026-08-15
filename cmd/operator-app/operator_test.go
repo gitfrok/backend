@@ -219,6 +219,46 @@ func TestMisSignedReleaseRefusedBeforeApply(t *testing.T) {
 	}
 }
 
+// TestFailureKeepsTheObservedVersionOfWhatIsRunning: a refusal must not erase
+// what the plane is actually running (SPEC-0039 AC6). The CR's status is
+// written as a whole map, so reporting an empty observed version on a refusal
+// does not HOLD the previous value — it deletes it, and the operator loses the
+// one fact the CR exists to answer.
+func TestFailureKeepsTheObservedVersionOfWhatIsRunning(t *testing.T) {
+	dir, key := newTrustDir(t)
+	bundle, err := LoadReleaseTrustBundle(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := signedRelease(key, "dataplane-app", "0.1.0", "docker.io/gitfrok/dataplane-app", "sha256:aa")
+
+	applier, status := &fakeApplier{}, &fakeStatus{}
+	r := newReconciler(bundle, good, applier, status)
+	if err := r.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if last := status.reports[len(status.reports)-1]; last.ObservedVersion != "0.1.0" {
+		t.Fatalf("after convergence status = %+v, want observed 0.1.0", last)
+	}
+
+	// The desired version moves to a release whose manifest is absent: the
+	// refusal is correct, and the workload keeps running 0.1.0.
+	r.Desired = fixedVersion("0.2.0")
+	if err := r.ReconcileOnce(context.Background()); err == nil {
+		t.Fatal("a missing manifest must be refused")
+	}
+	last := status.reports[len(status.reports)-1]
+	if last.Phase != PhaseFailed {
+		t.Fatalf("status = %+v, want Failed", last)
+	}
+	if last.ObservedVersion != "0.1.0" {
+		t.Fatalf("status = %+v: a refusal erased the observed version; the CR must keep reading what is RUNNING (0.1.0)", last)
+	}
+	if len(applier.applied) != 1 {
+		t.Fatalf("applied = %v, want only the first convergence", applier.applied)
+	}
+}
+
 // TestUnsignedManifestRefused: a manifest with no signature line is unsigned
 // and not applicable — the exact refusal the super-repo gate asserts.
 func TestUnsignedManifestRefused(t *testing.T) {

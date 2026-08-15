@@ -54,7 +54,10 @@ var _ app.Store = (*Store)(nil)
 // a replace retains the row it supersedes, and the migration's grant set
 // denies the UPDATE and DELETE that would do otherwise (SPEC-0042 AC3).
 func (s *Store) PutDeclaration(ctx context.Context, d api.Declaration) error {
-	ctx = scoped(ctx, d.TenantID)
+	ctx, err := scoped(ctx, d.TenantID)
+	if err != nil {
+		return err
+	}
 	return s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO residency.declarations
@@ -84,9 +87,12 @@ func (s *Store) Declaration(ctx context.Context, tenantID string) (api.Declarati
 // served index is (tenant_id, effective_at); the history the read walks is
 // retained because nothing on this table ever updates or deletes a row.
 func (s *Store) DeclarationAt(ctx context.Context, tenantID string, at time.Time) (api.Declaration, bool, error) {
-	ctx = scoped(ctx, tenantID)
+	ctx, err := scoped(ctx, tenantID)
+	if err != nil {
+		return api.Declaration{}, false, err
+	}
 	var d api.Declaration
-	err := s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+	err = s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return scanDeclaration(tx.QueryRow(ctx,
 			`SELECT tenant_id, cloud, region, effective_at, actor_id, chain_seq, record_hash
 			   FROM residency.declarations
@@ -108,7 +114,10 @@ func (s *Store) DeclarationAt(ctx context.Context, tenantID string, at time.Time
 // Upsert, not insert: the port's shape is the LATEST placement per data
 // plane, so a re-observation converges the row rather than appending one.
 func (s *Store) PutObservation(ctx context.Context, tenantID, dataPlaneID, cloud, region string) error {
-	ctx = scoped(ctx, tenantID)
+	ctx, err := scoped(ctx, tenantID)
+	if err != nil {
+		return err
+	}
 	return s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO residency.observations
@@ -131,9 +140,12 @@ func (s *Store) PutObservation(ctx context.Context, tenantID, dataPlaneID, cloud
 // in-memory store yields, so the declaration-time contradiction check walks
 // exactly the same set on either store.
 func (s *Store) ObservedPlacements(ctx context.Context, tenantID string) ([]api.ObservedPlacement, error) {
-	ctx = scoped(ctx, tenantID)
+	ctx, err := scoped(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
 	var out []api.ObservedPlacement
-	err := s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+	err = s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT data_plane_id, cloud, region
 			   FROM residency.observations
@@ -164,9 +176,25 @@ func scanDeclaration(r interface{ Scan(dest ...any) error }, d *api.Declaration)
 	return r.Scan(&d.TenantID, &d.Cloud, &d.Region, &d.EffectiveAt, &d.ActorID, &d.ChainSeq, &d.RecordHash)
 }
 
-// scoped returns ctx carrying tenantID. The adapter scopes from its own
-// parameter rather than trusting the caller: the tenant argument is the
-// record's own tenancy, and WithTenant on an already-scoped ctx is harmless.
-func scoped(ctx context.Context, tenantID string) context.Context {
-	return tenancy.WithTenant(ctx, tenancy.ID(tenantID))
+// scoped returns ctx carrying tenantID — and REFUSES when the context already
+// names a different tenant.
+//
+// The refusal is here because RLS cannot make it: the adapter scopes the
+// transaction from its own argument, so `SET LOCAL app.tenant_id` names the
+// tenant that was ASKED FOR and the policy then admits exactly the rows that
+// call requested. RLS protects one tenant's rows from a transaction scoped to
+// another; it has nothing to say about a transaction scoped to the tenant in
+// the request. The mismatch is what a caller must never be able to express, so
+// it is refused before any database work — an out-of-scope query must not reach
+// Postgres even to be denied there (SPEC-0001 AC2, the posture db.InTx already
+// takes for an unscoped context).
+//
+// An UNSCOPED context is not a mismatch: the composition root's paths establish
+// the scope from the record's own tenancy, which is what the argument carries.
+func scoped(ctx context.Context, tenantID string) (context.Context, error) {
+	if current, ok := tenancy.FromContext(ctx); ok && string(current) != tenantID {
+		return nil, fmt.Errorf("residency postgres: refusing a call for tenant %q under a context scoped to %q: %w",
+			tenantID, current, api.ErrResidencyUnavailable)
+	}
+	return tenancy.WithTenant(ctx, tenancy.ID(tenantID)), nil
 }

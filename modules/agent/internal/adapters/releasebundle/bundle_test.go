@@ -435,3 +435,101 @@ func TestChangeHookFiresOutsideTheLock(t *testing.T) {
 		t.Fatal("the change hook deadlocked — it fired under the bundle lock")
 	}
 }
+
+// TestRemovalStampsOnlyTheLiveOccurrence: Stage deliberately permits an ID
+// whose every occurrence is retired to be staged again, so the bundle can
+// hold several entries for one key ID. Retiring the live occurrence must not
+// rewrite the instant an EARLIER one stopped being trusted — Keys() is the
+// operator-visible rotation state and it rides into the durable Snapshot, so
+// a rewritten timestamp is a falsified record of when a key left trust.
+func TestRemovalStampsOnlyTheLiveOccurrence(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	b, err := releasebundle.NewBundle(clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	gen1 := newTestKey(t, "release-signing-gen1")
+	gen2 := newTestKey(t, "release-signing-gen2")
+	if err := b.Bootstrap(gen1.id, gen1.pem); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if err := b.Stage(gen2.id, gen2.pem); err != nil {
+		t.Fatalf("Stage gen2: %v", err)
+	}
+	if err := b.RemoveKey(gen1.id); err != nil {
+		t.Fatalf("RemoveKey gen1: %v", err)
+	}
+	retiredAt := time.Time{}
+	for _, k := range b.Keys() {
+		if k.ID == gen1.id {
+			retiredAt = k.RemovedAt
+		}
+	}
+	if retiredAt.IsZero() {
+		t.Fatal("gen1 carries no retirement instant after removal")
+	}
+
+	// The same ID returns with new material, takes signing, and is retired
+	// again a day later.
+	clk.Advance(24 * time.Hour)
+	gen1b := newTestKey(t, "release-signing-gen1")
+	if err := b.Stage(gen1b.id, gen1b.pem); err != nil {
+		t.Fatalf("re-stage gen1: %v", err)
+	}
+	gen3 := newTestKey(t, "release-signing-gen3")
+	if err := b.Stage(gen3.id, gen3.pem); err != nil {
+		t.Fatalf("Stage gen3: %v", err)
+	}
+	clk.Advance(24 * time.Hour)
+	if err := b.RemoveKey(gen1b.id); err != nil {
+		t.Fatalf("RemoveKey re-staged gen1: %v", err)
+	}
+
+	var stamps []time.Time
+	for _, k := range b.Keys() {
+		if k.ID == gen1.id {
+			stamps = append(stamps, k.RemovedAt)
+		}
+	}
+	if len(stamps) != 2 {
+		t.Fatalf("bundle holds %d occurrences of %q, want 2 (retired + re-staged)", len(stamps), gen1.id)
+	}
+	if !stamps[0].Equal(retiredAt) {
+		t.Fatalf("the FIRST occurrence's retirement moved from %s to %s — a later removal rewrote rotation history",
+			retiredAt, stamps[0])
+	}
+	if stamps[1].Equal(stamps[0]) {
+		t.Fatalf("both occurrences carry the same retirement instant %s — they retired a day apart", stamps[0])
+	}
+}
+
+// TestRestoreRefusesASigningKeyThatIsNotLive: a snapshot whose signing key
+// names no live key would restore into a bundle that publishes a
+// SigningKeyID absent from its own key set — the fleet would be told to
+// expect signatures by a key it does not trust. The restore refuses instead.
+func TestRestoreRefusesASigningKeyThatIsNotLive(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	b, err := releasebundle.NewBundle(clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	gen1 := newTestKey(t, "release-signing-gen1")
+	if err := b.Bootstrap(gen1.id, gen1.pem); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	snap := b.Snapshot()
+	snap.SigningKeyID = "release-signing-never-staged"
+
+	restored, err := releasebundle.NewBundle(clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	if err := restored.Restore(snap); err == nil {
+		t.Fatal("Restore accepted a signing key that is not live in the restored bundle")
+	}
+	// The refusal changes nothing: the bundle stays empty rather than
+	// half-restored.
+	if _, ok, err := restored.LatestReleaseTrustBundle(context.Background()); ok || err != nil {
+		t.Fatalf("after a refused restore the bundle projects (ok=%v, err=%v), want nothing", ok, err)
+	}
+}

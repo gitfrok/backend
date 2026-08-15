@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -399,5 +400,92 @@ func TestFailedIssuanceReleasesItsReservation(t *testing.T) {
 	}
 	if err := bundle.RemoveRoot(newRef); err != nil {
 		t.Fatalf("RemoveRoot after failed issuance = %v, want success — the reservation must be released", err)
+	}
+}
+
+// TestBootstrapIsAtomicUnderConcurrency: bootstrapping is a once-in-a-bundle
+// act. The emptiness check and the staging must be ONE step — otherwise two
+// composition paths racing each other both observe an empty bundle and both
+// stage a root, leaving a bundle with two "first" roots, an issuance root
+// chosen by append order, and a custody key generated for each. The peer
+// releasebundle.Bundle already holds this property; the CA bundle must too.
+func TestBootstrapIsAtomicUnderConcurrency(t *testing.T) {
+	fake := custody.NewFakeSigner()
+	clk := newClock()
+	bundle, err := custody.NewBundle(fake, clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	const racers = 8
+	var wg sync.WaitGroup
+	results := make(chan error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Distinct key names: the custody service refuses a name it
+			// already holds, so a shared name would serialize the race at
+			// the seam instead of at the bundle.
+			results <- func() error {
+				_, err := bundle.Bootstrap(context.Background(), fmt.Sprintf("agent-ca-racer-%d", i))
+				return err
+			}()
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+	succeeded := 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("%d concurrent bootstraps succeeded, want exactly 1", succeeded)
+	}
+	if roots := bundle.Roots(); len(roots) != 1 {
+		t.Fatalf("bundle holds %d roots after the race, want exactly 1", len(roots))
+	}
+}
+
+// TestReattachIsAtomicUnderConcurrency: re-attach applies to an EMPTY bundle
+// only, and the same race applies — the check and the append are one step or
+// the disaster-recovery path can rebuild two first roots.
+func TestReattachIsAtomicUnderConcurrency(t *testing.T) {
+	fake := custody.NewFakeSigner()
+	clk := newClock()
+	// The custody service kept the keys; the bundle's snapshot is gone.
+	for i := 0; i < 8; i++ {
+		if _, err := fake.GenerateKey(context.Background(), fmt.Sprintf("agent-ca-kept-%d", i)); err != nil {
+			t.Fatalf("GenerateKey: %v", err)
+		}
+	}
+	bundle, err := custody.NewBundle(fake, clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	var wg sync.WaitGroup
+	results := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := bundle.ReattachRoot(context.Background(), fmt.Sprintf("agent-ca-kept-%d", i))
+			results <- err
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+	succeeded := 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("%d concurrent re-attaches succeeded, want exactly 1", succeeded)
+	}
+	if roots := bundle.Roots(); len(roots) != 1 {
+		t.Fatalf("bundle holds %d roots after the race, want exactly 1", len(roots))
 	}
 }
