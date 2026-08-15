@@ -138,11 +138,23 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		trail = audit.NewMemoryTrail()
 		auditsink.NewLogSink(trail).Subscribe(b)
 	}
-	residencySvc := residency.New(pdp, residencyTrailWitness{trail}, residencyapi.Config{
+	residencyCfg := residencyapi.Config{
 		DetectionWindow:   residencyDuration(os.Getenv, residencyDetectionWindowEnv),
 		MaxReportInterval: residencyDuration(os.Getenv, residencyReportIntervalEnv),
 		Now:               time.Now,
-	}, logf)
+	}
+	// The store selection mirrors the agent-stores branch above: with
+	// GITFROK_DATABASE_URL declarations are durable — a declaration made
+	// before a kill-and-restart is exactly what the restarted plane cites,
+	// and retained effective-dated history answers "in force at t"
+	// (T-0037, SPEC-0042 AC3). Without it the dev/test in-memory
+	// composition stays the default (ADR-0062 decision 1).
+	var residencySvc *residency.Service
+	if pool != nil {
+		residencySvc = residency.NewWithStore(pdp, residencyTrailWitness{trail}, residency.NewPostgresStore(pool), residencyCfg, logf)
+	} else {
+		residencySvc = residency.New(pdp, residencyTrailWitness{trail}, residencyCfg, logf)
+	}
 	if !agent.AttachPlacementGate(svc, residencyPlacementGate{svc: residencySvc}) {
 		if pool != nil {
 			pool.Close()
