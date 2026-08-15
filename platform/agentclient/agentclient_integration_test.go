@@ -244,6 +244,95 @@ func TestInstallSelfRegistersAndServe(t *testing.T) {
 	}
 }
 
+// TestAC5_MultiPlaneNoInboundTripwire re-asserts the zero-inbound property for the
+// MULTI-PLANE shape (SPEC-0045 AC5, extending SPEC-0039 AC4): two data planes of one
+// tenant enrol, hold their channels open, read CONNECTED side by side — and the control
+// plane still opens no connection toward either customer cluster. N planes change the
+// registry's shape, never the boundary's direction.
+func TestAC5_MultiPlaneNoInboundTripwire(t *testing.T) {
+	cp := newCPRig(t)
+
+	// One cluster stand-in per plane; every connection either accepts is an inbound
+	// violation.
+	var inbound int
+	var inboundMu sync.Mutex
+	clusterFor := func(name string) net.Listener {
+		t.Helper()
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("cluster listener %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = lis.Close() })
+		go func() {
+			for {
+				conn, err := lis.Accept()
+				if err != nil {
+					return
+				}
+				inboundMu.Lock()
+				inbound++
+				inboundMu.Unlock()
+				_ = conn.Close()
+			}
+		}()
+		return lis
+	}
+	_ = clusterFor("plane-1")
+	_ = clusterFor("plane-2")
+
+	planeIDs := make([]string, 0, 2)
+	for _, region := range []string{"eu-west1", "us-east1"} {
+		_, secret, err := cp.svc.IssueEnrolmentToken(operatorCtx("acme", "op-1"), "acme", "op-1", time.Hour)
+		if err != nil {
+			t.Fatalf("IssueEnrolmentToken: %v", err)
+		}
+		client, err := New(Config{
+			GatewayAddr:     cp.addr,
+			ServerName:      "localhost",
+			Roots:           cp.ca.CAPool(),
+			Store:           &MemoryCertStore{},
+			ClockSkewLeeway: 5 * time.Minute,
+			HeartbeatEvery:  10 * time.Millisecond,
+			Now:             cp.clock.Now,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		id, err := client.Bootstrap(context.Background(), EnrolInput{
+			Token: secret, Cloud: agentpb.Cloud_CLOUD_GKE, Region: region,
+			AgentVersion: "0.1.0", K8sVersion: "1.31.0",
+		})
+		if err != nil {
+			t.Fatalf("Bootstrap %s: %v", region, err)
+		}
+		planeIDs = append(planeIDs, id.DataPlaneID)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		go func() { _ = client.Connect(ctx) }()
+	}
+	if planeIDs[0] == planeIDs[1] {
+		t.Fatalf("two enrolments minted the same data-plane ID %q", planeIDs[0])
+	}
+
+	// BOTH planes read CONNECTED at the same time: the multi-plane shape serves.
+	waitFor(t, 5*time.Second, func() bool {
+		fleet, err := cp.svc.Fleet(operatorCtx("acme", "op-1"), "acme", "op-1")
+		if err != nil || len(fleet) != 2 {
+			return false
+		}
+		return fleet[0].Status == agentapi.StatusConnected && fleet[1].Status == agentapi.StatusConnected
+	}, "the fleet never reached two CONNECTED planes")
+
+	// The tripwire, extended to N: zero inbound connections to ANY customer cluster.
+	inboundMu.Lock()
+	got := inbound
+	inboundMu.Unlock()
+	if got != 0 {
+		t.Fatalf("control plane made %d inbound connections to the customer clusters, want 0", got)
+	}
+}
+
 // TestBootstrapRefusalIsCoarse: a spent or bogus token refuses with the coarse enum and leaks
 // nothing.
 func TestBootstrapRefusalIsCoarse(t *testing.T) {

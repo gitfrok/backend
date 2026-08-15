@@ -41,11 +41,15 @@ var runID = fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000_000)
 func TestMain(m *testing.M) {
 	if dsn := os.Getenv("TEST_SUPERUSER_DATABASE_URL"); dsn != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		err := applyMigration(ctx, dsn, "migrations/0001_agent_enrolment.sql")
-		cancel()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "agent postgres tests: could not self-apply migration: %v\n", err)
+		for _, f := range []string{
+			"migrations/0001_agent_enrolment.sql",
+			"migrations/0002_release_trust_plane_state.sql",
+		} {
+			if err := applyMigration(ctx, dsn, f); err != nil {
+				fmt.Fprintf(os.Stderr, "agent postgres tests: could not self-apply %s: %v\n", f, err)
+			}
 		}
+		cancel()
 	}
 	os.Exit(m.Run())
 }
@@ -180,49 +184,65 @@ func chaosStore(t *testing.T) *chaos.Plane[*agentpg.Store] {
 
 // --- AC5: migrations, RLS and the enumerated exemption ----------------------------
 
-// AC5: the migration is additive AND rollback-tested, proven against the real
-// database: down removes the whole surface, up restores it, and up is
+// AC5: the migrations are additive AND rollback-tested, proven against the
+// real database: down — newest first, since 0002's table lives in the schema
+// 0001 created — removes the whole surface, up restores it, and up is
 // idempotent enough to run the cycle repeatedly.
 func TestAC5_UpAndDownMigrationsAreReversible(t *testing.T) {
 	su := superPool(t)
-	up, err := os.ReadFile("migrations/0001_agent_enrolment.sql")
-	if err != nil {
-		t.Fatal(err)
+	read := func(name string) string {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
 	}
-	down, err := os.ReadFile("migrations/0001_agent_enrolment.down.sql")
-	if err != nil {
-		t.Fatal(err)
+	ups := []string{
+		read("migrations/0001_agent_enrolment.sql"),
+		read("migrations/0002_release_trust_plane_state.sql"),
+	}
+	// Down runs newest-first: 0001's down ends in DROP SCHEMA agent, which
+	// 0002's table would otherwise block.
+	downs := []string{
+		read("migrations/0002_release_trust_plane_state.down.sql"),
+		read("migrations/0001_agent_enrolment.down.sql"),
 	}
 	objectsExist := func() bool {
 		var n int
 		err := su.QueryRow(t.Context(),
 			`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-			  WHERE n.nspname = 'agent' AND c.relname IN ('enrolment_tokens', 'data_planes')`).Scan(&n)
+			  WHERE n.nspname = 'agent' AND c.relname IN ('enrolment_tokens', 'data_planes', 'release_trust_plane_state')`).Scan(&n)
 		if err != nil {
 			t.Fatalf("probe tables: %v", err)
 		}
-		return n == 2
+		return n == 3
 	}
 	if !objectsExist() {
-		t.Fatal("precondition failed: up migration not applied")
+		t.Fatal("precondition failed: up migrations not applied")
 	}
 
-	if _, err := su.Exec(t.Context(), string(down)); err != nil {
-		t.Fatalf("down: %v", err)
+	for _, d := range downs {
+		if _, err := su.Exec(t.Context(), d); err != nil {
+			t.Fatalf("down: %v", err)
+		}
 	}
 	if objectsExist() {
-		t.Fatal("down migration left the agent tables behind")
+		t.Fatal("down migrations left the agent tables behind")
 	}
-	if _, err := su.Exec(t.Context(), string(up)); err != nil {
-		t.Fatalf("up after down: %v", err)
+	for _, u := range ups {
+		if _, err := su.Exec(t.Context(), u); err != nil {
+			t.Fatalf("up after down: %v", err)
+		}
 	}
 	if !objectsExist() {
-		t.Fatal("up migration did not restore the agent tables")
+		t.Fatal("up migrations did not restore the agent tables")
 	}
 	// Idempotence: the suite keeps running after this test, so the re-apply
 	// must be safe to run on a database where everything already exists.
-	if _, err := su.Exec(t.Context(), string(up)); err != nil {
-		t.Fatalf("up is not idempotent: %v", err)
+	for _, u := range ups {
+		if _, err := su.Exec(t.Context(), u); err != nil {
+			t.Fatalf("up is not idempotent: %v", err)
+		}
 	}
 }
 

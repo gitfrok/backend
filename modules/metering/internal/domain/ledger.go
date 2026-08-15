@@ -124,15 +124,42 @@ func DeriveValue(d api.Dimension, samples []Sample) (value float64, window api.I
 	}
 
 	window = api.Interval{Start: contributing[0].Window.Start, End: contributing[len(contributing)-1].Window.End}
+	// A tenant aggregate is a sum of PER-PLANE derivations (SPEC-0045 AC4):
+	// interleaving two planes' cumulative totals into one delta chain makes
+	// the second plane's baseline read as a counter reset of the first, and
+	// silently halves the aggregate. Deriving each plane on its own and
+	// summing keeps every plane's telemetry authoritative for itself while
+	// the envelope sees the tenant's whole.
+	var planes []string
+	seen := map[string]bool{}
+	for _, s := range contributing {
+		if !seen[s.DataPlaneID] {
+			seen[s.DataPlaneID] = true
+			planes = append(planes, s.DataPlaneID)
+		}
+	}
+	for _, plane := range planes {
+		value += derivePlane(kind, metric, contributing, plane)
+	}
+	return value, window, true
+}
+
+// derivePlane derives one dimension over one data plane's contributing
+// samples: the combination rules of MetricKind applied to a single counter
+// stream, so a reset on one plane never reads as a movement on another.
+func derivePlane(kind MetricKind, metric string, contributing []Sample, dataPlaneID string) float64 {
 	switch kind {
 	case KindCounterDelta:
 		// The interval's usage is how far the cumulative counter moved. A
 		// total that moves BACKWARDS is a reset on the data plane: the new
 		// baseline is accepted and contributes nothing, never a negative
 		// usage and never an inferred catch-up.
-		var prev float64
+		var value, prev float64
 		first := true
 		for _, s := range contributing {
+			if s.DataPlaneID != dataPlaneID {
+				continue
+			}
 			total := s.Counters[metric]
 			if first {
 				prev, first = total, false
@@ -143,16 +170,27 @@ func DeriveValue(d api.Dimension, samples []Sample) (value float64, window api.I
 			}
 			prev = total
 		}
+		return value
 	case KindGaugeLatest:
-		value = contributing[len(contributing)-1].Gauges[metric]
-	case KindGaugePeak:
+		var value float64
 		for _, s := range contributing {
-			if g := s.Gauges[metric]; g > value {
-				value = g
+			if s.DataPlaneID == dataPlaneID {
+				value = s.Gauges[metric] // ordered: the last one wins
 			}
 		}
+		return value
+	case KindGaugePeak:
+		var value float64
+		for _, s := range contributing {
+			if s.DataPlaneID == dataPlaneID {
+				if g := s.Gauges[metric]; g > value {
+					value = g
+				}
+			}
+		}
+		return value
 	}
-	return value, window, true
+	return 0
 }
 
 // PreviousValue derives the same dimension over the samples strictly BEFORE

@@ -236,6 +236,21 @@ func (s *Service) Fleet(ctx context.Context, tenantID, actorID string) ([]api.Fl
 	return out, nil
 }
 
+// PostureParity asserts ADR-0065 decision 4 over the tenant's live fleet (SPEC-0045
+// AC4): there are no per-plane product tiers, so any capability difference between one
+// tenant's data planes is a defect, not a tier. The read is authorized like fleet
+// visibility; the comparison itself is the domain's.
+func (s *Service) PostureParity(ctx context.Context, tenantID, actorID string) error {
+	if err := s.authorize(ctx, tenantID, actionDataPlaneRead, "data_plane", ""); err != nil {
+		return err
+	}
+	planes, err := s.registry.DataPlanesByTenant(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	return domain.PostureParityDefect(planes)
+}
+
 // --- Gateway surface ----------------------------------------------------------------
 
 // Enrol runs the first-Connect handshake (ADR-0060 §1). The token is spent BEFORE the

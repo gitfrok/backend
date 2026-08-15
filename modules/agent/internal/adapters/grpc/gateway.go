@@ -53,6 +53,21 @@ type Gateway struct {
 	// DesiredState.ca_trust_bundle on the reconcile channel. Optional: a
 	// surface without it still serves enrolment, rotation and contact.
 	caBundles api.CATrustBundleSource
+
+	// releaseBundles is the release-trust rotation seam (T-0041, SPEC-0045
+	// AC2): attached post-construction by the composition root, it is the
+	// source the stream polls for the newest staged RELEASE trust bundle —
+	// the cosign release-signing keys of ADR-0044/ADR-0065 — delivered as
+	// DesiredState.release_trust_bundle on the reconcile channel. A
+	// different artifact from caBundles, on its own field with its own
+	// type. Optional, like caBundles.
+	releaseBundles api.ReleaseTrustBundleSource
+
+	// releaseApplied records the release trust bundle revision each data
+	// plane acknowledges — the distribution registry keyed by data_plane_id
+	// (ADR-0065, SPEC-0045 AC2). Optional: a surface without it still
+	// distributes; it just does not record convergence.
+	releaseApplied api.ReleaseTrustAppliedRegistry
 }
 
 var _ agentpb.AgentGatewayServer = (*Gateway)(nil)
@@ -71,6 +86,20 @@ func (g *Gateway) AttachEnvelopeDelivery(e meteringapi.EnvelopeDelivery) { g.env
 // fleet dual-validates against trusted_roots while new issuance chains to
 // issuance_root_id.
 func (g *Gateway) AttachCATrustBundle(s api.CATrustBundleSource) { g.caBundles = s }
+
+// AttachReleaseTrustBundle wires the release-trust rotation seam the stream
+// polls for the newest staged RELEASE trust bundle (SPEC-0045 AC2). Each
+// advance of the bundle revision is delivered as one DesiredState carrying
+// release_trust_bundle; the fleet dual-validates signatures against
+// trusted_keys while new releases sign with signing_key_id. This is the
+// cosign release-signing bundle of ADR-0044/ADR-0065 — a different artifact
+// from the CA trust bundle AttachCATrustBundle delivers, on its own field.
+func (g *Gateway) AttachReleaseTrustBundle(s api.ReleaseTrustBundleSource) { g.releaseBundles = s }
+
+// AttachReleaseTrustApplied wires the registry the stream records each
+// plane's release-bundle acknowledgement into, keyed by data_plane_id
+// (ADR-0065, SPEC-0045 AC2).
+func (g *Gateway) AttachReleaseTrustApplied(r api.ReleaseTrustAppliedRegistry) { g.releaseApplied = r }
 
 // NewGateway wires the adapter. poll bounds how late a lapsed certificate can go unnoticed;
 // one second is ample for hour-long certificates (invariant 13: per-environment).
@@ -184,8 +213,9 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 	ticker := time.NewTicker(g.poll)
 	defer ticker.Stop()
 	var seq, ackSeq int64
-	var lastEnvelopeGen int64 // newest EnvelopeStateUpdate this stream delivered (AC9)
-	var lastCABundleRev int64 // newest CA trust bundle revision this stream delivered (SPEC-0044 AC2)
+	var lastEnvelopeGen int64      // newest EnvelopeStateUpdate this stream delivered (AC9)
+	var lastCABundleRev int64      // newest CA trust bundle revision this stream delivered (SPEC-0044 AC2)
+	var lastReleaseBundleRev int64 // newest RELEASE trust bundle revision this stream delivered (SPEC-0045 AC2)
 	send := func(msg *agentpb.ControlPlaneMessage) error {
 		seq++
 		msg.MessageId = ids.NewULID()
@@ -245,6 +275,18 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 						g.logf("agent: envelope ack recording failed: %v", err)
 					}
 				}
+			case *agentpb.AgentMessage_DesiredStateAck:
+				// A plane's acknowledgement of a delivered desired state. The
+				// release trust bundle's applied revision is recorded per
+				// data plane — the registry keyed by data_plane_id (SPEC-0045
+				// AC2). Recording a refusal is logged, never traded against
+				// the stream.
+				ack := p.DesiredStateAck
+				if g.releaseApplied != nil && ack.GetApplied() {
+					if err := g.releaseApplied.RecordReleaseTrustApplied(ctx, id.TenantID, id.DataPlaneID, ack.GetGeneration()); err != nil {
+						g.logf("agent: release trust applied-revision recording failed: %v", err)
+					}
+				}
 			default:
 				// Remaining state messages ride this same stream but belong to
 				// later specs; the enrolment surface ignores them.
@@ -286,6 +328,25 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 						return err
 					}
 					lastCABundleRev = st.Revision
+				}
+			}
+			// Release trust bundle distribution (SPEC-0045 AC2): when the
+			// staged release bundle has advanced — a staged key, a completed
+			// removal — state the newest revision on the stream as desired
+			// state, on its OWN field: the release trust bundle of
+			// ADR-0044/ADR-0065 never rides the CA bundle's field or type.
+			if g.releaseBundles != nil {
+				if st, ok, err := g.releaseBundles.LatestReleaseTrustBundle(ctx); err == nil && ok && st.Revision > lastReleaseBundleRev {
+					msg := &agentpb.ControlPlaneMessage{Payload: &agentpb.ControlPlaneMessage_DesiredState{
+						DesiredState: &agentpb.DesiredState{
+							Generation:         st.Revision,
+							ReleaseTrustBundle: releaseTrustBundleWire(st),
+						},
+					}}
+					if err := send(msg); err != nil {
+						return err
+					}
+					lastReleaseBundleRev = st.Revision
 				}
 			}
 			if now.Before(ss.RotationDueAt()) {
@@ -461,6 +522,26 @@ func caTrustBundleWire(st api.CATrustBundleState) *agentpb.CATrustBundle {
 			RootId:         r.ID,
 			CertificatePem: r.CertificatePEM,
 			NotAfter:       timestamppb.New(r.NotAfter),
+		})
+	}
+	return out
+}
+
+// releaseTrustBundleWire maps the staged release bundle's projection onto the
+// contract's ReleaseTrustBundle (agent/v1, SPEC-0045 AC2): revision, trusted
+// keys as PEM, and the key new releases sign with. Public trust data only —
+// no signing private key exists in this process to carry. A different wire
+// type from caTrustBundleWire, exactly as the two bundles are different
+// artifacts.
+func releaseTrustBundleWire(st api.ReleaseTrustBundleState) *agentpb.ReleaseTrustBundle {
+	out := &agentpb.ReleaseTrustBundle{
+		Revision:     st.Revision,
+		SigningKeyId: st.SigningKeyID,
+	}
+	for _, k := range st.Keys {
+		out.TrustedKeys = append(out.TrustedKeys, &agentpb.ReleaseTrustKey{
+			KeyId:        k.ID,
+			PublicKeyPem: k.PublicKeyPEM,
 		})
 	}
 	return out

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gitfrok/backend/modules/agent/api"
@@ -120,4 +121,43 @@ func DeriveStatus(d DataPlane, streamActive bool, now time.Time, staleAfter time
 	default:
 		return api.StatusStale
 	}
+}
+
+// PostureParityDefect checks one tenant's live fleet against the posture-parity rule
+// (ADR-0065 decision 4, SPEC-0045 AC4): there are no per-plane product tiers, so any
+// capability difference between the tenant's non-revoked data planes is a DEFECT, named
+// with both planes and the capability that separates them. Revoked planes are no longer
+// the fleet. A tenant with fewer than two live planes has nothing to compare.
+func PostureParityDefect(planes []DataPlane) error {
+	var live []DataPlane
+	for _, d := range planes {
+		if !d.Revoked() {
+			live = append(live, d)
+		}
+	}
+	if len(live) < 2 {
+		return nil
+	}
+	have := func(d DataPlane) map[string]bool {
+		m := make(map[string]bool, len(d.Capabilities))
+		for _, c := range d.Capabilities {
+			m[c] = true
+		}
+		return m
+	}
+	base, baseCaps := live[0], have(live[0])
+	for _, d := range live[1:] {
+		caps := have(d)
+		for c := range baseCaps {
+			if !caps[c] {
+				return fmt.Errorf("posture parity defect: data plane %s lacks capability %q that data plane %s has (ADR-0065 decision 4)", d.ID, c, base.ID)
+			}
+		}
+		for c := range caps {
+			if !baseCaps[c] {
+				return fmt.Errorf("posture parity defect: data plane %s has capability %q that data plane %s lacks (ADR-0065 decision 4)", d.ID, c, base.ID)
+			}
+		}
+	}
+	return nil
 }

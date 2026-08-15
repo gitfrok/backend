@@ -174,6 +174,77 @@ func TestDownMigrationUndoesUp(t *testing.T) {
 	}
 }
 
+// T-0041 / SPEC-0045 AC2: the release trust distribution registry's
+// migration carries the same RLS posture as 0001 — enabled AND forced, one
+// tenant_isolation policy binding both directions, minimal grants, no
+// deletion path — and its naming stays strictly apart from the CA trust
+// bundle's surfaces (SPEC-0045's two-bundles note).
+func TestReleaseTrustMigrationIsRLSIsolated(t *testing.T) {
+	sql := readSQL(t, "0002_release_trust_plane_state.sql")
+	for _, want := range []string{
+		"-- rls: tenant-key=tenant_id",
+		"CREATE TABLE IF NOT EXISTS agent.release_trust_plane_state",
+		"ALTER TABLE agent.release_trust_plane_state ENABLE ROW LEVEL SECURITY",
+		"ALTER TABLE agent.release_trust_plane_state FORCE ROW LEVEL SECURITY",
+		"CREATE POLICY tenant_isolation ON agent.release_trust_plane_state",
+		"tenant_id = current_setting('app.tenant_id', true)",
+		// Minimal grants; a revocation is an UPDATE, never a DELETE.
+		"GRANT SELECT, INSERT, UPDATE ON agent.release_trust_plane_state TO gitfrok_app",
+		"REVOKE DELETE, TRUNCATE ON agent.release_trust_plane_state FROM gitfrok_app",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("migration missing %q", want)
+		}
+	}
+	// The policy binds both directions, or an insert could cross tenants.
+	if strings.Count(sql, "WITH CHECK (tenant_id = current_setting('app.tenant_id', true))") != 1 {
+		t.Error("expected exactly one WITH CHECK tenant binding")
+	}
+	// Unlike 0001 there is NO pre-tenancy exemption: every path is
+	// tenant-scoped, so the migration defines no SECURITY DEFINER function
+	// (counted the way TestExemptPathsAreNarrowAndEnumerated counts: the
+	// definition shape, not prose).
+	if got := strings.Count(sql, "\nSECURITY DEFINER\n"); got != 0 {
+		t.Errorf("release trust registry opens %d SECURITY DEFINER exemption(s) — every path is tenant-scoped", got)
+	}
+	// Two bundles, named apart: the release registry's vocabulary never
+	// borrows the CA trust bundle's, and vice versa.
+	for _, forbidden := range []string{"ca_trust", "certificate_pem", "issuance_root", "trusted_root"} {
+		if strings.Contains(strings.ToLower(sql), forbidden) {
+			t.Errorf("release trust migration carries CA-bundle vocabulary %q", forbidden)
+		}
+	}
+	// The ledger carries PUBLIC trust metadata only: no key material column.
+	for _, forbidden := range []string{"private", "secret", "key_pem", "key_material"} {
+		if strings.Contains(strings.ToLower(sql), forbidden) {
+			t.Errorf("release trust migration carries key material %q", forbidden)
+		}
+	}
+}
+
+// T-0041 / SPEC-0045 AC2: the 0002 down undoes exactly the 0002 up — the
+// policy and the table — leaving no privilege surface behind, and it never
+// touches the schema 0001 owns.
+func TestReleaseTrustDownMigrationUndoesUp(t *testing.T) {
+	down := readSQL(t, "0002_release_trust_plane_state.down.sql")
+	for _, want := range []string{
+		"DROP POLICY IF EXISTS tenant_isolation ON agent.release_trust_plane_state",
+		"DROP TABLE IF EXISTS agent.release_trust_plane_state",
+	} {
+		if !strings.Contains(down, want) {
+			t.Errorf("down migration missing %q", want)
+		}
+	}
+	if i, j := strings.Index(down, "DROP POLICY"), strings.Index(down, "DROP TABLE"); i < 0 || j < 0 || i > j {
+		t.Error("down migration must drop the policy before the table")
+	}
+	for _, forbidden := range []string{"CREATE TABLE", "CREATE POLICY", "GRANT", "DROP SCHEMA"} {
+		if strings.Contains(down, forbidden) {
+			t.Errorf("down migration contains forbidden %q", forbidden)
+		}
+	}
+}
+
 func readSQL(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(name)

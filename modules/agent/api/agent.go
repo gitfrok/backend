@@ -273,6 +273,48 @@ type CATrustBundleSource interface {
 	LatestCATrustBundle(ctx context.Context) (CATrustBundleState, bool, error)
 }
 
+// ReleaseTrustKey is one cosign release-signing key of the staged RELEASE
+// trust bundle as the reconcile channel distributes it (agent/v1
+// ReleaseTrustKey, SPEC-0045 AC2): the key's ID and its PUBLIC key as PEM in
+// the cosign key form of ADR-0044. It carries PUBLIC material only — the
+// private half that pairs with any key here lives in the publishing CI's
+// protected environment and never enters the control plane.
+type ReleaseTrustKey struct {
+	ID           string
+	PublicKeyPEM []byte
+}
+
+// ReleaseTrustBundleState is the control-plane projection of the staged
+// release trust bundle for distribution on the reconcile channel: the bundle
+// revision, every LIVE trusted key oldest-first, and the ID of the key new
+// releases SIGN with. During a rotation window Keys holds old and new alike
+// (dual-validate) while SigningKeyID names the new one. Named and typed
+// apart from the CA trust bundle of SPEC-0044 (T-0041): different artifact,
+// different field, different wire type, no shared surface.
+type ReleaseTrustBundleState struct {
+	Revision     int64
+	Keys         []ReleaseTrustKey
+	SigningKeyID string
+}
+
+// ReleaseTrustBundleSource is the port the reconcile delivery path reads the
+// newest staged release trust bundle state from. ok is false when the source
+// holds no live key — nothing to distribute; the gateway then publishes no
+// bundle update and planes keep their current keys (the contract field is
+// additive by design).
+type ReleaseTrustBundleSource interface {
+	LatestReleaseTrustBundle(ctx context.Context) (ReleaseTrustBundleState, bool, error)
+}
+
+// ReleaseTrustAppliedRegistry records the release trust bundle revision each
+// data plane has applied — the distribution registry keyed by data_plane_id
+// (ADR-0065, SPEC-0045 AC2). The reconcile channel reports a plane's
+// acknowledgement here; a reader can then tell which planes have converged
+// on a revision and which have not.
+type ReleaseTrustAppliedRegistry interface {
+	RecordReleaseTrustApplied(ctx context.Context, tenantID, dataPlaneID string, revision int64) error
+}
+
 // StreamSession is the control-plane half of one established stream: the rotation state
 // machine and the contact bookkeeping. The gRPC adapter drives it; all decisions and audit
 // records live behind it (ADR-0060 §2, SPEC-0038 AC4).
