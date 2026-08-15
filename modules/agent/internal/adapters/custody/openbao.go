@@ -242,6 +242,13 @@ func (o *OpenBao) GenerateKey(ctx context.Context, name string) (KeyRef, error) 
 	if _, status, err := o.post(ctx, "/v1/"+o.mount+"/keys/"+path, req); err != nil {
 		return "", err
 	} else if status != http.StatusOK && status != http.StatusNoContent {
+		// Transit refuses a name it already holds with a 4xx; a lost
+		// check-then-create race lands exactly there. Probe the read: when
+		// the key now exists the refusal is the deterministic ErrKeyExists,
+		// whatever status the create returned (Wave-3 review S1).
+		if _, probeStatus, probeErr := o.get(ctx, "/v1/"+o.mount+"/keys/"+path); probeErr == nil && probeStatus == http.StatusOK {
+			return "", fmt.Errorf("custody: openbao: create key %q lost the race - the key now exists: %w", name, ErrKeyExists)
+		}
 		return "", fmt.Errorf("custody: openbao: create key %q: unexpected status %d: %w", name, status, ErrUnavailable)
 	}
 	return KeyRef(name), nil

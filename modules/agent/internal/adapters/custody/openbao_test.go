@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +45,12 @@ type transitServer struct {
 	lastTok   string
 	sigPrefix string
 	barePub   bool
+	// hideReads makes the NEXT n key reads report 404 for a key that EXISTS —
+	// the race shape the S1 test swings: the adapter's pre-check read misses a
+	// key a concurrent creator just made, and the create POST lands on the
+	// provider's "already exists" refusal. Atomic: the handler goroutine
+	// decrements it while the test goroutine sets it.
+	hideReads atomic.Int32
 }
 
 func newTransitServer(t *testing.T) *transitServer {
@@ -76,6 +83,14 @@ func (s *transitServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		key, ok := s.keys[name]
+		if ok && s.hideReads.Load() > 0 {
+			// The race window: the key exists, but this read pretends it does
+			// not, so the adapter's pre-check passes and the create POST hits
+			// the provider's refusal.
+			s.hideReads.Add(-1)
+			s.refuse(w, http.StatusNotFound, "no handler for route")
+			return
+		}
 		if !ok {
 			s.refuse(w, http.StatusNotFound, "no handler for route")
 			return
@@ -101,6 +116,14 @@ func (s *transitServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 		}})
 		_, _ = w.Write(out)
 	case http.MethodPost:
+		if _, exists := s.keys[name]; exists {
+			// The REAL provider refuses creating a name it already holds — a
+			// 4xx with an "exists" error. The mock once OVERWROTE the key,
+			// which masked the lost-race shape the adapter now classifies
+			// (Wave-3 review S1).
+			s.refuse(w, http.StatusBadRequest, "key already exists")
+			return
+		}
 		var body struct {
 			Type       string `json:"type"`
 			Exportable bool   `json:"exportable"`
@@ -216,6 +239,27 @@ func TestOpenBaoGenerateKeyWire(t *testing.T) {
 
 	if _, err := signer.GenerateKey(ctx, "agent-ca-gen1"); !errors.Is(err, custody.ErrKeyExists) {
 		t.Errorf("second GenerateKey on the same name = %v, want ErrKeyExists", err)
+	}
+}
+
+// TestOpenBaoGenerateKeyRaceClassifiedAsExists is the Wave-3 review S1 fix:
+// a concurrent creator makes the key between the adapter's pre-check read
+// and its create POST. The provider refuses the create with a 4xx; the
+// adapter probes the read once more, sees the key now exists, and reports
+// the deterministic ErrKeyExists — never the generic ErrUnavailable that
+// would make the composition believe custody itself is down.
+func TestOpenBaoGenerateKeyRaceClassifiedAsExists(t *testing.T) {
+	srv := newTransitServer(t)
+	signer := newWireSigner(t, srv)
+	ctx := context.Background()
+	if _, err := signer.GenerateKey(ctx, "agent-ca-race"); err != nil {
+		t.Fatalf("first GenerateKey: %v", err)
+	}
+	// Swing the race: the next read misses the existing key, the create POST
+	// does not.
+	srv.hideReads.Store(1)
+	if _, err := signer.GenerateKey(ctx, "agent-ca-race"); !errors.Is(err, custody.ErrKeyExists) {
+		t.Fatalf("a create that lost the race = %v, want ErrKeyExists", err)
 	}
 }
 
