@@ -37,12 +37,16 @@ func residencyFactKindOf(action api.Action) api.ResidencyFactKind {
 // strictly before at, if any: the declaration in force at that instant.
 // declarations must be classified residency records in chain-sequence order
 // — the trail query's job. A change is a later PINNING record with its own
-// effective time, so "in force" is always the latest pinning before the
-// instant asked about (SPEC-0040 AC6).
+// effective time, so "in force" is always the latest ALLOWED pinning before
+// the instant asked about (SPEC-0040 AC6). A DENIED declaration attempt is
+// witnessed on the chain (SPEC-0043 AC1) but never took effect, so it can
+// never be the declaration in force — an unauthorized caller or a PDP outage
+// must not be able to shape a tenant's pinning through a refused attempt.
 func LastDeclarationBefore(declarations []api.SectionRecord, at time.Time) (api.SectionRecord, bool) {
 	for i := len(declarations) - 1; i >= 0; i-- {
 		if declarations[i].Residency != nil &&
 			declarations[i].Residency.FactKind == api.ResidencyFactPinning &&
+			declarations[i].Allowed &&
 			declarations[i].OccurredAt.Before(at) {
 			return declarations[i], true
 		}

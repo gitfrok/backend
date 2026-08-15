@@ -647,6 +647,10 @@ func (s *Service) residencySection(ctx context.Context, pack api.Pack) (api.Sect
 
 	// Classify in chain order: the two reads merge into one sequence-sorted
 	// slice, and only records the classifier admits as residency facts enter.
+	// A DENIED declaration attempt stays visible as a denied section record
+	// (SPEC-0043 AC1 witnesses every refusal), but only ALLOWED pinnings enter
+	// the declaration lineage — a refused attempt never took effect, so it can
+	// never be the declaration in force a later pack cites.
 	all := append(slices.Clone(declRecords), factRecords...)
 	slices.SortFunc(all, func(a, b api.Record) int { return cmp.Compare(a.Seq, b.Seq) })
 	var inRange []api.SectionRecord
@@ -657,7 +661,7 @@ func (s *Service) residencySection(ctx context.Context, pack api.Pack) (api.Sect
 		if !ok || st != api.SectionResidency {
 			continue
 		}
-		if sr.Residency.FactKind == api.ResidencyFactPinning {
+		if sr.Residency.FactKind == api.ResidencyFactPinning && sr.Allowed {
 			declarations = append(declarations, sr)
 		}
 		if r.OccurredAt.Before(pack.RangeFrom) || r.OccurredAt.After(pack.RangeTo) {

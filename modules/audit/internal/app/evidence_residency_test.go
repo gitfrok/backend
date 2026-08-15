@@ -236,6 +236,68 @@ func TestResidencySectionShowsDeclarationChangeWithEffectiveTime(t *testing.T) {
 	}
 }
 
+// TestResidencySectionDeniedDeclarationNeverInForce is the Wave-3 C2 fix at
+// the assembly seam: a PDP-refused declaration attempt is witnessed as a
+// DENIED residency.declaration.set record carrying the attempted placement
+// (SPEC-0043 AC1), and the section keeps it visible — but ONLY as a refusal.
+// The pack still cites the earlier ALLOWED pinning as the declaration in
+// force: an unauthorized caller (or a PDP outage) cannot shape the tenant's
+// pinning lineage through an attempt that never took effect.
+func TestResidencySectionDeniedDeclarationNeverInForce(t *testing.T) {
+	svc, trail, owner, req := residencyFixture(t, 24*time.Hour)
+	seedResidency(t, trail, "residency.declaration.set", "tenant/tenant-a", api.OutcomeAllowed,
+		map[string]string{"pinned_cloud": "gke", "pinned_region": "europe-west1"}, factsNow.Add(-48*time.Hour))
+	// The refused replacement attempt: same action, DENIED outcome, carrying
+	// the attempted pinning in its detail — exactly the record the Residency
+	// service witnesses for a PDP refusal (service.go's refusal half).
+	seedResidency(t, trail, "residency.declaration.set", "tenant/tenant-a", api.OutcomeDenied,
+		map[string]string{"pinned_cloud": "aws", "pinned_region": "us-east1",
+			"previous_cloud": "gke", "previous_region": "europe-west1"}, factsNow.Add(-30*time.Minute))
+	seedResidency(t, trail, "residency.placement.observed", "data_plane/plane-1", api.OutcomeAllowed,
+		bothPlacements, req.RangeFrom)
+
+	sec := residencyChunkOf(t, readyPackChunks(t, svc, owner, req))
+	var pinnings []api.SectionRecord
+	for _, r := range sec.Records {
+		if r.Residency != nil && r.Residency.FactKind == api.ResidencyFactPinning {
+			pinnings = append(pinnings, r)
+		}
+	}
+	// Both pinning-shaped records stay visible — the refusal is never dropped
+	// from the section (SPEC-0043 AC1).
+	if len(pinnings) != 2 {
+		t.Fatalf("the refused attempt stays visible beside the allowed pinning: want 2 pinning records, got %d", len(pinnings))
+	}
+	// In-force citation: the section opens with the ALLOWED pinning — the
+	// constraint every cited placement was evaluated against — never the
+	// refused attempt.
+	first := sec.Records[0]
+	if first.Residency == nil || first.Residency.FactKind != api.ResidencyFactPinning ||
+		first.Residency.PinnedCloud != "gke" || first.Residency.PinnedRegion != "europe-west1" || !first.Allowed {
+		t.Fatalf("the declaration in force must stay the ALLOWED gke pinning: %+v", first)
+	}
+	if !first.OccurredAt.Equal(factsNow.Add(-48 * time.Hour)) {
+		t.Fatalf("the in-force citation keeps the allowed pinning's effective time: %v", first.OccurredAt)
+	}
+	// The refused attempt appears ONLY as a denial: cited denied, never as the
+	// pinning in force.
+	var refused *api.SectionRecord
+	for i := range pinnings {
+		if !pinnings[i].Allowed {
+			refused = &pinnings[i]
+		}
+	}
+	if refused == nil {
+		t.Fatal("the DENIED attempt must be cited as a refused record")
+	}
+	if refused.Residency.PinnedCloud != "aws" || refused.Residency.PinnedRegion != "us-east1" {
+		t.Fatalf("the refusal record carries the attempted placement: %+v", refused.Residency)
+	}
+	if ok, reason := domain.VerifySection(sec); !ok {
+		t.Fatalf("the residency section must verify like every other: %s", reason)
+	}
+}
+
 // TestResidencySectionSilenceIsGapNotCompliance is SPEC-0040 AC5: a declared
 // tenant whose plane stops reporting renders PLACEMENT_SILENT gaps with
 // Complete=false — silence never passes as compliance. Two shapes: the plane

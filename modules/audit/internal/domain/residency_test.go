@@ -91,6 +91,7 @@ func sectionFact(seq int64, kind api.ResidencyFactKind, planeID string, at time.
 func pinningAt(at time.Time) api.SectionRecord {
 	return api.SectionRecord{
 		OccurredAt: at,
+		Allowed:    true,
 		Residency:  &api.ResidencyDetail{FactKind: api.ResidencyFactPinning},
 	}
 }
@@ -117,6 +118,28 @@ func TestLastDeclarationBefore(t *testing.T) {
 	}
 	if _, ok := LastDeclarationBefore(nil, evidenceNow); ok {
 		t.Fatal("no declarations means nothing in force")
+	}
+}
+
+// TestLastDeclarationBeforeIgnoresDeniedAttempts is the lineage half of the
+// Wave-3 C2 fix: a DENIED declaration attempt is witnessed on the chain
+// (SPEC-0043 AC1) but never took effect, so it can never answer "the
+// declaration in force" — not when it is the ONLY attempt, and not when it
+// arrives after an ALLOWED pinning. An unauthorized caller or a PDP outage
+// cannot shape the in-force pinning through a refused attempt.
+func TestLastDeclarationBeforeIgnoresDeniedAttempts(t *testing.T) {
+	allowed := pinningAt(evidenceNow)
+	denied := pinningAt(evidenceNow.Add(24 * time.Hour))
+	denied.Allowed = false
+
+	// The denied attempt alone: nothing is in force.
+	if _, ok := LastDeclarationBefore([]api.SectionRecord{denied}, evidenceNow.Add(48*time.Hour)); ok {
+		t.Fatal("a DENIED attempt is never the declaration in force")
+	}
+	// The denied attempt after an allowed pinning: the allowed one stays in force.
+	got, ok := LastDeclarationBefore([]api.SectionRecord{allowed, denied}, evidenceNow.Add(48*time.Hour))
+	if !ok || got != allowed {
+		t.Fatalf("in force after a denied attempt = %+v,%v; want the ALLOWED pinning", got, ok)
 	}
 }
 
