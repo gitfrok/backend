@@ -93,7 +93,7 @@ func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles [
 		},
 	})
 	if err != nil || !decision.Allowed {
-		if _, werr := s.witness.AppendResidencyRecord(ctx, declarationRecord(tenantID, actorID, cloud, region, prev, hasPrev, true, s.now())); werr != nil {
+		if _, werr := s.witness.AppendResidencyRecord(ctx, declarationRecord(tenantID, actorID, roles, cloud, region, prev, hasPrev, true, s.now())); werr != nil {
 			// A refusal that cannot be recorded is a failure, not a silent denial
 			// (package invariant): the caller sees the same coarse shape either way.
 			return api.Declaration{}, api.ErrResidencyUnavailable
@@ -117,7 +117,7 @@ func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles [
 	// witness that cannot take the record fails the declaration; an unrecorded declaration
 	// is a worse failure than a refused one.
 	now := s.now()
-	rec, err := s.witness.AppendResidencyRecord(ctx, declarationRecord(tenantID, actorID, cloud, region, prev, hasPrev, false, now))
+	rec, err := s.witness.AppendResidencyRecord(ctx, declarationRecord(tenantID, actorID, roles, cloud, region, prev, hasPrev, false, now))
 	if err != nil {
 		return api.Declaration{}, api.ErrResidencyUnavailable
 	}
@@ -164,13 +164,14 @@ func (s *Service) Declare(ctx context.Context, tenantID, actorID string, roles [
 }
 
 // declarationRecord is the one witness entry a declaration act appends — allowed or
-// refused. It names tenant, actor, previous and new pinning, and the server's effective
-// time (SPEC-0043 AC1); the record and the enforcement cannot disagree because both are
-// built from the same verified facts.
-func declarationRecord(tenantID, actorID, cloud, region string, prev api.Declaration, hasPrev, denied bool, at time.Time) api.WitnessEntry {
+// refused. It names tenant, actor, the role the act was decided under, previous and new
+// pinning, and the server's effective time (SPEC-0043 AC1, AC7); the record and the
+// enforcement cannot disagree because both are built from the same verified facts.
+func declarationRecord(tenantID, actorID string, roles []string, cloud, region string, prev api.Declaration, hasPrev, denied bool, at time.Time) api.WitnessEntry {
 	detail := map[string]string{
 		platformaudit.DetailResidencyPinnedCloud:  cloud,
 		platformaudit.DetailResidencyPinnedRegion: region,
+		platformaudit.DetailResidencyGrantedRole:  grantedRole(roles),
 	}
 	if hasPrev {
 		detail[platformaudit.DetailResidencyPreviousCloud] = prev.Cloud
@@ -185,6 +186,23 @@ func declarationRecord(tenantID, actorID, cloud, region string, prev api.Declara
 		Denied:     denied,
 		OccurredAt: at,
 	}
+}
+
+// grantedRole is the AC7 derivation (ADR-0067 decision 3): the declaration
+// record names the role its PDP decision consumed, derived from the verified
+// roles the caller held — never a caller claim. A tenant-scoped platform
+// operator acts on the tenant's behalf, and vendor involvement is the more
+// investigation-relevant half, so it wins when present; otherwise the act is
+// the tenant's own (owner). This is audit labeling of a decision ALREADY
+// made by the PDP — the decision itself is never re-derived here (invariant
+// 2).
+func grantedRole(roles []string) string {
+	for _, r := range roles {
+		if r == "platform_operator" {
+			return "platform_operator"
+		}
+	}
+	return "owner"
 }
 
 // Declaration implements api.Service. The caller's tenant scope is enforced by the store:

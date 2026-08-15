@@ -51,4 +51,11 @@ const (
 	DetailResidencyObservedRegion = "observed_region"
 	DetailResidencyPreviousCloud  = "previous_cloud"
 	DetailResidencyPreviousRegion = "previous_region"
+	// DetailResidencyGrantedRole names the role the declaration act was decided
+	// under — owner or platform_operator — so a record distinguishes the
+	// tenant's own act from one a vendor operator made on its behalf
+	// (SPEC-0043 AC7, ADR-0067 decision 3). It is derived from the verified
+	// roles the PDP decision consumed; a server-produced fact, never a caller
+	// claim. Additive like every key here.
+	DetailResidencyGrantedRole = "granted_role"
 )

@@ -208,4 +208,26 @@ func TestBundleOneAuditRecordPerActAndRefusal(t *testing.T) {
 	if denials[0].DeniedAction != platformaudit.ActionResidencyDeclarationSet || denials[0].TenantID != "acme" || denials[0].ActorID != "member-1" {
 		t.Fatalf("the generic denial event must name the action, tenant and verified actor: %+v", denials[0])
 	}
+
+	// AC7's distinction (ADR-0067 decision 3): a tenant-scoped platform
+	// operator declares — allowed by the grant rule — and its record's
+	// granted role names the vendor act, where the owner's record names the
+	// tenant's own.
+	if _, err := svc.Declare(ctx, "acme", "operator-1", []string{"platform_operator"}, "aws", "us-east1"); err != nil {
+		t.Fatalf("platform_operator declare: %v", err)
+	}
+	if len(wit.entries) != 3 {
+		t.Fatalf("a third act appends exactly one more record, got %d entries", len(wit.entries))
+	}
+	operatorRec := wit.entries[2]
+	if operatorRec.Denied || operatorRec.ActorID != "operator-1" {
+		t.Fatalf("the operator's record must be an ALLOWED declaration naming the verified actor: %+v", operatorRec)
+	}
+	//arch:allow-inline-authz test asserts an audit label, decides no access
+	if got := wit.entries[0].Detail[platformaudit.DetailResidencyGrantedRole]; got != "owner" {
+		t.Fatalf("the owner's record names granted_role owner, got %q", got)
+	}
+	if got := operatorRec.Detail[platformaudit.DetailResidencyGrantedRole]; got != "platform_operator" {
+		t.Fatalf("the operator's record names granted_role platform_operator, got %q", got)
+	}
 }

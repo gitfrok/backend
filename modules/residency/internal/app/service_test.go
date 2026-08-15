@@ -122,6 +122,45 @@ func TestDeclareIsServerRecorded(t *testing.T) {
 	}
 }
 
+// TestDeclarationRecordsNameTheGrantedRole is AC7's backend half (ADR-0067
+// decision 3): every declaration record — allowed and denied alike — carries
+// the granted role derived from the verified roles. Vendor involvement
+// (platform_operator) wins when present; otherwise the act is the tenant's
+// own (owner). The real bundle's grant rule for the operator role is proved
+// in the bundle suite.
+func TestDeclarationRecordsNameTheGrantedRole(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.svc.Declare(scopedCtx("acme"), "acme", "owner-1", []string{"owner"}, "gke", "europe-west1"); err != nil {
+		t.Fatalf("owner declare: %v", err)
+	}
+	//arch:allow-inline-authz test asserts an audit label, decides no access
+	if got := f.wit.entries[0].Detail[platformaudit.DetailResidencyGrantedRole]; got != "owner" {
+		t.Fatalf("owner act granted_role = %q, want owner", got)
+	}
+	if _, err := f.svc.Declare(scopedCtx("acme"), "acme", "op-1", []string{"platform_operator"}, "aws", "us-east1"); err != nil {
+		t.Fatalf("operator declare: %v", err)
+	}
+	if got := f.wit.entries[1].Detail[platformaudit.DetailResidencyGrantedRole]; got != "platform_operator" {
+		t.Fatalf("operator act granted_role = %q, want platform_operator", got)
+	}
+	// Both roles present: vendor involvement wins.
+	if _, err := f.svc.Declare(scopedCtx("acme"), "acme", "op-2", []string{"owner", "platform_operator"}, "gke", "europe-west1"); err != nil {
+		t.Fatalf("dual-role declare: %v", err)
+	}
+	if got := f.wit.entries[2].Detail[platformaudit.DetailResidencyGrantedRole]; got != "platform_operator" {
+		t.Fatalf("dual-role act granted_role = %q, want platform_operator — vendor involvement wins", got)
+	}
+	// A DENIED record carries the same derivation.
+	f.pdp.allow = false
+	if _, err := f.svc.Declare(scopedCtx("acme"), "acme", "op-3", []string{"platform_operator"}, "aws", "ap-south1"); err == nil {
+		t.Fatal("a denied declaration must fail the caller")
+	}
+	last := f.wit.entries[len(f.wit.entries)-1]
+	if !last.Denied || last.Detail[platformaudit.DetailResidencyGrantedRole] != "platform_operator" {
+		t.Fatalf("the denied record must carry the granted role too: %+v", last)
+	}
+}
+
 // TestDeclareRefusalIsWitnessed is SPEC-0043 AC1: a refused declaration appends exactly
 // one immutable audit record — DENIED, naming the verified actor, the attempted pinning
 // and the one it would have replaced — for both coarse shapes, a PDP denial and an
