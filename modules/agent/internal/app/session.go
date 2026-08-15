@@ -7,6 +7,7 @@ import (
 
 	"github.com/gitfrok/backend/modules/agent/api"
 	platformaudit "github.com/gitfrok/backend/platform/audit"
+	"github.com/gitfrok/backend/platform/tenancy"
 )
 
 // streamSession is the control-plane half of one established stream: the certificate
@@ -79,6 +80,9 @@ func (ss *streamSession) AckRotation(ctx context.Context, certificateID string, 
 		return nil
 	}
 	now := ss.svc.cfg.Now()
+	// The session's identity names the tenant its registry write and audit
+	// record run under (the durable store requires the binding).
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(ss.id.TenantID))
 	if applied {
 		ss.currentID = ss.pendingID
 		ss.currentExpiry = ss.pendingExpiry
@@ -122,6 +126,7 @@ func (ss *streamSession) Lapsed(now time.Time) bool {
 // stream: last-seen is read-side bookkeeping, and dropping a message over it would trade
 // availability for a timestamp.
 func (ss *streamSession) Touch(ctx context.Context) {
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(ss.id.TenantID))
 	_ = ss.svc.registry.MarkSeen(ctx, ss.id.TenantID, ss.id.DataPlaneID, ss.svc.cfg.Now())
 }
 

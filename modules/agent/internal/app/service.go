@@ -49,6 +49,12 @@ type TokenStore interface {
 	TokensByTenant(ctx context.Context, tenantID string) ([]domain.Token, error)
 	ClaimToken(ctx context.Context, hash [32]byte, dataPlaneID string, now time.Time) (domain.Token, bool, error)
 	RevokeToken(ctx context.Context, tenantID, tokenID string, now time.Time) error
+	// ReleaseClaim un-spends a token whose enrolment failed at certificate
+	// issuance (SPEC-0042 AC6), keeping its recorded data-plane ID so the
+	// retry re-binds to the SAME identity — one token never mints two data
+	// planes (ADR-0060). Unknown or another tenant's token is the shared
+	// not-found sentinel.
+	ReleaseClaim(ctx context.Context, tenantID, tokenID string) error
 }
 
 // RegistryStore is the persistence port for the data-plane registry.
@@ -233,8 +239,9 @@ func (s *Service) Fleet(ctx context.Context, tenantID, actorID string) ([]api.Fl
 // --- Gateway surface ----------------------------------------------------------------
 
 // Enrol runs the first-Connect handshake (ADR-0060 §1). The token is spent BEFORE the
-// certificate is issued: if issuance then fails, the retry is still refused TOKEN_SPENT —
-// a partial enrolment never mints a second identity (SPEC-0038 AC1).
+// certificate is issued; if issuance then fails, the claim is released but keeps its
+// recorded data-plane ID, so the retry completes the SAME identity — one token never
+// mints two data planes (SPEC-0042 AC6, SPEC-0038 AC1).
 func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolment, error) {
 	now := s.cfg.Now()
 	if req.Token == "" {
@@ -255,6 +262,9 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 		s.logf("agent: enrolment refused: token not valid")
 		return api.Enrolment{}, &api.EnrolmentRefused{Reason: api.RefusalTokenInvalid}
 	}
+	// From here the tenant is known — bind it into ctx so every store write and
+	// audit emission below runs under the token's own tenancy.
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(tok.TenantID))
 	if reason := tok.PresentOutcome(now); reason != "" {
 		if err := s.publish(ctx, platformaudit.AgentEnrolment{
 			TenantID: tok.TenantID, TokenID: tok.ID, Reason: string(reason),
@@ -265,7 +275,12 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 		return api.Enrolment{}, &api.EnrolmentRefused{Reason: reason}
 	}
 
-	dataPlaneID := ids.NewULID()
+	// A retry after a released claim (AC6) re-binds the SAME identity: the
+	// recorded data plane wins over minting a new one (ADR-0060).
+	dataPlaneID := tok.DataPlaneID
+	if dataPlaneID == "" {
+		dataPlaneID = ids.NewULID()
+	}
 
 	// Residency gate BEFORE token spend: a placement refused at the declared boundary
 	// costs the tenant nothing — the token stays presentable so the operator can retry
@@ -291,10 +306,11 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 		}
 	}
 
-	// Spend first. From this line on the token is spent whatever happens next.
-	if _, claimed, err := s.tokens.ClaimToken(ctx, hash, dataPlaneID, now); err != nil {
+	// Spend first. From this line on the token is spent whatever happens next —
+	// until an issuance failure releases the claim (AC6), keeping the identity.
+	if claimed, ok, err := s.tokens.ClaimToken(ctx, hash, dataPlaneID, now); err != nil {
 		return api.Enrolment{}, err
-	} else if !claimed {
+	} else if !ok {
 		// Lost the single-use race to a concurrent presenter.
 		if err := s.publish(ctx, platformaudit.AgentEnrolment{
 			TenantID: tok.TenantID, TokenID: tok.ID, Reason: string(api.RefusalTokenSpent),
@@ -303,6 +319,10 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 			return api.Enrolment{}, err
 		}
 		return api.Enrolment{}, &api.EnrolmentRefused{Reason: api.RefusalTokenSpent}
+	} else if claimed.DataPlaneID != "" {
+		// The claim's recorded identity is authoritative: it is the one this
+		// token has ever minted (ADR-0060).
+		dataPlaneID = claimed.DataPlaneID
 	}
 
 	id := api.Identity{TenantID: tok.TenantID, DataPlaneID: dataPlaneID}
@@ -318,16 +338,25 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 	}
 	cert, err := s.issuer.Issue(ctx, id, now, s.cfg.CertLifetime, s.cfg.ClockSkewLeeway)
 	if err != nil {
-		// The registry record stays — visible as never connected — and the token stays
-		// spent. An operator issues a new token; nothing retries its way into a second
-		// identity for this one.
+		// Issuance failed AFTER the spend (SPEC-0042 AC6, locked decision):
+		// audit the failure, then RELEASE the claim — keeping its recorded
+		// data-plane ID so the presenter's retry re-binds to the SAME identity.
+		// One token never mints two data planes (ADR-0060); no runbook ritual
+		// is needed because the retry IS the recovery. The registry record
+		// stays — visible as never connected until the retry completes it.
 		if perr := s.publish(ctx, platformaudit.AgentEnrolment{
 			TenantID: tok.TenantID, DataPlaneID: dataPlaneID, TokenID: tok.ID,
 			Reason: "certificate_issuance_failed", Outcome: "DENIED", OccurredAt: now,
 		}); perr != nil {
 			return api.Enrolment{}, perr
 		}
-		s.logf("agent: enrolment failed after token spent: certificate issuance")
+		if rerr := s.tokens.ReleaseClaim(ctx, tok.TenantID, tok.ID); rerr != nil {
+			// The refusal is already audited; a failed release is logged, not
+			// converted into a second outcome. The operator-visible shape is
+			// unchanged: retry, and if the release was lost, re-issue.
+			s.logf("agent: release claim failed after issuance failure: %v", rerr)
+		}
+		s.logf("agent: enrolment failed after token spent: certificate issuance; claim released")
 		return api.Enrolment{}, &api.EnrolmentRefused{Reason: api.RefusalDenied}
 	}
 	if err := s.registry.SetCertificate(ctx, tok.TenantID, dataPlaneID, cert.CertificateID, cert.ExpiresAt); err != nil {
@@ -361,6 +390,8 @@ func (s *Service) AdmitPeerCertificates(ctx context.Context, rawCerts [][]byte) 
 	if err != nil {
 		return api.Identity{}, err
 	}
+	// The leaf names the tenant: every record below is written under it.
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(id.TenantID))
 	// Both non-valid states refuse. They are audited apart because they mean different
 	// things to whoever reads the trail: a rotation that did not happen, versus a clock
 	// the customer's cluster cannot be trusted on (SPEC-0038 non-functional).
@@ -396,6 +427,8 @@ func (s *Service) IdentityOf(leafDER []byte) (api.Identity, error) {
 
 // OpenStream registers an admitted stream and opens its rotation session.
 func (s *Service) OpenStream(ctx context.Context, id api.Identity) (api.StreamSession, error) {
+	// The admitted identity names the tenant its registry writes run under.
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(id.TenantID))
 	d, ok, err := s.registry.DataPlane(ctx, id.TenantID, id.DataPlaneID)
 	if err != nil {
 		return nil, err

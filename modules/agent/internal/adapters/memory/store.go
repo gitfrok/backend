@@ -92,10 +92,35 @@ func (s *Store) ClaimToken(_ context.Context, hash [32]byte, dataPlaneID string,
 		return t, false, nil
 	}
 	t.SpentAt = now
-	t.DataPlaneID = dataPlaneID
+	// A recorded identity is never overwritten: a claim released after a
+	// failed issuance re-binds its retry to the SAME data plane (ADR-0060,
+	// SPEC-0042 AC6), matching the durable claim function's CASE guard.
+	if t.DataPlaneID == "" {
+		t.DataPlaneID = dataPlaneID
+	}
 	s.tokensByHash[hash] = t
 	s.tokensByID[t.ID] = t
 	return t, true, nil
+}
+
+// ReleaseClaim is the AC6 transition (SPEC-0042): un-spend the token, keep its
+// recorded data-plane ID so the retry re-binds the SAME identity. Unknown or
+// another tenant's token is the shared not-found sentinel; a token that is not
+// spent has no claim to release.
+func (s *Store) ReleaseClaim(_ context.Context, tenantID, tokenID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tokensByID[tokenID]
+	if !ok || t.TenantID != tenantID {
+		return errNotFound
+	}
+	if !t.Spent() {
+		return errNotFound
+	}
+	t.SpentAt = time.Time{}
+	s.tokensByID[t.ID] = t
+	s.tokensByHash[t.TokenHash] = t
+	return nil
 }
 
 // RevokeToken revokes an unspent token. Unknown tokens and spent tokens are errors: a spent

@@ -244,30 +244,95 @@ func TestEnrolSingleUse(t *testing.T) {
 	}
 }
 
-func TestEnrolSpentThenFailed(t *testing.T) {
+// AC6 (SPEC-0042, locked decision): an issuance failure AFTER the spend
+// releases the claim — keeping its recorded data-plane ID — so the presenter's
+// retry completes the SAME identity. One token never mints two data planes
+// (ADR-0060), and no runbook ritual stands between the failure and the retry.
+func TestEnrolIssuanceFailureReleasesClaimKeepingIdentity(t *testing.T) {
 	h := newHarness(t)
 	_, secret := h.issueToken(t, "acme")
 	h.issuer.failIssue = true // the first attempt fails AFTER the token is spent
 
 	ctx := context.Background()
-	if _, err := h.svc.Enrol(ctx, api.EnrolRequest{Token: secret}); err == nil {
-		t.Fatal("first Enrol should fail on issuer outage")
+	_, err := h.svc.Enrol(ctx, api.EnrolRequest{Token: secret, Cloud: "GKE", Region: "eu-west1"})
+	if got := refusedReason(t, err); got != api.RefusalDenied {
+		t.Fatalf("failed Enrol reason = %q, want the coarse DENIED", got)
 	}
-	h.issuer.failIssue = false
+	// The failure is audited under its own reason.
+	failed := h.bus.of(platformaudit.ActionAgentEnrolment)
+	if len(failed) != 1 {
+		t.Fatalf("enrolment audit records = %d, want 1 for the failed attempt", len(failed))
+	}
+	if ev := failed[0].(platformaudit.AgentEnrolment); ev.Reason != "certificate_issuance_failed" || ev.Outcome != "DENIED" {
+		t.Fatalf("failure record = %+v, want DENIED/certificate_issuance_failed", ev)
+	}
 
-	// The retry must not mint a second identity: the token stays spent (AC1).
-	_, err := h.svc.Enrol(ctx, api.EnrolRequest{Token: secret})
-	if got := refusedReason(t, err); got != api.RefusalTokenSpent {
-		t.Fatalf("retry reason = %q, want TOKEN_SPENT", got)
-	}
-	// The partial enrolment's record remains, uncertified — visible as never connected,
-	// never as a healthy plane.
+	// The partial enrolment's record remains, uncertified — visible as never
+	// connected — and it names the identity the retry must re-bind. (The
+	// released token is presentable again, so it reads as its own
+	// never-connected row too: the fleet shows both halves of the retry.)
 	fleet, err := h.svc.Fleet(operatorCtx("acme", "op-1"), "acme", "op-1")
 	if err != nil {
 		t.Fatalf("Fleet: %v", err)
 	}
-	if len(fleet) != 1 || fleet[0].Status != api.StatusNeverConnected {
-		t.Fatalf("fleet after partial enrolment = %+v, want one NEVER_CONNECTED row", fleet)
+	var partialID string
+	for _, v := range fleet {
+		if v.Plane.ID != "" {
+			if v.Status != api.StatusNeverConnected {
+				t.Fatalf("partial plane status = %s, want NEVER_CONNECTED", v.Status)
+			}
+			partialID = v.Plane.ID
+		}
+	}
+	if partialID == "" {
+		t.Fatalf("fleet after failed enrolment = %+v, want the partial plane row", fleet)
+	}
+
+	h.issuer.failIssue = false
+	// The retry is admitted — and it completes the SAME identity, not a new one.
+	enrolment, err := h.svc.Enrol(ctx, api.EnrolRequest{Token: secret, Cloud: "GKE", Region: "eu-west1"})
+	if err != nil {
+		t.Fatalf("retry Enrol after released claim: %v", err)
+	}
+	if enrolment.DataPlaneID != partialID {
+		t.Fatalf("retry minted %q — the released claim's identity %q was not re-bound (ADR-0060)",
+			enrolment.DataPlaneID, partialID)
+	}
+
+	// No second identity is reachable anywhere: one plane, one certificate.
+	fleet, _ = h.svc.Fleet(operatorCtx("acme", "op-1"), "acme", "op-1")
+	if len(fleet) != 1 || fleet[0].Status != api.StatusConnected || fleet[0].Plane.ID != partialID {
+		t.Fatalf("fleet after retry = %+v, want the SAME plane CONNECTED", fleet)
+	}
+	if got := len(h.issuer.issued); got != 1 {
+		t.Fatalf("certificates issued = %d, want exactly 1 (the retry's)", got)
+	}
+
+	// The successful enrolment spent the token again: single use holds.
+	_, err = h.svc.Enrol(ctx, api.EnrolRequest{Token: secret})
+	if got := refusedReason(t, err); got != api.RefusalTokenSpent {
+		t.Fatalf("post-success replay reason = %q, want TOKEN_SPENT", got)
+	}
+}
+
+// AC6's refusal side: a claim released by issuance failure is re-spendable,
+// but a token revoked while released stays revoked — the operator's act wins
+// over the retry (PresentOutcome ordering: revoked > spent > expired).
+func TestEnrolReleasedClaimStillHonoursRevocation(t *testing.T) {
+	h := newHarness(t)
+	tok, secret := h.issueToken(t, "acme")
+	h.issuer.failIssue = true
+	if _, err := h.svc.Enrol(context.Background(), api.EnrolRequest{Token: secret}); err == nil {
+		t.Fatal("first Enrol should fail on issuer outage")
+	}
+	// Operator revokes while the claim is released.
+	if err := h.svc.RevokeEnrolmentToken(operatorCtx("acme", "op-1"), "acme", "op-1", tok.ID); err != nil {
+		t.Fatalf("RevokeEnrolmentToken: %v", err)
+	}
+	h.issuer.failIssue = false
+	_, err := h.svc.Enrol(context.Background(), api.EnrolRequest{Token: secret})
+	if got := refusedReason(t, err); got != api.RefusalTokenRevoked {
+		t.Fatalf("retry after revocation = %q, want TOKEN_REVOKED", got)
 	}
 }
 
