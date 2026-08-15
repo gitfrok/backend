@@ -279,13 +279,33 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 				// A plane's acknowledgement of a delivered desired state. The
 				// release trust bundle's applied revision is recorded per
 				// data plane — the registry keyed by data_plane_id (SPEC-0045
-				// AC2). Recording a refusal is logged, never traded against
-				// the stream.
+				// AC2) — and ONLY for an ack the payload-kind discriminator
+				// identifies as answering the RELEASE trust bundle: the CA
+				// bundle and the release bundle deliver on INDEPENDENT
+				// revision spaces (both start at 1), so an unattributed
+				// generation recorded here would pollute the registry through
+				// its forward-only GREATEST upsert, uncorrectably. An ack of
+				// UNSPECIFIED kind comes from a plane predating the
+				// discriminator and is attributed to NO registry — attribution
+				// never widens on ambiguity. Recording a refusal is logged,
+				// never traded against the stream.
 				ack := p.DesiredStateAck
-				if g.releaseApplied != nil && ack.GetApplied() {
-					if err := g.releaseApplied.RecordReleaseTrustApplied(ctx, id.TenantID, id.DataPlaneID, ack.GetGeneration()); err != nil {
-						g.logf("agent: release trust applied-revision recording failed: %v", err)
+				switch ack.GetKind() {
+				case agentpb.DesiredStateKind_DESIRED_STATE_KIND_RELEASE_TRUST_BUNDLE:
+					if g.releaseApplied != nil && ack.GetApplied() {
+						if err := g.releaseApplied.RecordReleaseTrustApplied(ctx, id.TenantID, id.DataPlaneID, ack.GetGeneration()); err != nil {
+							g.logf("agent: release trust applied-revision recording failed: %v", err)
+						}
 					}
+				case agentpb.DesiredStateKind_DESIRED_STATE_KIND_CA_TRUST_BUNDLE:
+					// The CA bundle's applied state rides its own surface
+					// (SPEC-0044); it is never recorded into the release
+					// registry — the two bundles never share a ledger.
+				default:
+					// UNSPECIFIED: a plane predating the discriminator. Its
+					// generation cannot be attributed, so it is recorded
+					// nowhere; the ack itself stays observational.
+					g.logf("agent: desired-state ack without a payload kind is attributed to no registry")
 				}
 			default:
 				// Remaining state messages ride this same stream but belong to

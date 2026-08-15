@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -300,8 +301,8 @@ func TestEmptyBundleProjectsNothing(t *testing.T) {
 	}
 }
 
-// TestDuplicateKeyIDRefused: one key ID names exactly one key for its whole
-// history in the bundle — staging a second key under a known ID is refused.
+// TestDuplicateKeyIDRefused: one key ID names at most one LIVE key —
+// staging a second key under a live ID is refused.
 func TestDuplicateKeyIDRefused(t *testing.T) {
 	clk := &testClock{t: time.Now()}
 	b, err := releasebundle.NewBundle(clk.Now)
@@ -314,6 +315,123 @@ func TestDuplicateKeyIDRefused(t *testing.T) {
 	}
 	gen2 := newTestKey(t, "release-signing-gen1") // same ID, different key
 	if err := b.Stage(gen2.id, gen2.pem); err == nil {
-		t.Fatalf("staging a duplicate key ID succeeded")
+		t.Fatalf("staging a duplicate LIVE key ID succeeded")
+	}
+}
+
+// TestRetiredKeyIDRestagesAfterRemoval: a key ID whose every occurrence is
+// RETIRED may be staged again. A re-declared key must re-enter the bundle —
+// the reconcile seam's convergence must never wedge on a name the bundle
+// once knew.
+func TestRetiredKeyIDRestagesAfterRemoval(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	b, err := releasebundle.NewBundle(clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	gen1 := newTestKey(t, "release-signing-gen1")
+	gen2 := newTestKey(t, "release-signing-gen2")
+	if err := b.Bootstrap(gen1.id, gen1.pem); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if err := b.Stage(gen2.id, gen2.pem); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if err := b.RemoveKey(gen1.id); err != nil {
+		t.Fatalf("RemoveKey: %v", err)
+	}
+
+	// The SAME ID returns with NEW key material: it stages again.
+	gen1b := newTestKey(t, "release-signing-gen1")
+	if err := b.Stage(gen1b.id, gen1b.pem); err != nil {
+		t.Fatalf("re-staging a fully retired key ID = %v, want it to stage again", err)
+	}
+	st, ok, err := b.LatestReleaseTrustBundle(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("LatestReleaseTrustBundle = (_, %v, %v)", ok, err)
+	}
+	var live []string
+	for _, k := range st.Keys {
+		live = append(live, k.ID)
+	}
+	if len(live) != 2 {
+		t.Fatalf("live keys after re-stage = %v, want gen2 and the re-staged gen1", live)
+	}
+	if st.SigningKeyID != gen1b.id {
+		t.Fatalf("signing key after re-stage = %q, want the re-staged %q", st.SigningKeyID, gen1b.id)
+	}
+	// The re-staged key's NEW material is what verifies — the retired
+	// occurrence is history, not trust.
+	sig := signRelease(t, gen1b, "registry.example/gitfrok/operator", "sha256:33")
+	if !verifiesAgainst(t, bundleKeys(t, b), sig, "registry.example/gitfrok/operator", "sha256:33") {
+		t.Fatalf("signature by the re-staged key does not validate")
+	}
+}
+
+// TestBootstrapIsAtomicUnderConcurrency: the empty-check and the stage are
+// ONE atomic step — of N concurrent bootstraps, exactly one wins and the
+// bundle holds exactly one live key (the old check-then-Stage shape let two
+// racers both pass the check and both stage).
+func TestBootstrapIsAtomicUnderConcurrency(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	b, err := releasebundle.NewBundle(clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	const racers = 16
+	keys := make([]testKey, racers)
+	for i := range keys {
+		keys[i] = newTestKey(t, "bootstrap-racer")
+	}
+	var wg sync.WaitGroup
+	wins := make(chan error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(k testKey) {
+			defer wg.Done()
+			wins <- b.Bootstrap(k.id, k.pem)
+		}(keys[i])
+	}
+	wg.Wait()
+	close(wins)
+	succeeded := 0
+	for err := range wins {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("%d concurrent bootstraps succeeded, want exactly 1", succeeded)
+	}
+	st, ok, err := b.LatestReleaseTrustBundle(context.Background())
+	if err != nil || !ok || len(st.Keys) != 1 {
+		t.Fatalf("bundle after the race = %+v (ok=%v, err=%v), want exactly one live key", st, ok, err)
+	}
+}
+
+// TestChangeHookFiresOutsideTheLock: the hook may read back into the bundle
+// — it must not deadlock, which a hook fired under the bundle lock would.
+// The watchdog turns the deadlock into a failure instead of a hang.
+func TestChangeHookFiresOutsideTheLock(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	b, err := releasebundle.NewBundle(clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	var once sync.Once
+	called := make(chan struct{})
+	b.SetChangeHook(func(releasebundle.Snapshot) {
+		_ = b.Revision() // reads back into the bundle; deadlocks if the hook rides mu
+		_ = b.Keys()
+		once.Do(func() { close(called) })
+	})
+	gen1 := newTestKey(t, "release-signing-gen1")
+	if err := b.Bootstrap(gen1.id, gen1.pem); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the change hook deadlocked — it fired under the bundle lock")
 	}
 }

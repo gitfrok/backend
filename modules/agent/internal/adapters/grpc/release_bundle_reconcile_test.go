@@ -130,18 +130,38 @@ func recvReleaseDesiredState(t *testing.T, stream agentpb.AgentGateway_ConnectCl
 	}
 }
 
-// ackDesiredState is the plane's answer to one delivered desired state: it
-// applied the named generation. This is what feeds the applied registry.
+// ackDesiredState is the plane's answer to one delivered RELEASE trust
+// bundle: it applied the named generation, and the payload-kind
+// discriminator says WHICH artifact it answers — the release bundle's
+// revision space, never the CA bundle's. This is what feeds the applied
+// registry.
 func ackDesiredState(t *testing.T, stream agentpb.AgentGateway_ConnectClient, generation int64) {
 	t.Helper()
 	msg := &agentpb.AgentMessage{
 		MessageId: "m-dsack", Seq: 2, SentAt: timestamppb.New(time.Now()),
 		Payload: &agentpb.AgentMessage_DesiredStateAck{DesiredStateAck: &agentpb.DesiredStateAck{
 			Generation: generation, Applied: true,
+			Kind: agentpb.DesiredStateKind_DESIRED_STATE_KIND_RELEASE_TRUST_BUNDLE,
 		}},
 	}
 	if err := stream.Send(msg); err != nil {
 		t.Fatalf("Send desired state ack: %v", err)
+	}
+}
+
+// ackDesiredStateAs sends one desired-state ack naming an explicit payload
+// kind — the harness seam for the attribution property: the registry must
+// move ONLY on acks identified as answering the release bundle.
+func ackDesiredStateAs(t *testing.T, stream agentpb.AgentGateway_ConnectClient, generation int64, kind agentpb.DesiredStateKind) {
+	t.Helper()
+	msg := &agentpb.AgentMessage{
+		MessageId: "m-dsack-kind", Seq: 3, SentAt: timestamppb.New(time.Now()),
+		Payload: &agentpb.AgentMessage_DesiredStateAck{DesiredStateAck: &agentpb.DesiredStateAck{
+			Generation: generation, Applied: true, Kind: kind,
+		}},
+	}
+	if err := stream.Send(msg); err != nil {
+		t.Fatalf("Send desired state ack (%s): %v", kind, err)
 	}
 }
 
@@ -275,6 +295,62 @@ func streamFor(n int, s1, s2 agentpb.AgentGateway_ConnectClient) agentpb.AgentGa
 		return s1
 	}
 	return s2
+}
+
+// TestDesiredStateAckAttributionNeverCrossesBundles is the misattribution
+// tripwire the payload-kind discriminator exists for (agent/v1
+// DesiredStateAck.kind): the CA bundle and the release bundle deliver on
+// INDEPENDENT revision spaces that both start at 1, so the release applied
+// registry must move ONLY on an ack identified as answering the release
+// bundle. A CA-bundle ack — and an unspecified-kind ack from a plane
+// predating the discriminator — must leave the registry untouched, however
+// high its generation: the forward-only GREATEST upsert would make a
+// pollution uncorrectable, so it must never be recorded in the first place.
+func TestDesiredStateAckAttributionNeverCrossesBundles(t *testing.T) {
+	r := newCustodyRig(t)
+
+	rb, err := releasebundle.NewBundle(time.Now)
+	if err != nil {
+		t.Fatalf("releasebundle.NewBundle: %v", err)
+	}
+	applied := newMemApplied()
+	r.gw.AttachReleaseTrustBundle(rb)
+	r.gw.AttachReleaseTrustApplied(applied)
+
+	gen1 := newReleaseKeyPair(t, "release-signing-gen1")
+	if err := rb.Bootstrap(gen1.id, gen1.pem); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	stream, ack, cancel := r.enrolWire(t, r.dial(t), r.issueSecret(t, "acme"))
+	defer func() { cancel(); _ = stream.CloseSend() }()
+	plane := ack.GetDataPlaneId()
+
+	// The plane receives the bootstrapped release bundle and acks it under
+	// the release kind: the registry converges on that revision.
+	ds := recvReleaseDesiredState(t, stream)
+	ackDesiredState(t, stream, ds.GetReleaseTrustBundle().GetRevision())
+	waitForApplied(t, applied, plane, rb.StagingRevision())
+
+	// A CA-bundle ack naming a HIGHER generation (the CA revision space
+	// overlaps the release one) must NOT move the release registry.
+	ackDesiredStateAs(t, stream, rb.StagingRevision()+41, agentpb.DesiredStateKind_DESIRED_STATE_KIND_CA_TRUST_BUNDLE)
+	// Neither may an unspecified-kind ack — a plane predating the
+	// discriminator is attributed to no registry.
+	ackDesiredStateAs(t, stream, rb.StagingRevision()+42, agentpb.DesiredStateKind_DESIRED_STATE_KIND_UNSPECIFIED)
+
+	// A release-kind ack then still lands exactly where it always did —
+	// proving the channel kept serving and the gate narrows, never blocks.
+	ackDesiredState(t, stream, rb.StagingRevision())
+	waitForApplied(t, applied, plane, rb.StagingRevision())
+
+	// The tripwire itself: after BOTH foreign-kind acks and the final
+	// release ack, the registry holds EXACTLY the release revision — the
+	// foreign generations never entered it.
+	if rev, ok := applied.applied(plane); !ok || rev != rb.StagingRevision() {
+		t.Fatalf("release registry = (%d, %v) after foreign-kind acks at +%d/+%d, want exactly (%d, true)",
+			rev, ok, 41, 42, rb.StagingRevision())
+	}
 }
 
 // waitForApplied bounds the ack recording: the applied registry must show

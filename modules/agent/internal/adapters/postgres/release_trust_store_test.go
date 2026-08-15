@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	agentpg "github.com/gitfrok/backend/modules/agent/internal/adapters/postgres"
 )
@@ -53,6 +54,61 @@ func TestReleaseTrustApplied_ForwardOnly(t *testing.T) {
 	rev, ok, err := s.ReleaseTrustApplied(context.Background(), tenant, plane)
 	if err != nil || !ok || rev != 9 {
 		t.Fatalf("applied revision after replayed ack = (%d, %v, %v), want (9, true, nil)", rev, ok, err)
+	}
+}
+
+// TestReleaseTrustApplied_AppliedAtFollowsTheRevision proves applied_at is
+// the instant the plane REACHED the recorded revision, not the instant it
+// last mentioned it: a replayed or duplicate ack for the same (or an older)
+// revision leaves applied_at untouched, and only a revision that actually
+// advances moves it.
+func TestReleaseTrustApplied_AppliedAtFollowsTheRevision(t *testing.T) {
+	tenant := string(tenantFor(t))
+	plane := "plane-" + runID
+	ctx := context.Background()
+
+	readAppliedAt := func() time.Time {
+		t.Helper()
+		var at time.Time
+		if err := superPool(t).QueryRow(ctx,
+			`SELECT applied_at FROM agent.release_trust_plane_state WHERE tenant_id = $1 AND data_plane_id = $2`,
+			tenant, plane,
+		).Scan(&at); err != nil {
+			t.Fatalf("read applied_at: %v", err)
+		}
+		return at
+	}
+
+	s := store(t)
+	if err := s.RecordReleaseTrustApplied(ctx, tenant, plane, 5); err != nil {
+		t.Fatalf("record 5: %v", err)
+	}
+	reached := readAppliedAt()
+
+	// A replayed ack for the SAME revision must not refresh the instant.
+	time.Sleep(10 * time.Millisecond)
+	if err := s.RecordReleaseTrustApplied(ctx, tenant, plane, 5); err != nil {
+		t.Fatalf("replay 5: %v", err)
+	}
+	if got := readAppliedAt(); !got.Equal(reached) {
+		t.Errorf("replayed ack moved applied_at %v -> %v — it must follow the revision, not the ack", reached, got)
+	}
+	// Neither must a late ack for an OLDER revision.
+	time.Sleep(10 * time.Millisecond)
+	if err := s.RecordReleaseTrustApplied(ctx, tenant, plane, 4); err != nil {
+		t.Fatalf("late 4: %v", err)
+	}
+	if got := readAppliedAt(); !got.Equal(reached) {
+		t.Errorf("late older ack moved applied_at %v -> %v", reached, got)
+	}
+
+	// A revision that actually advances moves the instant with it.
+	time.Sleep(10 * time.Millisecond)
+	if err := s.RecordReleaseTrustApplied(ctx, tenant, plane, 6); err != nil {
+		t.Fatalf("record 6: %v", err)
+	}
+	if got := readAppliedAt(); !got.After(reached) {
+		t.Errorf("advancing revision kept applied_at at %v — it must move when the revision does", reached)
 	}
 }
 

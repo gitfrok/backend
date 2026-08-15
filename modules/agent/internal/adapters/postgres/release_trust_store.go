@@ -29,7 +29,10 @@ var _ api.ReleaseTrustAppliedRegistry = (*Store)(nil)
 // trust bundle revision. The revision only moves FORWARD — a late or
 // replayed ack for an older revision never regresses a plane's recorded
 // convergence (the reconcile channel delivers the newest state; the ledger
-// reflects it).
+// reflects it). applied_at follows the REVISION, not the ack: it advances
+// only when the revision actually advances, so a replayed or duplicate ack
+// never refreshes the convergence instant — the ledger says when the plane
+// reached THIS revision, not when it last mentioned it.
 func (s *Store) RecordReleaseTrustApplied(ctx context.Context, tenantID, dataPlaneID string, revision int64) error {
 	if tenantID == "" || dataPlaneID == "" {
 		return errors.New("agent postgres: tenant and data plane are required")
@@ -42,7 +45,9 @@ func (s *Store) RecordReleaseTrustApplied(ctx context.Context, tenantID, dataPla
 			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (tenant_id, data_plane_id)
 			 DO UPDATE SET applied_revision = GREATEST(agent.release_trust_plane_state.applied_revision, EXCLUDED.applied_revision),
-			               applied_at       = EXCLUDED.applied_at`,
+			               applied_at       = CASE WHEN EXCLUDED.applied_revision > agent.release_trust_plane_state.applied_revision
+			                                     THEN EXCLUDED.applied_at
+			                                     ELSE agent.release_trust_plane_state.applied_at END`,
 			tenantID, dataPlaneID, revision, time.Now(),
 		)
 		if err != nil {

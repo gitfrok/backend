@@ -15,8 +15,11 @@ import (
 // release-signing key, the key ID its filename without the extension — and
 // this call converges the bundle toward it:
 //
-//   - a declared key the bundle does not hold is STAGED (newest declared key
-//     last, so signing moves deterministically toward the declared set);
+//   - a declared key the bundle does not hold LIVE is STAGED (newest
+//     declared key last, so signing moves deterministically toward the
+//     declared set) — INCLUDING a key ID whose every prior occurrence is
+//     retired: a re-declaration re-stages it, so the convergence never
+//     wedges on a name the bundle once knew;
 //   - a live key no longer declared is REMOVED, subject to the removal
 //     preconditions (the last live key never leaves; the signing key leaves
 //     only once a successor has taken signing) — a refused removal changes
@@ -59,19 +62,21 @@ func (b *Bundle) ReconcileDir(dir string) error {
 	}
 	sort.Slice(want, func(i, j int) bool { return want[i].id < want[j].id })
 
-	// Stage every declared key the bundle does not hold yet, sorted for a
-	// deterministic signing successor.
+	// Stage every declared key the bundle does not hold LIVE yet, sorted for
+	// a deterministic signing successor. A declared ID whose only prior
+	// occurrences are RETIRED stages again: a re-declared key must converge,
+	// not wedge forever on the bundle's history.
 	for _, w := range want {
 		b.mu.Lock()
-		known := false
+		live := false
 		for _, k := range b.keys {
-			if k.ID == w.id {
-				known = true
+			if k.ID == w.id && k.RemovedAt.IsZero() {
+				live = true
 				break
 			}
 		}
 		b.mu.Unlock()
-		if !known {
+		if !live {
 			if err := b.Stage(w.id, w.pem); err != nil {
 				return fmt.Errorf("releasebundle: reconcile %q: stage %q: %w", dir, w.id, err)
 			}

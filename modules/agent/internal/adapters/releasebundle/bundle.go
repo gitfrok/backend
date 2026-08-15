@@ -77,7 +77,10 @@ type Bundle struct {
 	revision   int64
 	stagingRev int64
 	// onChange, when set, receives a snapshot after every staging step —
-	// the seam the composition root persists the durable state through.
+	// the seam the composition root persists the durable state through. It
+	// fires OUTSIDE mu (see notifyChange); notifyMu serializes the firings
+	// themselves, so concurrent steps hand the store snapshots in one order.
+	notifyMu sync.Mutex
 	onChange func(Snapshot)
 }
 
@@ -93,22 +96,35 @@ func NewBundle(now func() time.Time) (*Bundle, error) {
 // Bootstrap stages the FIRST key of a fresh bundle and points signing at it.
 // A bundle bootstraps exactly once in its life; afterwards rotation is
 // Stage. The PEM must be a public key in the cosign key form — a private key
-// is refused (ADR-0044 custody posture).
+// is refused (ADR-0044 custody posture). The empty-check and the stage are
+// ONE atomic step under the bundle lock: two concurrent bootstraps can never
+// both pass the check and both stage.
 func (b *Bundle) Bootstrap(keyID string, publicKeyPEM []byte) error {
+	if keyID == "" {
+		return errors.New("releasebundle: key ID is required")
+	}
+	if _, err := parsePublicKey(publicKeyPEM); err != nil {
+		return fmt.Errorf("releasebundle: bootstrap %q: %w", keyID, err)
+	}
 	b.mu.Lock()
-	live := b.liveKeysLocked()
-	b.mu.Unlock()
-	if len(live) > 0 {
+	if len(b.liveKeysLocked()) > 0 {
+		b.mu.Unlock()
 		return fmt.Errorf("releasebundle: bundle already bootstrapped; rotate with Stage")
 	}
-	return b.Stage(keyID, publicKeyPEM)
+	b.stageLocked(keyID, publicKeyPEM)
+	b.mu.Unlock()
+	b.notifyChange()
+	return nil
 }
 
 // Stage brings one NEW release-signing public key into the bundle beside the
 // current one AND moves signing to it: the dual-validate window opens —
 // signatures by both keys validate, new releases sign with the new one
-// (ADR-0044 decision 2). Staging advances the bundle revision. A duplicate
-// key ID or an unparseable / private PEM is refused without changing state.
+// (ADR-0044 decision 2). Staging advances the bundle revision. A key ID that
+// is LIVE is refused without changing state; an ID whose every occurrence is
+// RETIRED may be staged again — a re-declaration of a retired key (the
+// reconcile seam's convergence must never wedge on a name the bundle once
+// knew). An unparseable / private PEM is refused without changing state.
 func (b *Bundle) Stage(keyID string, publicKeyPEM []byte) error {
 	if keyID == "" {
 		return errors.New("releasebundle: key ID is required")
@@ -117,20 +133,28 @@ func (b *Bundle) Stage(keyID string, publicKeyPEM []byte) error {
 		return fmt.Errorf("releasebundle: stage %q: %w", keyID, err)
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	for _, k := range b.keys {
-		if k.ID == keyID {
-			return fmt.Errorf("releasebundle: key %q already exists in the bundle", keyID)
+		if k.ID == keyID && k.RemovedAt.IsZero() {
+			b.mu.Unlock()
+			return fmt.Errorf("releasebundle: key %q is already live in the bundle", keyID)
 		}
 	}
+	b.stageLocked(keyID, publicKeyPEM)
+	b.mu.Unlock()
+	b.notifyChange()
+	return nil
+}
+
+// stageLocked performs one staging mutation: append the key, move signing to
+// it, advance both revisions. The caller holds mu and fires the change hook
+// after releasing it.
+func (b *Bundle) stageLocked(keyID string, publicKeyPEM []byte) {
 	pemCopy := make([]byte, len(publicKeyPEM))
 	copy(pemCopy, publicKeyPEM)
 	b.keys = append(b.keys, Key{ID: keyID, PublicKeyPEM: pemCopy, StagedAt: b.now()})
 	b.signingKeyID = keyID
 	b.revision++
 	b.stagingRev++
-	b.notifyChangeLocked()
-	return nil
 }
 
 // RemoveKey retires key ID from the trust bundle — and REFUSES while the key
@@ -140,7 +164,6 @@ func (b *Bundle) Stage(keyID string, publicKeyPEM []byte) error {
 // A refused removal changes nothing: signatures by the key keep validating.
 func (b *Bundle) RemoveKey(keyID string) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	live := b.liveKeysLocked()
 	idx := -1
 	for i, k := range live {
@@ -150,12 +173,15 @@ func (b *Bundle) RemoveKey(keyID string) error {
 		}
 	}
 	if idx < 0 {
+		b.mu.Unlock()
 		return fmt.Errorf("releasebundle: key %q is not live in the bundle: %w", keyID, ErrNoKeys)
 	}
 	if len(live) == 1 {
+		b.mu.Unlock()
 		return fmt.Errorf("releasebundle: refusing to remove the ONLY live key %q: %w", keyID, ErrKeyStillNeeded)
 	}
 	if b.signingKeyID == keyID {
+		b.mu.Unlock()
 		return fmt.Errorf("releasebundle: refusing to remove the SIGNING key %q before a successor is staged: %w", keyID, ErrKeyStillNeeded)
 	}
 	for i := range b.keys {
@@ -165,7 +191,8 @@ func (b *Bundle) RemoveKey(keyID string) error {
 	}
 	b.revision++
 	b.stagingRev++
-	b.notifyChangeLocked()
+	b.mu.Unlock()
+	b.notifyChange()
 	return nil
 }
 
@@ -252,13 +279,29 @@ func (b *Bundle) liveKeysLocked() []Key {
 	return out
 }
 
-// notifyChangeLocked fires the change hook with the current snapshot. Callers
-// hold the lock; the hook itself runs synchronously and must not call back
-// into the bundle.
-func (b *Bundle) notifyChangeLocked() {
-	if b.onChange == nil {
-		return
+// notifyChange fires the change hook with the current snapshot OUTSIDE the
+// bundle lock — the contract SetChangeHook states. A staging step commits
+// under mu and hands the hook a copied snapshot here, so a hook that blocks
+// (the composition's persistence does) can never wedge a staging operation,
+// and notifyMu serializes the firings so concurrent steps reach the store in
+// one order.
+func (b *Bundle) notifyChange() {
+	b.notifyMu.Lock()
+	defer b.notifyMu.Unlock()
+	b.mu.Lock()
+	hook := b.onChange
+	var snap Snapshot
+	if hook != nil {
+		snap = b.snapshotLocked()
 	}
+	b.mu.Unlock()
+	if hook != nil {
+		hook(snap)
+	}
+}
+
+// snapshotLocked copies the bundle's durable state. The caller holds mu.
+func (b *Bundle) snapshotLocked() Snapshot {
 	snap := Snapshot{
 		Revision:        b.revision,
 		StagingRevision: b.stagingRev,
@@ -270,7 +313,7 @@ func (b *Bundle) notifyChangeLocked() {
 		copy(pemCopy, k.PublicKeyPEM)
 		snap.Keys = append(snap.Keys, SnapshotKey{ID: k.ID, PublicKeyPEM: pemCopy, StagedAt: k.StagedAt, RemovedAt: k.RemovedAt})
 	}
-	b.onChange(snap)
+	return snap
 }
 
 // Snapshot is the bundle's durable state: keys (IDs, public PEM, window
@@ -297,18 +340,7 @@ type SnapshotKey struct {
 func (b *Bundle) Snapshot() Snapshot {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	snap := Snapshot{
-		Revision:        b.revision,
-		StagingRevision: b.stagingRev,
-		SigningKeyID:    b.signingKeyID,
-		Keys:            make([]SnapshotKey, 0, len(b.keys)),
-	}
-	for _, k := range b.keys {
-		pemCopy := make([]byte, len(k.PublicKeyPEM))
-		copy(pemCopy, k.PublicKeyPEM)
-		snap.Keys = append(snap.Keys, SnapshotKey{ID: k.ID, PublicKeyPEM: pemCopy, StagedAt: k.StagedAt, RemovedAt: k.RemovedAt})
-	}
-	return snap
+	return b.snapshotLocked()
 }
 
 // Restore rebuilds the bundle's state from a snapshot, re-validating every

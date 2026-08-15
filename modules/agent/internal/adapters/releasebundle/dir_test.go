@@ -1,6 +1,9 @@
 package releasebundle_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -9,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gitfrok/backend/modules/agent/api"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/releasebundle"
 )
 
@@ -159,4 +163,89 @@ func TestReconcileDirMissingDirIsAnError(t *testing.T) {
 	if err := b.ReconcileDir(filepath.Join(t.TempDir(), "absent")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ReconcileDir on a missing directory = %v, want ErrNotExist", err)
 	}
+}
+
+// TestReconcileDirReDeclaredRetiredKeyConverges is the un-wedge proof: a key
+// ID that was declared, retired, and declared AGAIN must re-enter the bundle
+// — the old shape counted retired occurrences as "known" and skipped them
+// forever, so ReconcileDir could never converge toward a re-declaration.
+func TestReconcileDirReDeclaredRetiredKeyConverges(t *testing.T) {
+	dir := t.TempDir()
+	k1, k2 := newTestKey(t, "release-signing-gen1"), newTestKey(t, "release-signing-gen2")
+	writePub(t, dir, k1)
+	writePub(t, dir, k2)
+	b := newReconcileBundle(t)
+	if err := b.ReconcileDir(dir); err != nil {
+		t.Fatalf("ReconcileDir: %v", err)
+	}
+
+	// gen1 leaves the declaration and is retired (gen2 keeps signing).
+	if err := os.Remove(filepath.Join(dir, k1.id+".pub")); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReconcileDir(dir); err != nil {
+		t.Fatalf("ReconcileDir after removal: %v", err)
+	}
+
+	// gen1 is declared AGAIN — with FRESH key material — and reconciled.
+	k1b := newTestKey(t, "release-signing-gen1")
+	writePub(t, dir, k1b)
+	if err := b.ReconcileDir(dir); err != nil {
+		t.Fatalf("ReconcileDir with a re-declared retired key: %v", err)
+	}
+	st, ok, err := b.LatestReleaseTrustBundle(t.Context())
+	if err != nil || !ok {
+		t.Fatalf("LatestReleaseTrustBundle = (_, %v, %v)", ok, err)
+	}
+	var live []string
+	for _, k := range st.Keys {
+		live = append(live, k.ID)
+	}
+	if len(live) != 2 {
+		t.Fatalf("live keys after re-declaration = %v, want the re-staged gen1 beside gen2", live)
+	}
+	// The FRESH material is what the bundle trusts now: a signature by the
+	// re-declared key validates.
+	sig := signReleaseDir(t, k1b)
+	if !verifiesAgainstDir(t, st.Keys, sig) {
+		t.Fatal("signature by the re-declared key does not validate against the converged bundle")
+	}
+}
+
+// signReleaseDir / verifiesAgainstDir are the dir-suite's signature helpers:
+// sign one canonical release identity with a test key, and verify against
+// every key a bundle projection carries.
+const dirReleaseIdentity = "registry.example/gitfrok/operator@sha256:redeclared"
+
+func signReleaseDir(t *testing.T, k testKey) []byte {
+	t.Helper()
+	h := sha256.Sum256([]byte(dirReleaseIdentity))
+	sig, err := ecdsa.SignASN1(rand.Reader, k.priv, h[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return sig
+}
+
+func verifiesAgainstDir(t *testing.T, keys []api.ReleaseTrustKey, sig []byte) bool {
+	t.Helper()
+	h := sha256.Sum256([]byte(dirReleaseIdentity))
+	for _, k := range keys {
+		block, _ := pem.Decode(k.PublicKeyPEM)
+		if block == nil {
+			t.Fatalf("distributed key %q carries no PEM block", k.ID)
+		}
+		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			t.Fatalf("distributed key %q does not parse: %v", k.ID, err)
+		}
+		ec, ok := pub.(*ecdsa.PublicKey)
+		if !ok {
+			t.Fatalf("distributed key %q is %T, want ECDSA", k.ID, pub)
+		}
+		if ecdsa.VerifyASN1(ec, h[:], sig) {
+			return true
+		}
+	}
+	return false
 }

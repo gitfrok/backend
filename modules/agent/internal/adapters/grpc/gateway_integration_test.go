@@ -719,11 +719,15 @@ func TestCATrustBundleStagedRootsRideTheChannel(t *testing.T) {
 	}
 
 	// The data plane's ack rides the same stream; the channel keeps serving
-	// after it (the ack is observational, never a channel fault).
+	// after it (the ack is observational, never a channel fault). It answers
+	// the CA bundle's delivery, and the payload-kind discriminator says so —
+	// its generation belongs to the CA revision space, never the release
+	// registry's.
 	if err := stream.Send(&agentpb.AgentMessage{
 		MessageId: "m-dsack", Seq: 2, SentAt: timestamppb.New(r.clock.Now()),
 		Payload: &agentpb.AgentMessage_DesiredStateAck{DesiredStateAck: &agentpb.DesiredStateAck{
 			Generation: 3, Applied: true,
+			Kind: agentpb.DesiredStateKind_DESIRED_STATE_KIND_CA_TRUST_BUNDLE,
 		}},
 	}); err != nil {
 		t.Fatalf("Send desired-state ack: %v", err)
