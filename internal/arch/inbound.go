@@ -1,8 +1,10 @@
 package arch
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -29,12 +31,92 @@ var dialMarkers = []string{
 	"http.Get(", "http.Post(", "http.PostForm(",
 }
 
-// controlPlaneTrees are the packages on the control-plane side of the agent boundary. None of
-// them may dial a data-plane address.
-var controlPlaneTrees = []string{
+// controlPlaneRoot is the composition root that defines what "control plane" means: whatever
+// this binary composes runs on the control-plane side of the agent boundary.
+const controlPlaneRoot = "cmd/controlplane-app"
+
+// controlPlaneFloor is the minimum scanned set. It exists so the gate still means something
+// if the composition root is ever unreadable — but the scanned set is DERIVED from what the
+// root imports (controlPlaneTrees), because a hand-maintained list silently narrows as the
+// control plane grows: phase 3 added modules/metering and modules/residency to this binary
+// and neither was scanned until the derivation landed (phase-3 review M3).
+var controlPlaneFloor = []string{
 	"modules/rollout",
 	"modules/agent",
-	"cmd/controlplane-app",
+	controlPlaneRoot,
+}
+
+// modulePrefix is how a control-plane module import looks in source.
+const modulePrefix = "github.com/gitfrok/backend/modules/"
+
+// controlPlaneTrees returns the trees to scan: the composition root plus every backend module
+// it imports, transitively through those modules' own imports. A module that reaches the
+// control plane by composition is control-plane code, whoever wrote it.
+func controlPlaneTrees(root string) ([]string, error) {
+	seen := map[string]bool{}
+	for _, t := range controlPlaneFloor {
+		seen[t] = true
+	}
+	queue := []string{controlPlaneRoot}
+	for len(queue) > 0 {
+		tree := queue[0]
+		queue = queue[1:]
+		imports, err := moduleImports(filepath.Join(root, filepath.FromSlash(tree)))
+		if err != nil {
+			return nil, err
+		}
+		for _, imp := range imports {
+			if !seen[imp] {
+				seen[imp] = true
+				queue = append(queue, imp)
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(seen)), nil
+}
+
+// moduleImports reports the backend modules a tree's non-test sources import, as tree paths.
+// A tree that is absent from this checkout contributes nothing: fixtures exercise one tree at
+// a time, and a renamed tree must not turn the gate into a crash.
+func moduleImports(dir string) ([]string, error) {
+	if _, err := os.Stat(dir); err != nil {
+		return nil, nil
+	}
+	var out []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for line := range strings.SplitSeq(string(src), "\n") {
+			_, after, ok := strings.Cut(line, modulePrefix)
+			if !ok {
+				continue
+			}
+			name, _, _ := strings.Cut(after, "/")
+			name = strings.Trim(name, "\"`")
+			if name != "" {
+				out = append(out, "modules/"+name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // InboundViolation is one control-plane source file that opens an outbound dial — which, from
@@ -49,8 +131,12 @@ type InboundViolation struct {
 // the same reason the graph loader excludes them: a test may legitimately stand up a client to
 // exercise a server, and a test is not part of the shipped control plane.
 func CheckNoDataPlaneDial(root string) ([]InboundViolation, error) {
+	trees, err := controlPlaneTrees(root)
+	if err != nil {
+		return nil, err
+	}
 	var out []InboundViolation
-	for _, tree := range controlPlaneTrees {
+	for _, tree := range trees {
 		dir := filepath.Join(root, filepath.FromSlash(tree))
 		// A tree that does not exist in this checkout is skipped, not an error: fixtures
 		// exercise one tree at a time, and a renamed tree must not turn the gate into a crash.

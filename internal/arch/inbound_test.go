@@ -3,6 +3,7 @@ package arch
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -62,5 +63,27 @@ func TestNoDataPlaneDialIgnoresTestFiles(t *testing.T) {
 	}
 	if len(violations) != 0 {
 		t.Fatalf("test files are out of scope for the AC4 scan, got %d violations", len(violations))
+	}
+}
+
+// The scanned set is DERIVED from what the control-plane binary composes, so a module that
+// joins the control plane joins the gate with it. Phase 3 added metering and residency to
+// cmd/controlplane-app and neither was scanned under the old hand-maintained list
+// (phase-3 review M3); this test fails if the derivation stops reaching them.
+func TestControlPlaneTreesFollowTheComposition(t *testing.T) {
+	trees, err := controlPlaneTrees(repoRoot(t))
+	if err != nil {
+		t.Fatalf("derive trees: %v", err)
+	}
+	for _, want := range []string{
+		"cmd/controlplane-app",
+		"modules/agent",
+		"modules/rollout",
+		"modules/metering",
+		"modules/residency",
+	} {
+		if !slices.Contains(trees, want) {
+			t.Errorf("%s is composed into the control plane but is not scanned; derived set = %v", want, trees)
+		}
 	}
 }

@@ -93,6 +93,9 @@ type fakeIssuer struct {
 	issued    []api.IssuedCertificate
 	chainErr  error
 	expired   bool
+	// validity is the window classification a trusted chain reports when expired is
+	// not set — the not-yet-valid case the real CA can now report (SPEC-0038 AC5).
+	validity api.Validity
 }
 
 func newFakeIssuer() *fakeIssuer {
@@ -125,16 +128,19 @@ func (f *fakeIssuer) Inspect(leafDER []byte) (api.Identity, time.Time, error) {
 	return id, f.expiries[strings.TrimPrefix(string(leafDER), "leaf:")], nil
 }
 
-func (f *fakeIssuer) VerifyChain(rawCerts [][]byte, _ time.Time) ([]byte, bool, error) {
+func (f *fakeIssuer) VerifyChain(rawCerts [][]byte, _ time.Time) ([]byte, api.Validity, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.chainErr != nil {
-		return nil, false, f.chainErr
+		return nil, api.ValidNow, f.chainErr
 	}
 	if len(rawCerts) == 0 {
-		return nil, false, errors.New("fakeIssuer: no certificates")
+		return nil, api.ValidNow, errors.New("fakeIssuer: no certificates")
 	}
-	return rawCerts[0], f.expired, nil
+	if f.expired {
+		return rawCerts[0], api.ValidityExpired, nil
+	}
+	return rawCerts[0], f.validity, nil
 }
 
 // harness wires the service on the in-memory composition with test knobs exposed.

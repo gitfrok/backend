@@ -200,6 +200,26 @@ type Config struct {
 	Now func() time.Time
 }
 
+// Validity says where a TRUSTED certificate sits in its own validity window. It is only
+// ever reported for a chain this control plane's CA signed; an untrusted chain is an error,
+// never a validity classification.
+//
+// Both non-valid states are refusals. They are distinguished because they are different
+// operational stories: an expired certificate is a rotation that did not happen, while one
+// presented before its NotBefore is almost always clock skew in the customer's cluster —
+// the failure mode SPEC-0038's non-functional section names, which presents as a network
+// fault unless the refusal says otherwise.
+type Validity int
+
+const (
+	// ValidNow: trusted, and now sits inside the certificate's window.
+	ValidNow Validity = iota
+	// ValidityExpired: trusted, but now is at or past NotAfter.
+	ValidityExpired
+	// ValidityNotYetValid: trusted, but now is before NotBefore.
+	ValidityNotYetValid
+)
+
 // CertificateIssuer is the control plane's CA role for agent identities (ADR-0060): issue
 // short-lived client certificates naming tenant and data plane, and interpret presented
 // ones. Key custody for a production CA is deliberately not decided here (ADR-0057
@@ -212,10 +232,12 @@ type CertificateIssuer interface {
 	// expiry. Certificates not issued by this control plane are an error.
 	Inspect(leafDER []byte) (Identity, time.Time, error)
 	// VerifyChain checks rawCerts (leaf first) against this control plane's CA. It returns
-	// the leaf's DER and whether the chain is trusted but the certificate expired — expiry
-	// is the gateway's admission decision to make and audit, not the handshake's to fail
-	// silently (SPEC-0038 AC5, AC7). An untrusted chain is an error.
-	VerifyChain(rawCerts [][]byte, now time.Time) (leafDER []byte, expired bool, err error)
+	// the leaf's DER and where the presented certificate sits in its own validity window —
+	// the window is the gateway's admission decision to make and audit, not the handshake's
+	// to fail silently (SPEC-0038 AC5, AC7). An untrusted chain is an error, and trust is
+	// established BEFORE the window is classified: a chain this CA did not sign is never
+	// reported as merely out of date.
+	VerifyChain(rawCerts [][]byte, now time.Time) (leafDER []byte, validity Validity, err error)
 }
 
 // StreamSession is the control-plane half of one established stream: the rotation state
