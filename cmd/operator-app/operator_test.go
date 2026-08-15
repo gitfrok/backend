@@ -234,7 +234,7 @@ func TestFailureKeepsTheObservedVersionOfWhatIsRunning(t *testing.T) {
 
 	applier, status := &fakeApplier{}, &fakeStatus{}
 	r := newReconciler(bundle, good, applier, status)
-	if err := r.ReconcileOnce(context.Background()); err != nil {
+	if err := r.ReconcileOnce(t.Context()); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
 	if last := status.reports[len(status.reports)-1]; last.ObservedVersion != "0.1.0" {
@@ -244,7 +244,7 @@ func TestFailureKeepsTheObservedVersionOfWhatIsRunning(t *testing.T) {
 	// The desired version moves to a release whose manifest is absent: the
 	// refusal is correct, and the workload keeps running 0.1.0.
 	r.Desired = fixedVersion("0.2.0")
-	if err := r.ReconcileOnce(context.Background()); err == nil {
+	if err := r.ReconcileOnce(t.Context()); err == nil {
 		t.Fatal("a missing manifest must be refused")
 	}
 	last := status.reports[len(status.reports)-1]

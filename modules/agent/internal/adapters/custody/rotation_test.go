@@ -419,18 +419,14 @@ func TestBootstrapIsAtomicUnderConcurrency(t *testing.T) {
 	const racers = 8
 	var wg sync.WaitGroup
 	results := make(chan error, racers)
-	for i := 0; i < racers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range racers {
+		wg.Go(func() {
 			// Distinct key names: the custody service refuses a name it
 			// already holds, so a shared name would serialize the race at
 			// the seam instead of at the bundle.
-			results <- func() error {
-				_, err := bundle.Bootstrap(context.Background(), fmt.Sprintf("agent-ca-racer-%d", i))
-				return err
-			}()
-		}(i)
+			_, err := bundle.Bootstrap(t.Context(), fmt.Sprintf("agent-ca-racer-%d", i))
+			results <- err
+		})
 	}
 	wg.Wait()
 	close(results)
@@ -455,8 +451,9 @@ func TestReattachIsAtomicUnderConcurrency(t *testing.T) {
 	fake := custody.NewFakeSigner()
 	clk := newClock()
 	// The custody service kept the keys; the bundle's snapshot is gone.
-	for i := 0; i < 8; i++ {
-		if _, err := fake.GenerateKey(context.Background(), fmt.Sprintf("agent-ca-kept-%d", i)); err != nil {
+	const racers = 8
+	for i := range racers {
+		if _, err := fake.GenerateKey(t.Context(), fmt.Sprintf("agent-ca-kept-%d", i)); err != nil {
 			t.Fatalf("GenerateKey: %v", err)
 		}
 	}
@@ -465,14 +462,12 @@ func TestReattachIsAtomicUnderConcurrency(t *testing.T) {
 		t.Fatalf("NewBundle: %v", err)
 	}
 	var wg sync.WaitGroup
-	results := make(chan error, 8)
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_, err := bundle.ReattachRoot(context.Background(), fmt.Sprintf("agent-ca-kept-%d", i))
+	results := make(chan error, racers)
+	for i := range racers {
+		wg.Go(func() {
+			_, err := bundle.ReattachRoot(t.Context(), fmt.Sprintf("agent-ca-kept-%d", i))
 			results <- err
-		}(i)
+		})
 	}
 	wg.Wait()
 	close(results)

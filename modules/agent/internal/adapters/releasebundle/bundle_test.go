@@ -529,7 +529,7 @@ func TestRestoreRefusesASigningKeyThatIsNotLive(t *testing.T) {
 	}
 	// The refusal changes nothing: the bundle stays empty rather than
 	// half-restored.
-	if _, ok, err := restored.LatestReleaseTrustBundle(context.Background()); ok || err != nil {
+	if _, ok, err := restored.LatestReleaseTrustBundle(t.Context()); ok || err != nil {
 		t.Fatalf("after a refused restore the bundle projects (ok=%v, err=%v), want nothing", ok, err)
 	}
 }

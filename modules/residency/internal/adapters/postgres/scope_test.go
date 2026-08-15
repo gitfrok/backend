@@ -6,7 +6,6 @@
 package postgres
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -20,7 +19,7 @@ import (
 // someone else. The refusal has to happen here instead: a call whose context
 // already names a tenant may only act within THAT tenant.
 func TestScopeRefusesATenantOtherThanTheContextsOwn(t *testing.T) {
-	ctx := tenancy.WithTenant(context.Background(), tenancy.ID("tenant-a"))
+	ctx := tenancy.WithTenant(t.Context(), tenancy.ID("tenant-a"))
 	if _, err := scoped(ctx, "tenant-b"); err == nil {
 		t.Fatal("a store call for tenant-b under a tenant-a context was accepted")
 	}
@@ -30,7 +29,7 @@ func TestScopeRefusesATenantOtherThanTheContextsOwn(t *testing.T) {
 	// An unscoped context is the composition-root shape: the record's own
 	// tenancy is the scope, and platform/db still refuses a context that
 	// ends up carrying none.
-	if _, err := scoped(context.Background(), "tenant-a"); err != nil {
+	if _, err := scoped(t.Context(), "tenant-a"); err != nil {
 		t.Fatalf("an unscoped context = %v, want the argument to establish the scope", err)
 	}
 }
@@ -41,7 +40,7 @@ func TestScopeRefusesATenantOtherThanTheContextsOwn(t *testing.T) {
 // returning the coarse refusal.
 func TestMismatchedCallNeverReachesThePool(t *testing.T) {
 	s := &Store{} // deliberately no pool
-	ctx := tenancy.WithTenant(context.Background(), tenancy.ID("tenant-a"))
+	ctx := tenancy.WithTenant(t.Context(), tenancy.ID("tenant-a"))
 
 	if err := s.PutDeclaration(ctx, api.Declaration{TenantID: "tenant-b", Cloud: "aws", Region: "eu-1"}); err == nil {
 		t.Fatal("PutDeclaration accepted a cross-tenant record")
