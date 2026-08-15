@@ -44,6 +44,14 @@ type EnqueueRequest struct {
 	Trigger                       TriggerKind
 }
 
+// DelayCauseEnvelopeThrottle is the cause a job carries when it waited in the
+// queue while the fair-use claim gate held dispatch at the published cap
+// (SPEC-0041 AC5, T-0035): queued jobs are delayed, never dropped, and the
+// delay is visible as a cause on the job. It is the only delay cause in this
+// vocabulary — nothing else dispatch refuses for, and git is never one of
+// them (AC7).
+const DelayCauseEnvelopeThrottle = "ENVELOPE_THROTTLE"
+
 // Job is the bounded public lifecycle view. Attempt capabilities, pod names,
 // node details, raw output, and source bytes are CI implementation details.
 type Job struct {
@@ -55,6 +63,10 @@ type Job struct {
 	QueuedAt                                       time.Time
 	StartedAt, FinishedAt                          *time.Time
 	ConfigurationDigest, OutcomeSummary            string
+	// DelayCause names why this job waited in the queue before dispatch; it
+	// is empty when the job dispatched without a throttle delay (SPEC-0041
+	// AC5).
+	DelayCause string
 }
 
 type Jobs interface {

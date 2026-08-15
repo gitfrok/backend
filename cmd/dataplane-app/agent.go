@@ -216,8 +216,9 @@ func loadTrustPool(path string) (*x509.CertPool, error) {
 
 // runAgent performs the install-time self-registration and then serves the channel until ctx
 // ends. It selects the per-cloud driver first: a missing required setting refuses the install
-// before anything dials.
-func runAgent(ctx context.Context, cfg agentClientConfig, logf func(string, ...any)) error {
+// before anything dials. envelope is the fair-use cap sink every EnvelopeStateUpdate is applied
+// into (SPEC-0041 AC9, T-0035) — the CI runtime's caps holder the dispatcher reads.
+func runAgent(ctx context.Context, cfg agentClientConfig, logf func(string, ...any), envelope agentclient.EnvelopeSink) error {
 	driver, err := clouddriver.Select(cfg.provider, cfg.settings)
 	if err != nil {
 		return err
@@ -235,6 +236,7 @@ func runAgent(ctx context.Context, cfg agentClientConfig, logf func(string, ...a
 		HeartbeatEvery:  cfg.heartbeatEvery,
 		Now:             time.Now,
 		Logf:            logf,
+		Envelope:        envelope,
 	})
 	if err != nil {
 		return err

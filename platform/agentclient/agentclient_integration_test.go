@@ -16,6 +16,7 @@ import (
 	"github.com/gitfrok/backend/modules/agent"
 	agentapi "github.com/gitfrok/backend/modules/agent/api"
 	identityapi "github.com/gitfrok/backend/modules/identity/api"
+	meteringapi "github.com/gitfrok/backend/modules/metering/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
 	"github.com/gitfrok/backend/platform/clouddriver"
@@ -64,7 +65,11 @@ type cpRig struct {
 
 func newCPRig(t *testing.T) *cpRig {
 	t.Helper()
-	clock := &fakeClock{t: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
+	// The fake clock starts at the WALL instant: the DevCA root is dated on the wall
+	// clock (Go's TLS and the app-layer chain checks must both hold), and a fixed past
+	// date reads the wall-dated CA as not-yet-valid once the machine's clock passes it
+	// — the same discipline gateway_integration_test keeps for the identical reason.
+	clock := &fakeClock{t: time.Now()}
 	logs := &strings.Builder{}
 	logf := func(format string, args ...any) { fmt.Fprintf(logs, format+"\n", args...) }
 
@@ -387,4 +392,197 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) 
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("%s", msg)
+}
+
+// recordingEnvelopeSink captures the caps the agent applies; it stands in for
+// the CI dispatcher's caps holder, which this package cannot import.
+type recordingEnvelopeSink struct {
+	mu       sync.Mutex
+	maxCI    int32
+	queueCap int64
+	applies  int
+}
+
+func (r *recordingEnvelopeSink) ApplyEnvelopeCaps(maxCI int32, queueCap int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxCI, r.queueCap = maxCI, queueCap
+	r.applies++
+	return nil
+}
+func (r *recordingEnvelopeSink) snapshot() (int32, int64, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxCI, r.queueCap, r.applies
+}
+
+// fakeEnvelopeDelivery is the control-plane delivery seam under test: it holds
+// the newest envelope desired state and records every ack the data plane sends.
+type fakeEnvelopeDelivery struct {
+	mu    sync.Mutex
+	state meteringapi.EnvelopeDesiredState
+	has   bool
+	acks  []envAck
+}
+
+type envAck struct {
+	generation int64
+	applied    bool
+	err        string
+}
+
+func (f *fakeEnvelopeDelivery) LatestDesiredState(_ context.Context, _ string) (meteringapi.EnvelopeDesiredState, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state, f.has, nil
+}
+func (f *fakeEnvelopeDelivery) AckDesiredState(_ context.Context, _ string, generation int64, applied bool, errMsg string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acks = append(f.acks, envAck{generation, applied, errMsg})
+	return nil
+}
+func (f *fakeEnvelopeDelivery) publish(maxCI int32, queueCap int64) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state.Generation++
+	f.state.MaxCIConcurrency = maxCI
+	f.state.QueueDepthCap = queueCap
+	f.has = true
+	return f.state.Generation
+}
+func (f *fakeEnvelopeDelivery) lastAck() (envAck, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.acks) == 0 {
+		return envAck{}, false
+	}
+	return f.acks[len(f.acks)-1], true
+}
+
+// TestEnvelopeStateUpdateAppliesAndAcks is the T-0035 AC1/AC6 path end to end
+// over the REAL client: the control plane publishes an EnvelopeStateUpdate, the
+// data-plane agent applies it into its sink and answers with an EnvelopeStateAck;
+// a newer generation is applied again on the live stream, and a reconnect
+// re-applies the current generation rather than running unthrottled (AC6).
+func TestEnvelopeStateUpdateAppliesAndAcks(t *testing.T) {
+	// Wall-anchored fake clock, same discipline as newCPRig: the DevCA root is dated
+	// on the wall clock, so a fixed past date would read it as not-yet-valid.
+	clock := &fakeClock{t: time.Now()}
+	logs := &strings.Builder{}
+	logf := func(format string, args ...any) { fmt.Fprintf(logs, format+"\n", args...) }
+	ca, err := agent.NewDevCA("test-envelope-ca", time.Now)
+	if err != nil {
+		t.Fatalf("NewDevCA: %v", err)
+	}
+	svc := agent.New(allowPDP{}, bus.NewInProcess(), ca, agentapi.Config{
+		CertLifetime:          time.Hour,
+		RotationLead:          20 * time.Minute,
+		RotationRetryInterval: time.Minute,
+		StaleAfter:            5 * time.Minute,
+		TokenMaxLifetime:      24 * time.Hour,
+		HeartbeatInterval:     30 * time.Second,
+		ClockSkewLeeway:       5 * time.Minute,
+		Now:                   clock.Now,
+	}, logf)
+
+	env := &fakeEnvelopeDelivery{}
+	serverCert, err := ca.IssueServer("agent-gateway", []string{"localhost"}, time.Now(), 24*time.Hour)
+	if err != nil {
+		t.Fatalf("server cert: %v", err)
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := ggrpc.NewServer(ggrpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequestClientCert,
+	})))
+	srv := agent.NewGRPCServer(svc, 5*time.Millisecond, clock.Now, logf)
+	agent.AttachMetering(srv, nil, env)
+	agentpb.RegisterAgentGatewayServer(server, srv)
+	go func() { _ = server.Serve(lis) }()
+	t.Cleanup(server.Stop)
+	addr := "localhost" + lis.Addr().String()[strings.LastIndex(lis.Addr().String(), ":"):]
+
+	// The control plane already has a breached envelope before the plane connects.
+	gen1 := env.publish(2, 50)
+
+	_, secret, err := svc.IssueEnrolmentToken(operatorCtx("acme", "op-1"), "acme", "op-1", time.Hour)
+	if err != nil {
+		t.Fatalf("IssueEnrolmentToken: %v", err)
+	}
+	sink := &recordingEnvelopeSink{}
+	client, err := New(Config{
+		GatewayAddr:     addr,
+		ServerName:      "localhost",
+		Roots:           ca.CAPool(),
+		Store:           &MemoryCertStore{},
+		ClockSkewLeeway: 5 * time.Minute,
+		HeartbeatEvery:  10 * time.Millisecond,
+		Now:             clock.Now,
+		Envelope:        sink,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.Bootstrap(context.Background(), EnrolInput{
+		Token: secret, Cloud: agentpb.Cloud_CLOUD_GKE, Region: "eu-west1",
+		AgentVersion: "0.1.0", K8sVersion: "1.31.0",
+	}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- client.Connect(ctx) }()
+
+	// The stream must first reach CONNECTED before the envelope can be delivered.
+	waitFor(t, 5*time.Second, func() bool {
+		fleet, err := svc.Fleet(operatorCtx("acme", "op-1"), "acme", "op-1")
+		return err == nil && len(fleet) == 1 && fleet[0].Status == agentapi.StatusConnected
+	}, "data plane never reached CONNECTED")
+
+	// AC1: the agent applies the published caps and acks the generation.
+	waitFor(t, 5*time.Second, func() bool {
+		maxCI, queueCap, _ := sink.snapshot()
+		return maxCI == 2 && queueCap == 50
+	}, "the agent never applied the published envelope caps")
+	waitFor(t, 5*time.Second, func() bool {
+		ack, ok := env.lastAck()
+		return ok && ack.generation == gen1 && ack.applied && ack.err == ""
+	}, "the control plane never recorded an applied ack for the published generation")
+
+	// A newer generation is applied on the live stream.
+	gen2 := env.publish(3, 10)
+	waitFor(t, 5*time.Second, func() bool {
+		maxCI, queueCap, _ := sink.snapshot()
+		return maxCI == 3 && queueCap == 10
+	}, "the agent never applied the newer envelope generation")
+	waitFor(t, 5*time.Second, func() bool {
+		ack, ok := env.lastAck()
+		return ok && ack.generation == gen2 && ack.applied
+	}, "the control plane never recorded an ack for the newer generation")
+
+	// AC6: reconnect re-applies the current generation rather than running
+	// unthrottled until the next evaluation.
+	cancel()
+	<-serveErr
+	_, _, appliesBefore := sink.snapshot()
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	reconnErr := make(chan error, 1)
+	go func() { reconnErr <- client.Connect(ctx2) }()
+	waitFor(t, 5*time.Second, func() bool {
+		_, _, applies := sink.snapshot()
+		return applies > appliesBefore
+	}, "reconnect did not re-apply the current envelope generation")
+	maxCI, queueCap, _ := sink.snapshot()
+	if maxCI != 3 || queueCap != 10 {
+		t.Fatalf("reconnect re-applied caps %d/%d, want the current 3/10", maxCI, queueCap)
+	}
+	// End the reconnected stream before the test returns so no Connect goroutine
+	// outlives it (the CP log builder is not safe for concurrent reads).
+	cancel2()
+	<-reconnErr
 }

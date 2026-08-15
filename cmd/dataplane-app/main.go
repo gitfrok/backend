@@ -452,7 +452,7 @@ func main() {
 			agentLogf := func(format string, args ...any) {
 				fmt.Fprintf(os.Stderr, "dataplane agent: "+format+"\n", args...)
 			}
-			if err := runAgent(ctx, agentCfg, agentLogf); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runAgent(ctx, agentCfg, agentLogf, dp.ci.EnvelopeCaps()); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(os.Stderr, "dataplane agent: %v\n", err)
 			}
 		}()

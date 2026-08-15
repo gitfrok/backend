@@ -70,6 +70,16 @@ func (e *EnrolmentRefused) Error() string {
 // rig; the default dials the configured address over mTLS.
 type DialFunc func(ctx context.Context, clientCertPEM []byte) (agentpb.AgentGatewayClient, io.Closer, error)
 
+// EnvelopeSink is where the agent hands each received envelope's throttle caps
+// (SPEC-0041 AC9, T-0035). The control plane STATES the desired state on the
+// channel; the data plane APPLIES it itself (ADR-0061) — the sink is the seam
+// to whatever enforces, the CI dispatcher's claim gate and scaler input. The
+// returned error surfaces in the EnvelopeStateAck; a nil sink means this plane
+// has nothing to throttle, which is trivially applied.
+type EnvelopeSink interface {
+	ApplyEnvelopeCaps(maxCIConcurrency int32, queueDepthCap int64) error
+}
+
 // Config wires the agent client. Every value is per-environment (invariant 13): the install
 // supplies the token and the driver supplies cloud/region/capabilities.
 type Config struct {
@@ -93,6 +103,10 @@ type Config struct {
 	Logf func(format string, args ...any)
 	// Dial overrides the default mTLS dialer (tests).
 	Dial DialFunc
+	// Envelope receives each EnvelopeStateUpdate's throttle caps for the data
+	// plane to apply (SPEC-0041 AC9, T-0035). Optional: a nil sink means this
+	// plane enforces nothing and every update is trivially applied.
+	Envelope EnvelopeSink
 }
 
 // Client is the data-plane agent. One instance serves one data plane.
@@ -269,8 +283,44 @@ func (c *Client) Connect(ctx context.Context) error {
 		case *agentpb.ControlPlaneMessage_Ping:
 			// A ping only proves the channel is live; the recv itself already refreshed
 			// contact. Nothing to send back on this surface.
+		case *agentpb.ControlPlaneMessage_EnvelopeState:
+			// Fair-use desired state (SPEC-0041 AC9): the control plane states the
+			// envelope, the data plane applies it and answers with an ack. Applying
+			// hands the caps to the sink; the ack reports whether that succeeded.
+			// Absence of a sink is trivially applied (nothing to throttle). The
+			// control plane never reaches in to enforce (ADR-0061), and nothing here
+			// can block git or make a repository read-only — it only stores caps
+			// (SPEC-0041 AC7/AC8).
+			update := p.EnvelopeState
+			applied := true
+			var errMsg string
+			if c.cfg.Envelope != nil {
+				if err := c.cfg.Envelope.ApplyEnvelopeCaps(update.GetMaxCiConcurrency(), update.GetQueueDepthCap()); err != nil {
+					applied = false
+					errMsg = err.Error()
+				}
+			}
+			seq++
+			ack := &agentpb.AgentMessage{
+				MessageId: ids.NewULID(),
+				Seq:       seq,
+				SentAt:    timestamppb.New(c.cfg.Now()),
+				Payload: &agentpb.AgentMessage_EnvelopeStateAck{EnvelopeStateAck: &agentpb.EnvelopeStateAck{
+					Generation: update.GetGeneration(),
+					Applied:    applied,
+					Error:      errMsg,
+				}},
+			}
+			c.mu.Lock()
+			sendErr := stream.Send(ack)
+			c.mu.Unlock()
+			if sendErr != nil {
+				return sendErr
+			}
+			c.cfg.Logf("agentclient: applied envelope generation %d (max-ci=%d queue-cap=%d)",
+				update.GetGeneration(), update.GetMaxCiConcurrency(), update.GetQueueDepthCap())
 		default:
-			// DesiredState, commands and friends belong to later specs (SPEC-0039/0041); the
+			// Commands and friends belong to later specs (SPEC-0039/0041); the
 			// enrolment surface ignores them.
 		}
 	}

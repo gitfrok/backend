@@ -43,6 +43,14 @@ type RunnerConfig struct {
 // package under this module's internal/ tree.
 type Launcher = dispatcher.Launcher
 
+// EnvelopeCaps is the fair-use throttle cap holder the data plane applies from
+// the control plane's envelope desired state (SPEC-0041 AC9, T-0035). Aliased
+// so cmd/ can hand the SAME holder the agent client writes into to the runtime
+// the dispatcher reads from, without naming a package under this module's
+// internal/ tree. It satisfies both the dispatcher's EnvelopeThrottle and the
+// agent client's EnvelopeSink.
+type EnvelopeCaps = dispatcher.Caps
+
 // The scan report store (SPEC-0037, ADR-0059): one durable object per
 // (tenant, repository, job, attempt, scanner class). Aliased for the same
 // reason — cmd/ wires the tier and the Security context reads through the
@@ -77,6 +85,7 @@ type Runtime struct {
 	jobs       api.Jobs
 	dispatcher *dispatcher.Dispatcher
 	gauge      *kedametrics.Gauge
+	caps       *dispatcher.Caps
 }
 
 // NewRuntime builds the CI context on its dev adapters. A nil launcher means this
@@ -86,9 +95,14 @@ func NewRuntime(pdp policyapi.DecisionPoint, events bus.Bus, config RunnerConfig
 	queue := memory.NewQueue()
 	store := app.NewMemoryStore()
 	gauge := kedametrics.NewGauge()
+	// The fair-use caps holder is created whether or not this environment
+	// dispatches: the agent client always has a sink to apply envelope state
+	// into (T-0035). With no launcher nothing reads it, so it throttles nothing.
+	caps := dispatcher.NewCaps()
 	runtime := &Runtime{
 		jobs:  app.New(store, queue, stubSource{}, pdp, events),
 		gauge: gauge,
+		caps:  caps,
 	}
 	if launcher != nil {
 		runtime.dispatcher = dispatcher.New(queue, store, launcher, pdp, events,
@@ -100,6 +114,7 @@ func NewRuntime(pdp policyapi.DecisionPoint, events bus.Bus, config RunnerConfig
 				Command:          slices.Clone(config.Command),
 			}),
 			dispatcher.WithGauge(gauge),
+			dispatcher.WithEnvelopeThrottle(caps),
 		)
 	}
 	return runtime
@@ -125,6 +140,12 @@ func (r *Runtime) RunDispatcher(ctx context.Context) error {
 // KEDA's Prometheus scaler reads `ci_queued_jobs` from it to scale the runner
 // deployment on queue depth (T-0017 AC2).
 func (r *Runtime) MetricsHandler() http.Handler { return kedametrics.Handler(r.gauge) }
+
+// EnvelopeCaps returns the fair-use caps holder this runtime's dispatcher
+// reads (SPEC-0041 AC9, T-0035). cmd/ hands this SAME holder to the agent
+// client as its EnvelopeSink, so an EnvelopeStateUpdate the control plane
+// states on the channel lands here and the dispatch claim gate binds it.
+func (r *Runtime) EnvelopeCaps() *EnvelopeCaps { return r.caps }
 
 // NewDevLauncher returns the dev sandbox launcher: it records dispatch attempts
 // without contacting a cluster. It is not a production isolation boundary.

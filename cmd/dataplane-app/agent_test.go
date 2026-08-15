@@ -114,7 +114,7 @@ func TestRunAgentRefusesMissingDriverSetting(t *testing.T) {
 		credentialPath: t.TempDir() + "/cred.pem",
 		settings:       clouddriver.Settings{}, // eks.irsaRoleArn missing
 	}
-	err := runAgent(t.Context(), cfg, func(string, ...any) {})
+	err := runAgent(t.Context(), cfg, func(string, ...any) {}, nil)
 	if err == nil {
 		t.Fatal("runAgent must refuse a missing required driver setting")
 	}
