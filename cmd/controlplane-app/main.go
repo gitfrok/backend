@@ -124,6 +124,7 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		}
 		return nil, err
 	}
+	custodyCfg.Logf = logf // the re-attach branch must log loudly on the process log
 	ca, err := agent.NewCustodyCA(custodyCfg)
 	if err != nil {
 		if pool != nil {

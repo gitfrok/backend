@@ -100,21 +100,38 @@ type CustodyCAConfig struct {
 	JWTFile           string // empty means the standard in-cluster projection
 	KeyName           string // the bundle's first root key; empty means "agent-ca"
 	AllowHTTPLoopback bool   // dev port-forward only; production never sets it
-	Now               func() time.Time
+	// SnapshotFile is where the bundle's durable state lives — a file on the
+	// control plane's own filesystem (Wave-3 review C1). The snapshot is a
+	// tenant-less platform singleton, so no tenant-isolated store can carry
+	// it honestly; a dedicated operator-configured path is its home. Required:
+	// a custody CA with nowhere to persist its window crash-loops on restart.
+	SnapshotFile string
+	// Logf receives the composition's loud log lines — notably the re-attach
+	// branch, which must never pass silently.
+	Logf func(format string, args ...any)
+	Now  func() time.Time
 }
 
 // NewCustodyCA builds the custody-backed issuer: an OpenBao transit signer
-// authenticating via Kubernetes auth, one staged trust bundle bootstrapped
-// under cfg.KeyName, and the Issuer over it. Failures fail the rollout — a
+// authenticating via Kubernetes auth, one staged trust bundle over
+// cfg.KeyName, and the Issuer over it. Failures fail the rollout — a
 // gateway that starts half-wired would refuse enrolments later as an
-// unexplained outage. A key that ALREADY exists refuses bootstrap: the
-// bundle's durable side is its Snapshot/Restore surface, and re-bootstrapping
-// against a custody service that kept its keys would stage a root the
-// restored window does not know — durable snapshot persistence across a
-// restart is the composition's to wire.
+// unexplained outage.
+//
+// The bundle is composed restart-proof (Wave-3 review C1): a persisted
+// snapshot restores the window exactly; without one the bundle bootstraps;
+// and a bootstrap that finds the key ALREADY held by custody re-attaches by
+// the key's public half — fresh revision, loudly logged — instead of
+// failing the rollout or staging a divergent root. Every state change is
+// persisted through the bundle's change hook, so a restart always finds the
+// newest window state the fleet saw.
 func NewCustodyCA(cfg CustodyCAConfig) (*CustodyCA, error) {
 	if cfg.OpenBaoAddress == "" {
 		return nil, errors.New("agent custody: OpenBao address is required")
+	}
+	if cfg.SnapshotFile == "" {
+		return nil, errors.New("agent custody: snapshot file path is required: the bundle's durable state " +
+			"must survive a control-plane restart, and an issuer with nowhere to persist it would crash-loop on one")
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -133,7 +150,14 @@ func NewCustodyCA(cfg CustodyCAConfig) (*CustodyCA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agent custody: %w", err)
 	}
-	bundle, err := custody.NewBundle(signer, cfg.Now)
+	return newCustodyCA(cfg, signer)
+}
+
+// newCustodyCA composes the issuer over an already-built signer — the seam
+// the composition tests exercise with the CI custody service, exactly as the
+// production path runs over OpenBao.
+func newCustodyCA(cfg CustodyCAConfig, signer custody.Signer) (*CustodyCA, error) {
+	store, err := custody.NewFileSnapshotStore(cfg.SnapshotFile)
 	if err != nil {
 		return nil, fmt.Errorf("agent custody: %w", err)
 	}
@@ -141,10 +165,11 @@ func NewCustodyCA(cfg CustodyCAConfig) (*CustodyCA, error) {
 	if name == "" {
 		name = "agent-ca"
 	}
-	if _, err := bundle.Bootstrap(context.Background(), name); err != nil {
-		return nil, fmt.Errorf("agent custody: bootstrap %q: %w", name, err)
+	issuer, err := custody.ComposeIssuer(context.Background(), signer, store, name, cfg.Now, cfg.Logf)
+	if err != nil {
+		return nil, fmt.Errorf("agent custody: compose %q: %w", name, err)
 	}
-	return custody.NewIssuer(bundle)
+	return issuer, nil
 }
 
 // AttachPlacementGate wires the residency placement gate the enrolment path consults

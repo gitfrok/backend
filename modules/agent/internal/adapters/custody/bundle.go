@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -204,6 +205,45 @@ func (b *Bundle) buildRoot(ctx context.Context, name string) (Root, error) {
 	if err != nil {
 		return Root{}, fmt.Errorf("custody: stage %q: read public half: %w", name, err)
 	}
+	return b.signRootCert(name, ref, pub)
+}
+
+// ReattachRoot rebuilds the bundle's FIRST root against a custody key that
+// ALREADY exists: it reads the key's public half and self-signs the root
+// certificate through it — no GenerateKey. The composition uses it when
+// custody kept the key but the bundle's durable snapshot is gone (Wave-3
+// review C1): the re-attached root starts a FRESH revision epoch — the
+// rebuilt certificate is redistributed and the fleet re-converges on it —
+// and the lost issuance ledger is the honest price of the lost snapshot.
+// The composition logs this branch loudly; re-attach is never silent.
+func (b *Bundle) ReattachRoot(ctx context.Context, name string) (KeyRef, error) {
+	b.mu.Lock()
+	live := b.liveRootsLocked()
+	b.mu.Unlock()
+	if len(live) > 0 {
+		return "", fmt.Errorf("custody: bundle already holds live roots; re-attach applies to an empty bundle only")
+	}
+	pub, err := b.signer.PublicKey(ctx, KeyRef(name))
+	if err != nil {
+		return "", fmt.Errorf("custody: re-attach %q: read public half: %w", name, err)
+	}
+	root, err := b.signRootCert(name, KeyRef(name), pub)
+	if err != nil {
+		return "", err
+	}
+	b.mu.Lock()
+	b.roots = append(b.roots, root)
+	b.revision++
+	b.stagingRev++
+	b.mu.Unlock()
+	b.changed()
+	return root.Ref, nil
+}
+
+// signRootCert self-signs one CA certificate through the referenced custody
+// key and wraps it as a Root — the certificate half of staging a key, shared
+// by buildRoot (a freshly generated key) and ReattachRoot (an existing one).
+func (b *Bundle) signRootCert(name string, ref KeyRef, pub *ecdsa.PublicKey) (Root, error) {
 	now := b.now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
