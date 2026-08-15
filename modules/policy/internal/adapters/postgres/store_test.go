@@ -12,6 +12,7 @@ import (
 	policypg "github.com/gitfrok/backend/modules/policy/internal/adapters/postgres"
 	"github.com/gitfrok/backend/platform/db"
 	"github.com/gitfrok/backend/platform/ids"
+	"github.com/gitfrok/backend/platform/tenancy"
 )
 
 // The Postgres adapter's claims are about what the *database* enforces — the append-only
@@ -39,6 +40,13 @@ func tenantFor(t *testing.T) string {
 		safe = safe[:40]
 	}
 	return safe + "-" + runID
+}
+
+// tenantCtx binds the tenant H1's fail-closed read guard requires before a
+// Get or Range is even asked of the database.
+func tenantCtx(t *testing.T, tenant string) context.Context {
+	t.Helper()
+	return tenancy.WithTenant(t.Context(), tenancy.ID(tenant))
 }
 
 func store(t *testing.T) *policypg.Store {
@@ -86,7 +94,7 @@ func TestAppendAndGetRoundTrip(t *testing.T) {
 	if err := s.Append(t.Context(), want); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	got, err := s.Get(t.Context(), tenant, want.DecisionID)
+	got, err := s.Get(tenantCtx(t, tenant), tenant, want.DecisionID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -135,10 +143,10 @@ func TestCrossTenantGetIsNotFound(t *testing.T) {
 	}
 
 	other := tenant + "-other"
-	if _, err := s.Get(t.Context(), other, rec.DecisionID); err != api.ErrNotFound {
+	if _, err := s.Get(tenantCtx(t, other), other, rec.DecisionID); err != api.ErrNotFound {
 		t.Errorf("cross-tenant Get = %v, want ErrNotFound — absence and denial are one shape", err)
 	}
-	if _, err := s.Get(t.Context(), tenant, ids.NewULID()); err != api.ErrNotFound {
+	if _, err := s.Get(tenantCtx(t, tenant), tenant, ids.NewULID()); err != api.ErrNotFound {
 		t.Errorf("nonexistent Get = %v, want the same ErrNotFound", err)
 	}
 }
@@ -165,7 +173,7 @@ func TestRangeReplaysEnforcedHistoryWithinBounds(t *testing.T) {
 		}
 	}
 
-	got, err := s.Range(t.Context(), tenant, api.HistoricalRange{
+	got, err := s.Range(tenantCtx(t, tenant), tenant, api.HistoricalRange{
 		Action: "merge_request.merge",
 		From:   base.Add(-90 * time.Minute),
 		To:     base.Add(time.Minute),
@@ -180,7 +188,7 @@ func TestRangeReplaysEnforcedHistoryWithinBounds(t *testing.T) {
 	}
 
 	// One beyond the limit comes back, so an over-cap range is detectable.
-	all, err := s.Range(t.Context(), tenant, api.HistoricalRange{}, 2)
+	all, err := s.Range(tenantCtx(t, tenant), tenant, api.HistoricalRange{}, 2)
 	if err != nil {
 		t.Fatalf("Range: %v", err)
 	}

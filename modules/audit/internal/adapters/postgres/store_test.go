@@ -119,8 +119,14 @@ func appendN(t *testing.T, s *auditpg.Store, ctx context.Context, n int) []api.R
 // holding. Learned the hard way: exactly that happened here.
 func withTriggerDisabled(t *testing.T, su *pgxpool.Pool, trigger string, fn func()) {
 	t.Helper()
+	// NOT t.Context(): this runs from t.Cleanup, after the test's context is
+	// already cancelled, and a re-enable that dies on a dead context leaves
+	// the trigger disabled in a database that outlives the process — the very
+	// trap the comment above describes.
 	enable := func() {
-		if _, err := su.Exec(t.Context(),
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := su.Exec(ctx,
 			fmt.Sprintf(`ALTER TABLE audit.entries ENABLE TRIGGER %s`, trigger)); err != nil {
 			t.Fatalf("re-enable %s: %v", trigger, err)
 		}
