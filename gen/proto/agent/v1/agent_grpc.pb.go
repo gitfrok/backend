@@ -139,3 +139,153 @@ var AgentGateway_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "proto/agent/v1/agent.proto",
 }
+
+const (
+	EnrolmentService_IssueEnrolmentToken_FullMethodName = "/gitsaas.agent.v1.EnrolmentService/IssueEnrolmentToken"
+)
+
+// EnrolmentServiceClient is the client API for EnrolmentService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ---------------------------------------------------------------------------
+// Operator enrolment-token issuance door  (SPEC-0038 AC1, T-0030 lineage)
+// ---------------------------------------------------------------------------
+// The operator-facing door that mints the one-time token Enrol presents on a data
+// plane's first Connect. Until this surface existed, IssueEnrolmentToken was reachable
+// only from tests: no shipped binary exposed an operator path to mint a token, and the
+// north-star journey could not be proven on a cluster. The door mirrors the residency
+// Declare door (SPEC-0043, ADR-0063): a separately env-gated admin gRPC surface that
+// verifies its caller — a PAT verified before any policy decision — before it serves
+// anything. The caller's posture is the PAT-verified platform_operator of ADR-0046:
+// tenant and actor are properties of the verified principal on the call, never request
+// fields — a field naming them would be an unauthenticated routing claim (ADR-0045).
+// The wire vocabulary mirrors the agent module's operator surface (backend/modules/
+// agent/api): the lifetime input the domain clamps, and the token record the domain
+// returns — its ID, the secret shown exactly once, and the server-set instants.
+// The token is a credential: it MUST NOT appear in any log line, error message, metric
+// label, or audit record — the audit trail names tokens by ID only (SPEC-0038 AC2).
+type EnrolmentServiceClient interface {
+	// IssueEnrolmentToken mints one single-use, tenant-scoped, time-bounded enrolment
+	// token (SPEC-0038 AC1). The surface is a PEP: it asks the PDP the domain's token
+	// issue action and refuses coarsely when refused; unverified and unauthorized are the
+	// same coarse refusal (SPEC-0001). Every issuance appends exactly one immutable audit
+	// record naming the tenant, the verified actor and the token's ID and expiry — never
+	// the secret (AC2, AC7).
+	IssueEnrolmentToken(ctx context.Context, in *IssueEnrolmentTokenRequest, opts ...grpc.CallOption) (*IssueEnrolmentTokenResponse, error)
+}
+
+type enrolmentServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewEnrolmentServiceClient(cc grpc.ClientConnInterface) EnrolmentServiceClient {
+	return &enrolmentServiceClient{cc}
+}
+
+func (c *enrolmentServiceClient) IssueEnrolmentToken(ctx context.Context, in *IssueEnrolmentTokenRequest, opts ...grpc.CallOption) (*IssueEnrolmentTokenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IssueEnrolmentTokenResponse)
+	err := c.cc.Invoke(ctx, EnrolmentService_IssueEnrolmentToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// EnrolmentServiceServer is the server API for EnrolmentService service.
+// All implementations must embed UnimplementedEnrolmentServiceServer
+// for forward compatibility.
+//
+// ---------------------------------------------------------------------------
+// Operator enrolment-token issuance door  (SPEC-0038 AC1, T-0030 lineage)
+// ---------------------------------------------------------------------------
+// The operator-facing door that mints the one-time token Enrol presents on a data
+// plane's first Connect. Until this surface existed, IssueEnrolmentToken was reachable
+// only from tests: no shipped binary exposed an operator path to mint a token, and the
+// north-star journey could not be proven on a cluster. The door mirrors the residency
+// Declare door (SPEC-0043, ADR-0063): a separately env-gated admin gRPC surface that
+// verifies its caller — a PAT verified before any policy decision — before it serves
+// anything. The caller's posture is the PAT-verified platform_operator of ADR-0046:
+// tenant and actor are properties of the verified principal on the call, never request
+// fields — a field naming them would be an unauthenticated routing claim (ADR-0045).
+// The wire vocabulary mirrors the agent module's operator surface (backend/modules/
+// agent/api): the lifetime input the domain clamps, and the token record the domain
+// returns — its ID, the secret shown exactly once, and the server-set instants.
+// The token is a credential: it MUST NOT appear in any log line, error message, metric
+// label, or audit record — the audit trail names tokens by ID only (SPEC-0038 AC2).
+type EnrolmentServiceServer interface {
+	// IssueEnrolmentToken mints one single-use, tenant-scoped, time-bounded enrolment
+	// token (SPEC-0038 AC1). The surface is a PEP: it asks the PDP the domain's token
+	// issue action and refuses coarsely when refused; unverified and unauthorized are the
+	// same coarse refusal (SPEC-0001). Every issuance appends exactly one immutable audit
+	// record naming the tenant, the verified actor and the token's ID and expiry — never
+	// the secret (AC2, AC7).
+	IssueEnrolmentToken(context.Context, *IssueEnrolmentTokenRequest) (*IssueEnrolmentTokenResponse, error)
+	mustEmbedUnimplementedEnrolmentServiceServer()
+}
+
+// UnimplementedEnrolmentServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedEnrolmentServiceServer struct{}
+
+func (UnimplementedEnrolmentServiceServer) IssueEnrolmentToken(context.Context, *IssueEnrolmentTokenRequest) (*IssueEnrolmentTokenResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IssueEnrolmentToken not implemented")
+}
+func (UnimplementedEnrolmentServiceServer) mustEmbedUnimplementedEnrolmentServiceServer() {}
+func (UnimplementedEnrolmentServiceServer) testEmbeddedByValue()                          {}
+
+// UnsafeEnrolmentServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to EnrolmentServiceServer will
+// result in compilation errors.
+type UnsafeEnrolmentServiceServer interface {
+	mustEmbedUnimplementedEnrolmentServiceServer()
+}
+
+func RegisterEnrolmentServiceServer(s grpc.ServiceRegistrar, srv EnrolmentServiceServer) {
+	// If the following call pancis, it indicates UnimplementedEnrolmentServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&EnrolmentService_ServiceDesc, srv)
+}
+
+func _EnrolmentService_IssueEnrolmentToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IssueEnrolmentTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(EnrolmentServiceServer).IssueEnrolmentToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: EnrolmentService_IssueEnrolmentToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(EnrolmentServiceServer).IssueEnrolmentToken(ctx, req.(*IssueEnrolmentTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// EnrolmentService_ServiceDesc is the grpc.ServiceDesc for EnrolmentService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var EnrolmentService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "gitsaas.agent.v1.EnrolmentService",
+	HandlerType: (*EnrolmentServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "IssueEnrolmentToken",
+			Handler:    _EnrolmentService_IssueEnrolmentToken_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/agent/v1/agent.proto",
+}

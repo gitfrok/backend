@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	agentv1 "github.com/gitfrok/backend/gen/proto/agent/v1"
 	"github.com/gitfrok/backend/modules/agent/api"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/custody"
 	agentgrpc "github.com/gitfrok/backend/modules/agent/internal/adapters/grpc"
@@ -21,6 +22,7 @@ import (
 	agentpg "github.com/gitfrok/backend/modules/agent/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/releasebundle"
 	"github.com/gitfrok/backend/modules/agent/internal/app"
+	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	meteringapi "github.com/gitfrok/backend/modules/metering/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
@@ -198,6 +200,19 @@ func AttachPlacementGate(svc *Service, gate api.PlacementGate) bool {
 // a lapsed certificate can go unnoticed; one second is ample for hour-long certificates.
 func NewGRPCServer(gw api.Gateway, poll time.Duration, now func() time.Time, logf func(format string, args ...any)) *GRPCServer {
 	return agentgrpc.NewGateway(gw, poll, now, logf)
+}
+
+// NewEnrolmentDoor adapts the Operator port onto the agent/v1 EnrolmentService
+// contract (SPEC-0038 AC1): the operator-facing door that mints the one-time
+// token Enrol presents on a data plane's first Connect. The returned door is a
+// PEP, mirroring the residency Declare door (SPEC-0043, ADR-0063): it verifies
+// the caller through the identity seam — auth is the credential verification
+// gateway the composition root composes (ADR-0043); nil fails closed — BEFORE
+// any policy decision, takes tenant and actor from the verified principal
+// (the request carries the lifetime and nothing else), and renders every
+// refusal coarse.
+func NewEnrolmentDoor(op api.Operator, auth identityapi.Authenticator, logf func(format string, args ...any)) agentv1.EnrolmentServiceServer {
+	return agentgrpc.NewEnrolmentDoor(op, auth, logf)
 }
 
 // AttachMetering wires the metering seams onto an established gateway (T-0034,

@@ -8,7 +8,11 @@
 //     client certificates,
 //   - the UsageService door (T-0034, SPEC-0041) when GITFROK_USAGE_GRPC_ADDR is set: the
 //     tenant's fair-use usage view, read from the counters the control plane derives from
-//     telemetry it RECEIVES on the agent channel (ADR-0061).
+//     telemetry it RECEIVES on the agent channel (ADR-0061),
+//   - the EnrolmentService door (SPEC-0038 AC1) when GITFROK_ENROLMENT_GRPC_ADDR is set:
+//     the operator-facing issuance door that mints the one-time token Enrol presents on a
+//     data plane's first Connect, PAT-verified before any policy decision, mirroring the
+//     residency Declare door (SPEC-0043, ADR-0063).
 package main
 
 import (
@@ -59,6 +63,7 @@ type agentDoor struct {
 	server    *ggrpc.Server
 	usage     *ggrpc.Server // the UsageService door, when GITFROK_USAGE_GRPC_ADDR is set
 	residency *ggrpc.Server // the residency Declare door, when GITFROK_RESIDENCY_GRPC_ADDR is set
+	enrolment *ggrpc.Server // the enrolment issuance door, when GITFROK_ENROLMENT_GRPC_ADDR is set
 	pool      *db.Pool
 	// releaseStop ends the release trust bundle's staging-directory reconcile
 	// loop with the door (T-0041, SPEC-0045 AC2). nil when distribution is
@@ -76,6 +81,9 @@ func (d *agentDoor) close() {
 	}
 	if d.residency != nil {
 		d.residency.Stop()
+	}
+	if d.enrolment != nil {
+		d.enrolment.Stop()
 	}
 	if d.pool != nil {
 		d.pool.Close()
@@ -343,6 +351,47 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		fmt.Printf("controlplane-app: ResidencyService listening on %s\n", rcfg.addr)
 	}
 
+	// The operator enrolment-token issuance door (SPEC-0038 AC1). It mirrors the
+	// residency Declare door above in every boundary property: the door verifies
+	// its caller through the identity seam BEFORE any policy decision — tenant and
+	// actor are properties of the PAT-resolved principal carried in the request
+	// context, never wire claims (ADR-0045) — and it serves EnrolmentService over
+	// the same narrow gateway posture. The verifier key is required when the door
+	// is open (loadEnrolmentDoorConfig), and the authenticator is durable whenever
+	// the plane's stores are. The issued secret exists in exactly one response
+	// (AC2): the domain stores only its hash.
+	ecfg, err := loadEnrolmentDoorConfig(os.Getenv)
+	if err != nil {
+		if pool != nil {
+			pool.Close()
+		}
+		return nil, err
+	}
+	var enrolmentServer *ggrpc.Server
+	if ecfg.addr != "" {
+		var enrolmentAuth identityapi.Authenticator
+		if pool != nil {
+			enrolmentAuth = identity.NewPostgres(pool, "default", map[string][]byte{"default": ecfg.patKey}, pdp)
+		} else {
+			enrolmentAuth = identity.NewInMemory(ecfg.patKey, pdp)
+		}
+		lis, err := net.Listen("tcp", ecfg.addr)
+		if err != nil {
+			if pool != nil {
+				pool.Close()
+			}
+			return nil, fmt.Errorf("enrolment service listen %s: %w", ecfg.addr, err)
+		}
+		enrolmentServer = ggrpc.NewServer()
+		agentv1.RegisterEnrolmentServiceServer(enrolmentServer, agent.NewEnrolmentDoor(svc, enrolmentAuth, logf))
+		go func() {
+			if serveErr := enrolmentServer.Serve(lis); serveErr != nil {
+				logf("enrolment service stopped: %v", serveErr)
+			}
+		}()
+		fmt.Printf("controlplane-app: EnrolmentService listening on %s\n", ecfg.addr)
+	}
+
 	serverCert, err := ca.IssueServer("agent-gateway", cfg.serverNames, time.Now(), 24*time.Hour)
 	if err != nil {
 		return nil, fmt.Errorf("agent gateway server certificate: %w", err)
@@ -365,7 +414,7 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		}
 	}()
 	fmt.Printf("controlplane-app: AgentGateway listening on %s (custody-backed CA)\n", cfg.grpcAddr)
-	return &agentDoor{server: server, usage: usageServer, residency: residencyServer, pool: pool, releaseStop: releaseStop}, nil
+	return &agentDoor{server: server, usage: usageServer, residency: residencyServer, enrolment: enrolmentServer, pool: pool, releaseStop: releaseStop}, nil
 }
 
 // orNone renders a configuration value for a log line: the value itself, or
