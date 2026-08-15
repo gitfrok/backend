@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -107,6 +108,60 @@ func (i *Issuer) Bundle() *Bundle { return i.bundle }
 // side cmd/ wires into the gRPC server's mTLS configuration, same shape as
 // DevCA.CAPool.
 func (i *Issuer) CAPool() (*x509.CertPool, error) { return i.bundle.Pool() }
+
+// IssueServer mints the gRPC SERVER certificate for the gateway, signed
+// through the bundle's issuance root — the custody-backed peer of
+// DevCA.IssueServer, so the composition-root swap changes neither door's
+// TLS shape. It is not part of the agent identity surface: no data plane
+// authenticates with it, and it is deliberately NOT entered in the issuance
+// ledger — the ledger is the fleet-identity removal precondition, and the
+// gateway's server certificate is re-minted from the live issuance root on
+// every process start (the rotation procedure names the restart).
+func (i *Issuer) IssueServer(commonName string, dnsNames []string, now time.Time, lifetime time.Duration) (tls.Certificate, error) {
+	ref, caCert, err := i.bundle.ReserveIssuance()
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	// A server certificate is issued under the reservation but recorded in
+	// no ledger: release the reservation once the signature lands.
+	defer i.bundle.AbortIssuance(ref)
+	ctx := context.Background()
+	pub, err := i.bundle.signer.PublicKey(ctx, ref)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("custody: issue server: %w", err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("custody: generate server key: %w", err)
+	}
+	serial, err := randomSerial()
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: commonName},
+		DNSNames:     dnsNames,
+		NotBefore:    now.Add(-time.Hour), // clock-skew leeway, as DevCA does
+		NotAfter:     now.Add(lifetime),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	signer := &custodyKey{signer: i.bundle.signer, ref: ref, pub: pub}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, signer)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("custody: issue server cert: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("custody: parse server cert: %w", err)
+	}
+	// The result is assembled from the parsed halves directly: no PEM
+	// round-trip through a key-pair parser — the composition-root fitness
+	// (SPEC-0044 AC1) forbids those shapes in the production tree, and this
+	// package keeps itself clean of them too.
+	return tls.Certificate{Certificate: [][]byte{der}, Leaf: leaf, PrivateKey: key}, nil
+}
 
 // Issue mints one short-lived client certificate naming the identity, signed
 // through the bundle's NEWEST live root (AC2: during the overlap, new

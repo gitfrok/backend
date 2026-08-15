@@ -8,9 +8,13 @@
 package agent
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gitfrok/backend/modules/agent/api"
+	"github.com/gitfrok/backend/modules/agent/internal/adapters/custody"
 	agentgrpc "github.com/gitfrok/backend/modules/agent/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/memory"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/pki"
@@ -34,6 +38,12 @@ type GRPCServer = agentgrpc.Gateway
 // trust pool to the TLS configuration.
 type DevCA = pki.DevCA
 
+// CustodyCA is the production certificate issuer: a custody-backed Issuer
+// whose roots live in the custody service and whose private halves never
+// enter this process (T-0040, SPEC-0044, ADR-0066). Aliased so cmd/ can
+// hold one without naming a package under internal/.
+type CustodyCA = custody.Issuer
+
 // TokenStore and RegistryStore are the persistence ports, aliased so cmd/ can
 // name them without reaching into internal/.
 type (
@@ -45,8 +55,9 @@ type (
 // (ADR-0062 decision 1 — the fakes stay as test doubles, never as the
 // production path). A deployment that wants enrolment state to outlive the
 // process composes NewWithStores with NewPostgresStores instead.
-// The certificate issuer is injected: dev/test compositions pass NewDevCA, a custody-backed
-// issuer is an ADR-0057 follow-up, and the context cannot tell the difference.
+// The certificate issuer is injected: dev/test compositions pass NewDevCA,
+// production compositions pass NewCustodyCA, and the context cannot tell
+// the difference.
 func New(pdp policyapi.DecisionPoint, events bus.Bus, issuer api.CertificateIssuer, cfg api.Config, logf func(format string, args ...any)) *Service {
 	return app.New(pdp, events, issuer, memory.New(), memory.New(), cfg, logf)
 }
@@ -68,10 +79,72 @@ func NewPostgresStores(pool *db.Pool) *agentpg.Store {
 }
 
 // NewDevCA generates the DEV/TEST control-plane CA: an in-process key that never leaves
-// the process. Production key custody is deliberately undecided (ADR-0057 follow-up) —
-// this constructor is not a custody mechanism, only the absence-of-one for dev.
+// the process. It is reachable ONLY from dev/test compositions — the production
+// composition root constructs the custody-backed issuer (NewCustodyCA) and is
+// fitness-tested to reach neither this constructor nor any key-material parser
+// (SPEC-0044 AC1, AC3).
 func NewDevCA(commonName string, now func() time.Time) (*DevCA, error) {
 	return pki.NewDevCA(commonName, now)
+}
+
+// CustodyCAConfig wires the production certificate issuer (T-0040, SPEC-0044,
+// ADR-0066): the OpenBao custody service's address and transit mount, the
+// Kubernetes-auth role the control plane logs in with (its projected
+// service-account JWT, zero static credentials), and the bootstrap key name.
+// Every value is per-environment configuration supplied by cmd/ (invariant
+// 13); construction contacts nothing.
+type CustodyCAConfig struct {
+	OpenBaoAddress    string
+	TransitMount      string // empty means "transit"
+	KubernetesRole    string
+	JWTFile           string // empty means the standard in-cluster projection
+	KeyName           string // the bundle's first root key; empty means "agent-ca"
+	AllowHTTPLoopback bool   // dev port-forward only; production never sets it
+	Now               func() time.Time
+}
+
+// NewCustodyCA builds the custody-backed issuer: an OpenBao transit signer
+// authenticating via Kubernetes auth, one staged trust bundle bootstrapped
+// under cfg.KeyName, and the Issuer over it. Failures fail the rollout — a
+// gateway that starts half-wired would refuse enrolments later as an
+// unexplained outage. A key that ALREADY exists refuses bootstrap: the
+// bundle's durable side is its Snapshot/Restore surface, and re-bootstrapping
+// against a custody service that kept its keys would stage a root the
+// restored window does not know — durable snapshot persistence across a
+// restart is the composition's to wire.
+func NewCustodyCA(cfg CustodyCAConfig) (*CustodyCA, error) {
+	if cfg.OpenBaoAddress == "" {
+		return nil, errors.New("agent custody: OpenBao address is required")
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	signer, err := custody.NewOpenBao(custody.Config{
+		Address: cfg.OpenBaoAddress,
+		Mount:   cfg.TransitMount,
+		Token: custody.KubernetesAuth{
+			Address:                cfg.OpenBaoAddress,
+			Role:                   cfg.KubernetesRole,
+			JWTFile:                cfg.JWTFile,
+			AllowHTTPForLocalTests: cfg.AllowHTTPLoopback,
+		},
+		AllowHTTPForLocalTests: cfg.AllowHTTPLoopback,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agent custody: %w", err)
+	}
+	bundle, err := custody.NewBundle(signer, cfg.Now)
+	if err != nil {
+		return nil, fmt.Errorf("agent custody: %w", err)
+	}
+	name := cfg.KeyName
+	if name == "" {
+		name = "agent-ca"
+	}
+	if _, err := bundle.Bootstrap(context.Background(), name); err != nil {
+		return nil, fmt.Errorf("agent custody: bootstrap %q: %w", name, err)
+	}
+	return custody.NewIssuer(bundle)
 }
 
 // AttachPlacementGate wires the residency placement gate the enrolment path consults
@@ -104,4 +177,13 @@ func NewGRPCServer(gw api.Gateway, poll time.Duration, now func() time.Time, log
 func AttachMetering(srv *GRPCServer, sink meteringapi.Sink, envelopes meteringapi.EnvelopeDelivery) {
 	srv.AttachTelemetrySink(sink)
 	srv.AttachEnvelopeDelivery(envelopes)
+}
+
+// AttachCATrustBundle wires the custody rotation seam onto an established
+// gateway (T-0040, SPEC-0044 AC2): every advance of the bundle's revision is
+// delivered to each stream as DesiredState.ca_trust_bundle. Post-construction
+// like the other seams, so a surface this binary cannot attach fails the
+// rollout rather than silently withholding rotation state.
+func AttachCATrustBundle(srv *GRPCServer, source api.CATrustBundleSource) {
+	srv.AttachCATrustBundle(source)
 }

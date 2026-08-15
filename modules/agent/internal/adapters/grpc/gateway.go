@@ -46,6 +46,13 @@ type Gateway struct {
 	// cannot tell what counts on the other side (invariant 14).
 	sink      meteringapi.Sink
 	envelopes meteringapi.EnvelopeDelivery
+
+	// caBundles is the custody rotation seam (T-0040, SPEC-0044 AC2):
+	// attached post-construction by the composition root, it is the source
+	// the stream polls for the newest staged CA trust bundle, delivered as
+	// DesiredState.ca_trust_bundle on the reconcile channel. Optional: a
+	// surface without it still serves enrolment, rotation and contact.
+	caBundles api.CATrustBundleSource
 }
 
 var _ agentpb.AgentGatewayServer = (*Gateway)(nil)
@@ -57,6 +64,13 @@ func (g *Gateway) AttachTelemetrySink(s meteringapi.Sink) { g.sink = s }
 // AttachEnvelopeDelivery wires the metering seam the stream polls for the newest
 // envelope desired state and reports acknowledgements back to (SPEC-0041 AC9).
 func (g *Gateway) AttachEnvelopeDelivery(e meteringapi.EnvelopeDelivery) { g.envelopes = e }
+
+// AttachCATrustBundle wires the custody rotation seam the stream polls for the
+// newest staged CA trust bundle (SPEC-0044 AC2). Each advance of the bundle
+// revision is delivered as one DesiredState carrying ca_trust_bundle; the
+// fleet dual-validates against trusted_roots while new issuance chains to
+// issuance_root_id.
+func (g *Gateway) AttachCATrustBundle(s api.CATrustBundleSource) { g.caBundles = s }
 
 // NewGateway wires the adapter. poll bounds how late a lapsed certificate can go unnoticed;
 // one second is ample for hour-long certificates (invariant 13: per-environment).
@@ -171,6 +185,7 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 	defer ticker.Stop()
 	var seq, ackSeq int64
 	var lastEnvelopeGen int64 // newest EnvelopeStateUpdate this stream delivered (AC9)
+	var lastCABundleRev int64 // newest CA trust bundle revision this stream delivered (SPEC-0044 AC2)
 	send := func(msg *agentpb.ControlPlaneMessage) error {
 		seq++
 		msg.MessageId = ids.NewULID()
@@ -251,6 +266,26 @@ func (g *Gateway) serve(ctx context.Context, stream grpc.BidiStreamingServer[age
 						return err
 					}
 					lastEnvelopeGen = d.Generation
+				}
+			}
+			// CA trust bundle distribution (SPEC-0044 AC2): when the custody
+			// bundle has advanced — a staged root, a completed removal — state
+			// the newest revision on the stream as desired state. Generation
+			// tracks the bundle revision: it is the only desired-state source
+			// this surface publishes today; a later composition of several
+			// sources must generalize it.
+			if g.caBundles != nil {
+				if st, ok, err := g.caBundles.LatestCATrustBundle(ctx); err == nil && ok && st.Revision > lastCABundleRev {
+					msg := &agentpb.ControlPlaneMessage{Payload: &agentpb.ControlPlaneMessage_DesiredState{
+						DesiredState: &agentpb.DesiredState{
+							Generation:    st.Revision,
+							CaTrustBundle: caTrustBundleWire(st),
+						},
+					}}
+					if err := send(msg); err != nil {
+						return err
+					}
+					lastCABundleRev = st.Revision
 				}
 			}
 			if now.Before(ss.RotationDueAt()) {
@@ -407,6 +442,25 @@ func envelopeUpdate(d meteringapi.EnvelopeDesiredState) *agentpb.EnvelopeStateUp
 			Unit:              dec.Dimension.Unit(),
 			WindowStart:       timestamppb.New(dec.Window.Start),
 			WindowEnd:         timestamppb.New(dec.Window.End),
+		})
+	}
+	return out
+}
+
+// caTrustBundleWire maps the custody bundle's projection onto the contract's
+// CATrustBundle (agent/v1, SPEC-0044 AC2): revision, trusted roots as PEM
+// with their own expiry, and the root new issuance chains to. Public trust
+// data only — no credential and no private half exists to carry.
+func caTrustBundleWire(st api.CATrustBundleState) *agentpb.CATrustBundle {
+	out := &agentpb.CATrustBundle{
+		Revision:       st.Revision,
+		IssuanceRootId: st.IssuanceRootID,
+	}
+	for _, r := range st.Roots {
+		out.TrustedRoots = append(out.TrustedRoots, &agentpb.CATrustRoot{
+			RootId:         r.ID,
+			CertificatePem: r.CertificatePEM,
+			NotAfter:       timestamppb.New(r.NotAfter),
 		})
 	}
 	return out

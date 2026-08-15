@@ -631,3 +631,101 @@ func TestEnvelopeStateDeliveredAndAcknowledged(t *testing.T) {
 		t.Fatalf("recorded acks = %+v, want one applied ack of generation 7", env.acks)
 	}
 }
+
+// scriptedCABundles hands out one staged CA trust bundle state and can be
+// advanced to simulate rotation steps — the reconcile source the gateway
+// polls (SPEC-0044 AC2, T-0040). Named apart from the release trust bundle
+// surface of SPEC-0045: this scripts the agent-identity roots only.
+type scriptedCABundles struct {
+	mu    sync.Mutex
+	state api.CATrustBundleState
+}
+
+func (s *scriptedCABundles) LatestCATrustBundle(_ context.Context) (api.CATrustBundleState, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state, len(s.state.Roots) > 0, nil
+}
+
+func (s *scriptedCABundles) set(st api.CATrustBundleState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state = st
+}
+
+// TestCATrustBundleStagedRootsRideTheChannel proves SPEC-0044 AC2 over the
+// wire: the data plane sees BOTH roots during the dual-validate window,
+// new issuance chains to the issuance root the bundle names, and the
+// removal step lands as a SECOND DesiredState whose revision advanced and
+// whose root set lost the old root — all without re-enrolment.
+func TestCATrustBundleStagedRootsRideTheChannel(t *testing.T) {
+	r := newRig(t)
+	expiry := r.clock.Now().Add(365 * 24 * time.Hour)
+	src := &scriptedCABundles{state: api.CATrustBundleState{
+		Revision: 2,
+		Roots: []api.CATrustRoot{
+			{ID: "agent-ca-gen1", CertificatePEM: []byte("-----BEGIN CERTIFICATE-----\nMIIBold\n-----END CERTIFICATE-----\n"), NotAfter: expiry},
+			{ID: "agent-ca-gen2", CertificatePEM: []byte("-----BEGIN CERTIFICATE-----\nMIIBnew\n-----END CERTIFICATE-----\n"), NotAfter: expiry},
+		},
+		IssuanceRootID: "agent-ca-gen2",
+	}}
+	r.gw.AttachCATrustBundle(src)
+
+	secret := r.issueSecret(t, "acme")
+	stream, _ := r.enrolOverWire(t, secret)
+	defer func() { _ = stream.CloseSend() }()
+
+	// The gateway polls on its ticker and states the overlap window on the
+	// stream as DesiredState.ca_trust_bundle.
+	reply, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv desired state: %v", err)
+	}
+	ds := reply.GetDesiredState()
+	if ds == nil {
+		t.Fatalf("expected DesiredState, got %T", reply.GetPayload())
+	}
+	cb := ds.GetCaTrustBundle()
+	if cb == nil {
+		t.Fatalf("desired state carries no ca_trust_bundle: %+v", ds)
+	}
+	if cb.GetRevision() != 2 || len(cb.GetTrustedRoots()) != 2 || cb.GetIssuanceRootId() != "agent-ca-gen2" {
+		t.Fatalf("overlap bundle = rev %d, %d roots, issuance %q; want rev 2, 2 roots, issuance agent-ca-gen2",
+			cb.GetRevision(), len(cb.GetTrustedRoots()), cb.GetIssuanceRootId())
+	}
+	if ds.GetGeneration() != cb.GetRevision() {
+		t.Errorf("desired-state generation %d does not track the bundle revision %d", ds.GetGeneration(), cb.GetRevision())
+	}
+
+	// The removal step lands: the old root leaves, the revision advances,
+	// and the SAME stream receives the second DesiredState — no
+	// re-enrolment, ADR-0060 unchanged.
+	src.set(api.CATrustBundleState{
+		Revision:       3,
+		Roots:          []api.CATrustRoot{{ID: "agent-ca-gen2", CertificatePEM: []byte("-----BEGIN CERTIFICATE-----\nMIIBnew\n-----END CERTIFICATE-----\n"), NotAfter: expiry}},
+		IssuanceRootID: "agent-ca-gen2",
+	})
+	reply2, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv post-removal desired state: %v", err)
+	}
+	cb2 := reply2.GetDesiredState().GetCaTrustBundle()
+	if cb2 == nil {
+		t.Fatalf("post-removal desired state carries no ca_trust_bundle: %+v", reply2.GetDesiredState())
+	}
+	if cb2.GetRevision() != 3 || len(cb2.GetTrustedRoots()) != 1 || cb2.GetTrustedRoots()[0].GetRootId() != "agent-ca-gen2" {
+		t.Fatalf("post-removal bundle = rev %d, %d roots; want rev 3, the single new root",
+			cb2.GetRevision(), len(cb2.GetTrustedRoots()))
+	}
+
+	// The data plane's ack rides the same stream; the channel keeps serving
+	// after it (the ack is observational, never a channel fault).
+	if err := stream.Send(&agentpb.AgentMessage{
+		MessageId: "m-dsack", Seq: 2, SentAt: timestamppb.New(r.clock.Now()),
+		Payload: &agentpb.AgentMessage_DesiredStateAck{DesiredStateAck: &agentpb.DesiredStateAck{
+			Generation: 3, Applied: true,
+		}},
+	}); err != nil {
+		t.Fatalf("Send desired-state ack: %v", err)
+	}
+}

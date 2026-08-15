@@ -525,3 +525,62 @@ func envOr(key, fallback string) string {
 	}
 	return fallback
 }
+
+// TestLiveOpenBaoKubernetesAuthConsumer is the OPTIONAL live proof of the
+// ZERO-STATIC-CREDENTIALS consumer (T-0040 scope A.1): the control plane's
+// posture is a projected service-account JWT exchanged for a short-lived
+// OpenBao token via Kubernetes auth, signing through the WIRED agent-ca
+// transit key (role agent-ca bound to ServiceAccount controlplane/default,
+// policy agent-ca). Env-gated and skipped in CI:
+//
+//	kubectl create token controlplane -n default > /tmp/cp-jwt
+//	GITFROK_TEST_OPENBAO_ADDR=http://127.0.0.1:18200 \
+//	GITFROK_TEST_OPENBAO_K8S_JWT_FILE=/tmp/cp-jwt \
+//	go test ./modules/agent/internal/adapters/custody/ -run LiveOpenBaoKubernetesAuth
+func TestLiveOpenBaoKubernetesAuthConsumer(t *testing.T) {
+	addr := os.Getenv("GITFROK_TEST_OPENBAO_ADDR")
+	jwtFile := os.Getenv("GITFROK_TEST_OPENBAO_K8S_JWT_FILE")
+	if addr == "" || jwtFile == "" {
+		t.Skip("GITFROK_TEST_OPENBAO_ADDR / GITFROK_TEST_OPENBAO_K8S_JWT_FILE not set; skipping the live Kubernetes-auth consumer proof")
+	}
+	signer, err := custody.NewOpenBao(custody.Config{
+		Address: addr,
+		Mount:   envOr("GITFROK_TEST_OPENBAO_MOUNT", "transit"),
+		Token: custody.KubernetesAuth{
+			Address:                addr,
+			Role:                   envOr("GITFROK_TEST_OPENBAO_K8S_ROLE", "agent-ca"),
+			JWTFile:                jwtFile,
+			AllowHTTPForLocalTests: true,
+		},
+		AllowHTTPForLocalTests: true,
+	})
+	if err != nil {
+		t.Fatalf("NewOpenBao: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The wired consumer key: the adapter asserts the posture on read —
+	// ECDSA P-256 and NON-EXPORTABLE. A key that reported itself exportable
+	// would be refused here.
+	ref := custody.KeyRef(envOr("GITFROK_TEST_OPENBAO_KEY", "agent-ca"))
+	pub, err := signer.PublicKey(ctx, ref)
+	if err != nil {
+		t.Fatalf("PublicKey through a Kubernetes-auth token: %v", err)
+	}
+	if pub.Curve != elliptic.P256() {
+		t.Fatalf("agent-ca public half curve = %v, want P-256", pub.Curve.Params().Name)
+	}
+
+	// One digest crosses the seam; one signature comes back; verification is
+	// in-process against the public half — the enrolment issuance shape, with
+	// no static credential anywhere in the path.
+	digest := sha256.Sum256([]byte("gitfrok custody consumer proof"))
+	sig, err := signer.SignDigest(ctx, ref, digest[:])
+	if err != nil {
+		t.Fatalf("SignDigest through a Kubernetes-auth token: %v", err)
+	}
+	if !ecdsa.VerifyASN1(pub, digest[:], sig) {
+		t.Fatal("signature returned through Kubernetes auth does not verify against the key's public half")
+	}
+}

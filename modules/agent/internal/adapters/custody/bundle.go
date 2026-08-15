@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
 	"sync"
 	"time"
+
+	"github.com/gitfrok/backend/modules/agent/api"
 )
 
 // caValidity bounds a staged CA root's own certificate. It is deliberately
@@ -47,7 +50,7 @@ type issuedRecord struct {
 // Bundle is the staged CA trust bundle with the dual-validate rotation
 // window (SPEC-0044 AC2, ADR-0064 decision 4). It owns the ordered set of
 // roots — each a key REFERENCE plus its CA certificate — the issuance
-// ledger, and the three window operations:
+// ledger, the monotonic bundle REVISION, and the three window operations:
 //
 //   - Stage brings a NEW custody key in beside the current root; from that
 //     instant both roots validate and new issuance chains to the new one.
@@ -56,6 +59,10 @@ type issuedRecord struct {
 //   - Snapshot/Restore carry the window state across a control-plane
 //     restart: a mid-window restart changes nothing for the fleet — no
 //     re-enrolment, ADR-0060 unchanged.
+//
+// The revision advances with every staging step — Stage, removal — so the
+// reconcile path detects staging progress and distributes the newest state
+// (agent/v1 CATrustBundle.revision, SPEC-0044 AC2).
 //
 // Bundle is safe for concurrent use.
 type Bundle struct {
@@ -70,6 +77,25 @@ type Bundle struct {
 	// removed, so an in-flight signature can never be orphaned under a root
 	// the ledger already let go (the RemoveRoot race the reservation closes).
 	inflight map[KeyRef]int
+	// revision is the bundle's monotonic epoch: it advances with every
+	// staging step — a staged root, a completed removal — and with every
+	// ledger entry, so consumers of the distributed CA trust bundle detect
+	// staging progress and converge on the newest revision the way
+	// DesiredState.generation converges desired state (agent/v1
+	// CATrustBundle.revision, SPEC-0044 AC2).
+	revision int64
+	// stagingRev is the DISTRIBUTED epoch: it advances with staging steps
+	// only — a staged root, a completed removal — never with a ledger entry.
+	// The reconcile channel publishes it as the CA trust bundle's revision:
+	// the fleet must converge on the TRUST state, and a ledger entry changes
+	// the removal precondition but not what the fleet validates. The ledger
+	// still advances revision — the durable epoch Snapshot/Restore carries.
+	stagingRev int64
+	// onChange, when set, receives a snapshot after every state change the
+	// durable side must see — stage, removal, ledger entry. The composition
+	// root wires it to persist the snapshot (the control-plane half of a
+	// mid-window restart); the bundle itself persists nothing.
+	onChange func(Snapshot)
 }
 
 // ErrRootStillNeeded refuses an old root's removal while at least one live
@@ -107,15 +133,63 @@ func (b *Bundle) Bootstrap(ctx context.Context, name string) (KeyRef, error) {
 // the custody service generates it, the control plane self-signs the root
 // certificate THROUGH it, and the dual-validate window opens — both roots
 // validate, new issuance chains to the new one (ADR-0064 decision 4).
+// Staging advances the bundle revision.
 func (b *Bundle) Stage(ctx context.Context, name string) (KeyRef, error) {
 	root, err := b.buildRoot(ctx, name)
 	if err != nil {
 		return "", err
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.roots = append(b.roots, root)
+	b.revision++
+	b.stagingRev++
+	b.mu.Unlock()
+	b.changed()
 	return root.Ref, nil
+}
+
+// SetChangeHook installs the callback that receives a snapshot after every
+// state change (stage, removal, ledger entry). It is the seam the
+// composition root persists the bundle's durable state through — the
+// control-plane half of the mid-window restart story (Snapshot/Restore).
+// The hook fires outside the bundle lock; a hook failure is the caller's to
+// handle (a production composition fails the rollout on it).
+func (b *Bundle) SetChangeHook(hook func(Snapshot)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onChange = hook
+}
+
+// changed notifies the hook, if any, of the current state. Called after the
+// lock of a mutating operation is released — Snapshot takes it again, and a
+// hook running under the lock could call straight back into the bundle.
+func (b *Bundle) changed() {
+	b.mu.Lock()
+	hook := b.onChange
+	b.mu.Unlock()
+	if hook != nil {
+		hook(b.Snapshot())
+	}
+}
+
+// Revision is the bundle's durable epoch — every staging step AND every
+// ledger entry advances it. Snapshot/Restore carries it; the reconcile
+// channel publishes StagingRevision instead (the fleet converges on trust
+// state, not ledger churn).
+func (b *Bundle) Revision() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.revision
+}
+
+// StagingRevision is the distributed epoch: the count of staging steps —
+// staged roots plus completed removals. It is what the reconcile channel
+// publishes as the CA trust bundle's revision (agent/v1 CATrustBundle.
+// revision), so a ledger entry alone never triggers a fleet-wide delivery.
+func (b *Bundle) StagingRevision() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stagingRev
 }
 
 // buildRoot generates one custody key and self-signs its CA certificate:
@@ -204,11 +278,15 @@ func (b *Bundle) AbortIssuance(ref KeyRef) {
 // between "reserved" and "recorded".
 func (b *Bundle) CompleteIssuance(certificateID string, ref KeyRef, expiresAt time.Time) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.issued = append(b.issued, issuedRecord{CertificateID: certificateID, RootRef: ref, ExpiresAt: expiresAt})
 	if b.inflight[ref] > 0 {
 		b.inflight[ref]--
 	}
+	b.revision++
+	b.mu.Unlock()
+	// The ledger IS part of the durable state: the removal precondition
+	// reads it, so a restart must restore it — every entry is persisted.
+	b.changed()
 }
 
 // Pool returns a trust pool holding every LIVE root — the verifier side of
@@ -245,8 +323,10 @@ func (b *Bundle) Roots() []Root {
 // critical section. The removal precondition reads from here.
 func (b *Bundle) RecordIssuance(certificateID string, root KeyRef, expiresAt time.Time) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.issued = append(b.issued, issuedRecord{CertificateID: certificateID, RootRef: root, ExpiresAt: expiresAt})
+	b.revision++
+	b.mu.Unlock()
+	b.changed()
 }
 
 // RemoveRoot retires root ref from the trust bundle — and REFUSES while any
@@ -255,7 +335,6 @@ func (b *Bundle) RecordIssuance(certificateID string, root KeyRef, expiresAt tim
 // removal). A refused removal changes nothing: the root keeps validating.
 func (b *Bundle) RemoveRoot(ref KeyRef) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	now := b.now()
 	live := b.liveRootsLocked()
 	idx := -1
@@ -266,9 +345,11 @@ func (b *Bundle) RemoveRoot(ref KeyRef) error {
 		}
 	}
 	if idx < 0 {
+		b.mu.Unlock()
 		return fmt.Errorf("custody: root %q is not live in the bundle: %w", ref, ErrNoKey)
 	}
 	if len(live) == 1 {
+		b.mu.Unlock()
 		return fmt.Errorf("custody: refusing to remove the ONLY live root %q: %w", ref, ErrRootStillNeeded)
 	}
 	if b.inflight[ref] > 0 {
@@ -276,6 +357,7 @@ func (b *Bundle) RemoveRoot(ref KeyRef) error {
 		// ledger entry does not exist yet, but the certificate will. The
 		// reservation makes the in-flight issuance visible to the removal
 		// precondition.
+		b.mu.Unlock()
 		return fmt.Errorf("custody: an issuance under root %q is in flight: %w", ref, ErrRootStillNeeded)
 	}
 	liveCount := 0
@@ -285,6 +367,7 @@ func (b *Bundle) RemoveRoot(ref KeyRef) error {
 		}
 	}
 	if liveCount > 0 {
+		b.mu.Unlock()
 		return fmt.Errorf("custody: %d live certificate(s) still chain to root %q: %w", liveCount, ref, ErrRootStillNeeded)
 	}
 	for i := range b.roots {
@@ -292,7 +375,43 @@ func (b *Bundle) RemoveRoot(ref KeyRef) error {
 			b.roots[i].RemovedAt = now
 		}
 	}
+	b.revision++
+	b.stagingRev++
+	b.mu.Unlock()
+	// A completed removal is a staging step: the distributed bundle's
+	// revision advances and the durable state moves.
+	b.changed()
 	return nil
+}
+
+// LatestCATrustBundle projects the bundle's CURRENT staged state onto the
+// api shape the reconcile channel distributes (agent/v1 DesiredState's
+// ca_trust_bundle, SPEC-0044 AC2): revision, every LIVE root oldest-first
+// as PEM, and the issuance root new certificates chain to. ok is false when
+// the bundle holds no live root — nothing to distribute. It never returns
+// an error for an inconsistent bundle: the projection reads only what the
+// window operations maintain. This CA trust bundle is a DIFFERENT artifact
+// from SPEC-0045's release trust bundle; the naming keeps them apart.
+func (b *Bundle) LatestCATrustBundle(_ context.Context) (api.CATrustBundleState, bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	live := b.liveRootsLocked()
+	if len(live) == 0 {
+		return api.CATrustBundleState{}, false, nil
+	}
+	st := api.CATrustBundleState{
+		Revision:       b.stagingRev,
+		Roots:          make([]api.CATrustRoot, 0, len(live)),
+		IssuanceRootID: string(live[len(live)-1].Ref),
+	}
+	for _, r := range live {
+		st.Roots = append(st.Roots, api.CATrustRoot{
+			ID:             string(r.Ref),
+			CertificatePEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: r.Cert.Raw}),
+			NotAfter:       r.Cert.NotAfter,
+		})
+	}
+	return st, true, nil
 }
 
 func (b *Bundle) liveRootsLocked() []Root {
@@ -312,10 +431,19 @@ func (b *Bundle) liveRootsLocked() []Root {
 // survives a control-plane restart by design; this is the control-plane side
 // of that story.
 //
-// DEFERRED: this is the shape the reconcile channel would distribute to the
-// fleet's trust side once agent/v1 gains a bundle field (package comment).
+// Snapshot is also the durable-and-distributable shape of the bundle: the
+// reconcile wiring (TrustBundleDelivery) projects it onto the agent/v1
+// CATrustBundle desired state, and the composition root persists it so a
+// mid-window restart re-publishes exactly the revision the fleet last saw.
 type Snapshot struct {
-	Roots []SnapshotRoot
+	// Revision is the bundle epoch this snapshot carries; Restore puts the
+	// rebuilt bundle at exactly it, so a mid-window restart neither replays
+	// nor skips a staging step the fleet already saw.
+	Revision int64
+	// StagingRevision is the distributed epoch at snapshot time; Restore
+	// republishes exactly the revision the fleet last saw.
+	StagingRevision int64
+	Roots           []SnapshotRoot
 	// Issued is the ledger. CertificateIDs and expiry only — a certificate's
 	// PEM never enters bundle state (SPEC-0038 AC2 secrecy, restated).
 	Issued []SnapshotIssued
@@ -342,8 +470,10 @@ func (b *Bundle) Snapshot() Snapshot {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	snap := Snapshot{
-		Roots:  make([]SnapshotRoot, 0, len(b.roots)),
-		Issued: make([]SnapshotIssued, 0, len(b.issued)),
+		Revision:        b.revision,
+		StagingRevision: b.stagingRev,
+		Roots:           make([]SnapshotRoot, 0, len(b.roots)),
+		Issued:          make([]SnapshotIssued, 0, len(b.issued)),
 	}
 	for _, r := range b.roots {
 		certDER := make([]byte, len(r.Cert.Raw))
@@ -374,6 +504,6 @@ func (b *Bundle) Restore(snap Snapshot) error {
 	for _, si := range snap.Issued {
 		issued = append(issued, issuedRecord{CertificateID: si.CertificateID, RootRef: si.RootRef, ExpiresAt: si.ExpiresAt})
 	}
-	b.roots, b.issued = roots, issued
+	b.roots, b.issued, b.revision, b.stagingRev = roots, issued, snap.Revision, snap.StagingRevision
 	return nil
 }

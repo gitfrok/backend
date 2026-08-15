@@ -111,11 +111,25 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		fmt.Fprintf(os.Stderr, "controlplane agent: "+format+"\n", args...)
 	}
 
-	// DEV/TEST CA custody: a fresh in-process key per start. Production custody is an
-	// ADR-0057 follow-up and is deliberately NOT decided by this line.
-	ca, err := agent.NewDevCA("gitfrok-control-plane-agent-ca", time.Now)
+	// CA custody (T-0040, SPEC-0044, ADR-0066): the agent door issues every
+	// identity credential through the custody-backed issuer — OpenBao transit
+	// keys the control plane signs digests with and never sees. The dev CA is
+	// reachable ONLY from dev/test compositions; this root reads the custody
+	// posture from the environment and fails the rollout without it (AC1/AC3
+	// fitness in internal/arch keeps it that way).
+	custodyCfg, err := loadCustodyConfig(os.Getenv)
 	if err != nil {
-		return nil, fmt.Errorf("agent ca: %w", err)
+		if pool != nil {
+			pool.Close()
+		}
+		return nil, err
+	}
+	ca, err := agent.NewCustodyCA(custodyCfg)
+	if err != nil {
+		if pool != nil {
+			pool.Close()
+		}
+		return nil, fmt.Errorf("agent ca custody: %w", err)
 	}
 
 	// The store selection mirrors the audit-trail branch above: with
@@ -170,6 +184,11 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 	}
 
 	gateway := agent.NewGRPCServer(svc, time.Second, time.Now, logf)
+
+	// Rotation distribution (SPEC-0044 AC2): every advance of the custody
+	// bundle's staged state — a staged root, a completed removal — is
+	// delivered to each stream as DesiredState.ca_trust_bundle.
+	agent.AttachCATrustBundle(gateway, ca.Bundle())
 
 	// Metering composition (T-0034, SPEC-0041, ADR-0061): the control plane counts from
 	// the telemetry it RECEIVES on the agent channel. The gateway forwards every
@@ -263,7 +282,7 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 			logf("agent gateway stopped: %v", serveErr)
 		}
 	}()
-	fmt.Printf("controlplane-app: AgentGateway listening on %s (dev CA custody)\n", cfg.grpcAddr)
+	fmt.Printf("controlplane-app: AgentGateway listening on %s (custody-backed CA)\n", cfg.grpcAddr)
 	return &agentDoor{server: server, usage: usageServer, residency: residencyServer, pool: pool}, nil
 }
 

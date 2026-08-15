@@ -240,6 +240,39 @@ type CertificateIssuer interface {
 	VerifyChain(rawCerts [][]byte, now time.Time) (leafDER []byte, validity Validity, err error)
 }
 
+// CATrustRoot is one CA trust root of the staged agent-identity trust
+// bundle as the reconcile channel distributes it (agent/v1 CATrustRoot,
+// SPEC-0044 AC2): the root's ID, its self-signed CA certificate as PEM, and
+// the root certificate's own expiry. It carries PUBLIC material only — a CA
+// certificate is trust data, never a credential.
+type CATrustRoot struct {
+	ID             string
+	CertificatePEM []byte
+	NotAfter       time.Time
+}
+
+// CATrustBundleState is the control-plane projection of the custody bundle's
+// staged state for distribution on the reconcile channel: the bundle
+// revision, every LIVE trusted root oldest-first, and the ID of the root new
+// issuance chains to. During a rotation window Roots holds old and new alike
+// (dual-validate) while IssuanceRootID names the new one. Named apart from
+// the RELEASE trust bundle of SPEC-0045 (T-0041): different artifact,
+// different field, no shared surface.
+type CATrustBundleState struct {
+	Revision       int64
+	Roots          []CATrustRoot
+	IssuanceRootID string
+}
+
+// CATrustBundleSource is the port the reconcile delivery path reads the
+// newest staged CA trust bundle state from. ok is false when the source
+// holds no live root — nothing to distribute; the gateway then publishes no
+// bundle update and agents keep their current roots (the contract field is
+// additive by design).
+type CATrustBundleSource interface {
+	LatestCATrustBundle(ctx context.Context) (CATrustBundleState, bool, error)
+}
+
 // StreamSession is the control-plane half of one established stream: the rotation state
 // machine and the contact bookkeeping. The gRPC adapter drives it; all decisions and audit
 // records live behind it (ADR-0060 §2, SPEC-0038 AC4).

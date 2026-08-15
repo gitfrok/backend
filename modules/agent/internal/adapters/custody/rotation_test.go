@@ -14,12 +14,13 @@ import (
 )
 
 // The AC2 window tests exercise the in-memory staging abstraction
-// custody.Bundle: on 2026-08-15 the agent/v1 DesiredState message carries no
-// field capable of staging a CA trust bundle (verified against
-// governance/contracts/proto/agent/v1/agent.proto), so distribution over the
-// reconcile channel is DEFERRED behind an additive agent/v1 governance PR
-// (SPEC-0044 Contracts touched). Snapshot/Restore is where that wiring
-// attaches; nothing below stands in for fleet distribution.
+// custody.Bundle. Fleet distribution over the reconcile channel rides
+// agent/v1 DesiredState.ca_trust_bundle (governance@779d022) and is proven
+// at the reconcile level by the grpc adapter's
+// TestAC2_CARotationDistributedOverReconcile; Snapshot/Restore is where the
+// durable wiring attaches. Nothing below stands in for the distribution
+// tests, and the CA bundle they rotate is named apart from SPEC-0045's
+// release trust bundle (T-0040's two-bundles rule).
 
 // stageOverlap opens the dual-validate window: one root bootstrapped, one
 // certificate issued under it, one NEW root staged beside it.

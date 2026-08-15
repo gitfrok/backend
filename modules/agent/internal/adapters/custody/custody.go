@@ -30,15 +30,15 @@
 //     overlap, new issuance chains to the new key, and the old root leaves only
 //     after every certificate it issued predates its removal.
 //
-// DEFERRED — reconcile distribution of the bundle: on 2026-08-15 the agent/v1
-// DesiredState message (governance/contracts/proto/agent/v1/agent.proto) carries
-// only a generation counter and per-component signed release refs — NO field
-// capable of staging a CA trust bundle (multiple roots / bundle revision). Per
-// SPEC-0044's Contracts-touched rule, an additive agent/v1 field under its own
-// governance PR must come first; until it lands, Bundle's state moves nowhere
-// but in-process, and its Snapshot/Restore surface is where the reconcile
-// wiring attaches. The window LOGIC tests here exercise that in-memory staging
-// abstraction; none of them stands in for distribution.
+// Distribution over the reconcile channel: the additive agent/v1 field
+// DesiredState.ca_trust_bundle (CATrustBundle) landed under its own governance
+// commit (SPEC-0044 Contracts touched), and TrustBundleDelivery in this package
+// projects the Bundle's staged state onto it — revision, live roots, issuance
+// root — for the gateway to publish as desired state. Bundle's Snapshot/Restore
+// surface is additionally what the composition root persists the bundle's
+// durable state through. The CA trust bundle distributed here is a DIFFERENT
+// artifact from the RELEASE trust bundle of SPEC-0045 (T-0041): different
+// field, different tests, no shared surface.
 package custody
 
 import (
