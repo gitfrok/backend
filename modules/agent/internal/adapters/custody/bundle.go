@@ -65,6 +65,11 @@ type Bundle struct {
 	mu     sync.Mutex
 	roots  []Root         // oldest first; the LAST live root is the issuance root
 	issued []issuedRecord // every certificate this control plane issued through the bundle
+	// inflight counts RESERVED-but-uncommitted issuances per root: between
+	// ReserveIssuance and CompleteIssuance/AbortIssuance the root cannot be
+	// removed, so an in-flight signature can never be orphaned under a root
+	// the ledger already let go (the RemoveRoot race the reservation closes).
+	inflight map[KeyRef]int
 }
 
 // ErrRootStillNeeded refuses an old root's removal while at least one live
@@ -161,6 +166,51 @@ func (b *Bundle) IssuanceRoot() (KeyRef, *x509.Certificate, error) {
 	return newest.Ref, newest.Cert, nil
 }
 
+// ReserveIssuance selects the issuance root AND pins it: until the matching
+// CompleteIssuance or AbortIssuance, RemoveRoot refuses this root. This is
+// the critical section the Issuer's root-selection + sign + record sequence
+// runs under — without it, a removal that observes an EMPTY ledger could
+// retire a root while a signature for it is still crossing the seam, and the
+// completed certificate would chain to a root the bundle no longer trusts.
+func (b *Bundle) ReserveIssuance() (KeyRef, *x509.Certificate, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	live := b.liveRootsLocked()
+	if len(live) == 0 {
+		return "", nil, ErrNoRoots
+	}
+	newest := live[len(live)-1]
+	if b.inflight == nil {
+		b.inflight = make(map[KeyRef]int)
+	}
+	b.inflight[newest.Ref]++
+	return newest.Ref, newest.Cert, nil
+}
+
+// AbortIssuance releases one reservation without recording an issuance —
+// the shape every failed Issue leaves behind, so a failed signature does not
+// hold a root hostage.
+func (b *Bundle) AbortIssuance(ref KeyRef) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.inflight[ref] > 0 {
+		b.inflight[ref]--
+	}
+}
+
+// CompleteIssuance records one issued certificate into the ledger under the
+// reserved root and releases the reservation in the SAME critical section —
+// the ledger check a concurrent RemoveRoot runs never observes the gap
+// between "reserved" and "recorded".
+func (b *Bundle) CompleteIssuance(certificateID string, ref KeyRef, expiresAt time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.issued = append(b.issued, issuedRecord{CertificateID: certificateID, RootRef: ref, ExpiresAt: expiresAt})
+	if b.inflight[ref] > 0 {
+		b.inflight[ref]--
+	}
+}
+
 // Pool returns a trust pool holding every LIVE root — the verifier side of
 // the dual-validate window. During the overlap it contains old and new
 // alike; after a removal it contains only what survived it.
@@ -189,8 +239,10 @@ func (b *Bundle) Roots() []Root {
 }
 
 // RecordIssuance enters one issued certificate into the ledger under the
-// root that signed it. The Issuer calls this on every Issue; the removal
-// precondition reads from here.
+// root that signed it, without touching the reservation count — it is the
+// restore/test-side primitive; the live Issuer path records through
+// CompleteIssuance so the ledger entry and the reservation release stay one
+// critical section. The removal precondition reads from here.
 func (b *Bundle) RecordIssuance(certificateID string, root KeyRef, expiresAt time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -218,6 +270,13 @@ func (b *Bundle) RemoveRoot(ref KeyRef) error {
 	}
 	if len(live) == 1 {
 		return fmt.Errorf("custody: refusing to remove the ONLY live root %q: %w", ref, ErrRootStillNeeded)
+	}
+	if b.inflight[ref] > 0 {
+		// A signature for this root is crossing the seam right now: its
+		// ledger entry does not exist yet, but the certificate will. The
+		// reservation makes the in-flight issuance visible to the removal
+		// precondition.
+		return fmt.Errorf("custody: an issuance under root %q is in flight: %w", ref, ErrRootStillNeeded)
 	}
 	liveCount := 0
 	for _, rec := range b.issued {

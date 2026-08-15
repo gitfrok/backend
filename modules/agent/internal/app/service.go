@@ -311,14 +311,26 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 	if claimed, ok, err := s.tokens.ClaimToken(ctx, hash, dataPlaneID, now); err != nil {
 		return api.Enrolment{}, err
 	} else if !ok {
-		// Lost the single-use race to a concurrent presenter.
+		// The claim refused — and the row itself says WHY. Re-read and name
+		// the true cause: a revoked or expired token is an operator-visible
+		// state, and token_spent is reserved for the true single-use race.
+		reason := api.RefusalTokenSpent
+		fresh, found, lerr := s.tokens.TokenByHash(ctx, hash)
+		if lerr != nil {
+			return api.Enrolment{}, lerr
+		}
+		if found {
+			if r := fresh.PresentOutcome(now); r != "" {
+				reason = r
+			}
+		}
 		if err := s.publish(ctx, platformaudit.AgentEnrolment{
-			TenantID: tok.TenantID, TokenID: tok.ID, Reason: string(api.RefusalTokenSpent),
+			TenantID: tok.TenantID, TokenID: tok.ID, Reason: string(reason),
 			Outcome: "DENIED", OccurredAt: now,
 		}); err != nil {
 			return api.Enrolment{}, err
 		}
-		return api.Enrolment{}, &api.EnrolmentRefused{Reason: api.RefusalTokenSpent}
+		return api.Enrolment{}, &api.EnrolmentRefused{Reason: reason}
 	} else if claimed.DataPlaneID != "" {
 		// The claim's recorded identity is authoritative: it is the one this
 		// token has ever minted (ADR-0060).
@@ -344,37 +356,47 @@ func (s *Service) Enrol(ctx context.Context, req api.EnrolRequest) (api.Enrolmen
 		// One token never mints two data planes (ADR-0060); no runbook ritual
 		// is needed because the retry IS the recovery. The registry record
 		// stays — visible as never connected until the retry completes it.
-		if perr := s.publish(ctx, platformaudit.AgentEnrolment{
-			TenantID: tok.TenantID, DataPlaneID: dataPlaneID, TokenID: tok.ID,
-			Reason: "certificate_issuance_failed", Outcome: "DENIED", OccurredAt: now,
-		}); perr != nil {
-			return api.Enrolment{}, perr
-		}
-		if rerr := s.tokens.ReleaseClaim(ctx, tok.TenantID, tok.ID); rerr != nil {
-			// The refusal is already audited; a failed release is logged, not
-			// converted into a second outcome. The operator-visible shape is
-			// unchanged: retry, and if the release was lost, re-issue.
-			s.logf("agent: release claim failed after issuance failure: %v", rerr)
-		}
-		s.logf("agent: enrolment failed after token spent: certificate issuance; claim released")
-		return api.Enrolment{}, &api.EnrolmentRefused{Reason: api.RefusalDenied}
+		return api.Enrolment{}, s.failAfterSpend(ctx, tok, dataPlaneID, now, "certificate_issuance_failed")
 	}
 	if err := s.registry.SetCertificate(ctx, tok.TenantID, dataPlaneID, cert.CertificateID, cert.ExpiresAt); err != nil {
-		return api.Enrolment{}, err
+		return api.Enrolment{}, s.failAfterSpend(ctx, tok, dataPlaneID, now, "certificate_record_failed")
 	}
 	if err := s.publish(ctx, platformaudit.AgentEnrolment{
 		TenantID: tok.TenantID, DataPlaneID: dataPlaneID, TokenID: tok.ID,
 		Outcome: "ALLOWED", OccurredAt: now,
 	}); err != nil {
-		return api.Enrolment{}, err
+		return api.Enrolment{}, s.failAfterSpend(ctx, tok, dataPlaneID, now, "enrolment_audit_failed")
 	}
 	if err := s.publish(ctx, platformaudit.AgentCertificateIssued{
 		TenantID: tok.TenantID, DataPlaneID: dataPlaneID, CertificateID: cert.CertificateID,
 		ExpiresAt: cert.ExpiresAt, OccurredAt: now,
 	}); err != nil {
-		return api.Enrolment{}, err
+		return api.Enrolment{}, s.failAfterSpend(ctx, tok, dataPlaneID, now, "certificate_audit_failed")
 	}
 	return api.Enrolment{Identity: id, Certificate: cert, HeartbeatInterval: s.cfg.HeartbeatInterval}, nil
+}
+
+// failAfterSpend is the AC6 recovery shape applied to the WHOLE post-spend
+// tail: whatever fails after the token was spent — issuance, the certificate
+// record, either audit emission — audits one coarse DENIED enrolment, then
+// RELEASES the claim. A failed release is logged, not converted into a
+// second outcome: the refusal is already audited, and the operator-visible
+// shape is unchanged — retry, and if the release was lost, re-issue. The
+// claim's recorded data-plane ID survives the release (the claim CASE guard
+// preserves it), so the retry re-binds the SAME identity: one token never
+// mints two data planes (ADR-0060), and the retry IS the recovery.
+func (s *Service) failAfterSpend(ctx context.Context, tok domain.Token, dataPlaneID string, now time.Time, reason string) error {
+	if perr := s.publish(ctx, platformaudit.AgentEnrolment{
+		TenantID: tok.TenantID, DataPlaneID: dataPlaneID, TokenID: tok.ID,
+		Reason: reason, Outcome: "DENIED", OccurredAt: now,
+	}); perr != nil {
+		return perr
+	}
+	if rerr := s.tokens.ReleaseClaim(ctx, tok.TenantID, tok.ID); rerr != nil {
+		s.logf("agent: release claim failed after %s: %v", reason, rerr)
+	}
+	s.logf("agent: enrolment failed after token spent: %s; claim released", reason)
+	return &api.EnrolmentRefused{Reason: api.RefusalDenied}
 }
 
 // AdmitPeerCertificates is the handshake-time admission for certificate-authenticated

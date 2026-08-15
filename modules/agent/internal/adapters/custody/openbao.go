@@ -8,10 +8,12 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -55,13 +57,42 @@ type KubernetesAuth struct {
 	JWTFile string
 	// Client performs the login call; nil means a default client.
 	Client *http.Client
+	// AllowHTTPForLocalTests relaxes the https requirement for a LOOPBACK
+	// address only — the shape the in-process wire tests serve. Production
+	// compositions never set it (validateAddress states the boundary).
+	AllowHTTPForLocalTests bool
 }
 
 const defaultServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
+// validateAddress enforces the transport posture every custody call leaves
+// on: https, always. The single relaxation — plain http to a LOOPBACK
+// address — exists because in-process wire tests and the dev cluster's
+// port-forward serve plain HTTP; it is opt-in behind the explicit flag and
+// never widens beyond loopback.
+func validateAddress(addr string, allowHTTPForLocalTests bool) error {
+	u, err := url.Parse(addr)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("custody: openbao: address %q is not an absolute URL", addr)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" && allowHTTPForLocalTests {
+		switch u.Hostname() {
+		case "127.0.0.1", "localhost", "::1":
+			return nil
+		}
+	}
+	return fmt.Errorf("custody: openbao: address %q must be https — plain http is allowed only on loopback behind the explicit local-test flag", addr)
+}
+
 // Token exchanges a freshly-read service-account JWT for a short-lived
 // OpenBao client token.
 func (k KubernetesAuth) Token(ctx context.Context) (string, error) {
+	if err := validateAddress(k.Address, k.AllowHTTPForLocalTests); err != nil {
+		return "", err
+	}
 	file := k.JWTFile
 	if file == "" {
 		file = defaultServiceAccountTokenFile
@@ -121,6 +152,11 @@ type Config struct {
 	// Client performs the HTTP calls; nil means a default client with a
 	// bounded timeout.
 	Client *http.Client
+	// AllowHTTPForLocalTests relaxes the https requirement for a LOOPBACK
+	// Address only, so in-process wire tests and the dev cluster's
+	// port-forward can serve plain HTTP. Production compositions never set
+	// it; NewOpenBao refuses every other non-https address outright.
+	AllowHTTPForLocalTests bool
 }
 
 // OpenBao is the production Signer: OpenBao's transit engine over its HTTP
@@ -145,6 +181,9 @@ func defaultHTTPClient() *http.Client { return &http.Client{Timeout: 10 * time.S
 func NewOpenBao(cfg Config) (*OpenBao, error) {
 	if cfg.Address == "" {
 		return nil, errors.New("custody: openbao: Address is required")
+	}
+	if err := validateAddress(cfg.Address, cfg.AllowHTTPForLocalTests); err != nil {
+		return nil, err
 	}
 	if cfg.Token == nil {
 		return nil, errors.New("custody: openbao: Token source is required")
@@ -260,9 +299,19 @@ func (o *OpenBao) PublicKey(ctx context.Context, ref KeyRef) (*ecdsa.PublicKey, 
 	if pub == "" {
 		return nil, fmt.Errorf("custody: openbao: key %q exposes no public half: %w", ref, ErrNoKey)
 	}
-	der, err := base64.StdEncoding.DecodeString(pub)
-	if err != nil {
-		return nil, fmt.Errorf("custody: openbao: decode public key %q: %w", ref, err)
+	// Real transit serves the public half as a PEM block; bare base64 DER
+	// is the older-wire fallback. PEM first — a decoder that only knew bare
+	// base64 failed on every real response (the mock's bare-base64 shape
+	// masked this until the live round-trip).
+	var der []byte
+	if block, _ := pem.Decode([]byte(pub)); block != nil {
+		der = block.Bytes
+	} else {
+		var err error
+		der, err = base64.StdEncoding.DecodeString(pub)
+		if err != nil {
+			return nil, fmt.Errorf("custody: openbao: decode public key %q: %w", ref, err)
+		}
 	}
 	parsed, err := x509.ParsePKIXPublicKey(der)
 	if err != nil {
@@ -275,10 +324,12 @@ func (o *OpenBao) PublicKey(ctx context.Context, ref KeyRef) (*ecdsa.PublicKey, 
 	return ecdsaPub, nil
 }
 
-// SignDigest signs one SHA-256 digest via POST /transit/sign/:name with
-// hash_algorithm "none" — transit signs exactly the digest presented, and
-// the ASN.1 marshaling is what x509 verification expects. Only the signature
-// comes back.
+// SignDigest signs one SHA-256 digest via POST /transit/sign/:name. The
+// digest is presented pre-hashed: transit's hash_algorithm "none" only
+// admits a digest-in request when prehashed is set, and the provider's
+// literal pkcs1v15 signature_algorithm is what it requires alongside for
+// ECDSA keys (it still returns ASN.1 DER for ecdsa-p256, the marshaling x509
+// verification expects). Only the signature comes back.
 func (o *OpenBao) SignDigest(ctx context.Context, ref KeyRef, digest []byte) ([]byte, error) {
 	if len(digest) != 32 {
 		return nil, fmt.Errorf("custody: openbao: digest is %d bytes, not a SHA-256 digest", len(digest))
@@ -289,8 +340,10 @@ func (o *OpenBao) SignDigest(ctx context.Context, ref KeyRef, digest []byte) ([]
 	}
 	req := map[string]any{
 		"input":                base64.StdEncoding.EncodeToString(digest),
-		"hash_algorithm":       "none", // the input already IS the SHA-256 digest
-		"marshaling_algorithm": "asn1", // x509 verifies ASN.1 DER ECDSA signatures
+		"hash_algorithm":       "none",     // the input already IS the SHA-256 digest
+		"prehashed":            true,       // required by transit to admit hash_algorithm "none"
+		"signature_algorithm":  "pkcs1v15", // transit's required companion for a prehashed digest
+		"marshaling_algorithm": "asn1",     // x509 verifies ASN.1 DER ECDSA signatures
 	}
 	raw, status, err := o.post(ctx, "/v1/"+o.mount+"/sign/"+path, req)
 	if err != nil {
@@ -310,7 +363,15 @@ func (o *OpenBao) SignDigest(ctx context.Context, ref KeyRef, digest []byte) ([]
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("custody: openbao: decode sign response: %w", err)
 	}
-	sig, err := base64.StdEncoding.DecodeString(out.Data.Signature)
+	// Transit returns signatures as TYPE-PREFIXED strings — "ecdsa-p256:<base64-DER>"
+	// for this key type, or multi-part shapes like "vault:v1:<b64>" elsewhere.
+	// ':' is outside the base64 alphabet, so the parsable payload is the
+	// substring after the LAST ':'; a response without a prefix decodes whole.
+	wire := out.Data.Signature
+	if i := strings.LastIndex(wire, ":"); i >= 0 {
+		wire = wire[i+1:]
+	}
+	sig, err := base64.StdEncoding.DecodeString(wire)
 	if err != nil || len(sig) == 0 {
 		return nil, fmt.Errorf("custody: openbao: sign %q returned no parsable signature: %w", ref, ErrUnavailable)
 	}

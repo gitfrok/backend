@@ -474,6 +474,34 @@ func TestAC3_EffectiveDateRangeSemantics(t *testing.T) {
 	}
 }
 
+// AC3: declarations sharing ONE effective instant still resolve
+// deterministically — the tie breaks on chain_seq, and the LATER chain
+// position wins whatever order the rows arrived in. Without the tie-break
+// the read is whatever the planner returns first.
+func TestAC3_SameEffectiveInstantTieBreaksOnChainSeq(t *testing.T) {
+	s := store(t)
+	tenant := tenantFor(t)
+	base := time.Now().Add(-time.Hour).Truncate(time.Microsecond)
+
+	// Three rows on the SAME instant, appended OUT of chain order.
+	declare(t, s, tenant, "aws", "eu-central-1", base, 7)
+	declare(t, s, tenant, "gcp", "europe-west3", base, 9)
+	declare(t, s, tenant, "azure", "northeurope", base, 8)
+
+	got, ok, err := s.DeclarationAt(tenantCtx(tenant), string(tenant), base)
+	if err != nil || !ok {
+		t.Fatalf("declaration at the shared instant: ok=%t err=%v", ok, err)
+	}
+	if got.ChainSeq != 9 {
+		t.Fatalf("in force at the shared instant = seq %d, want 9 — the tie must break on chain_seq", got.ChainSeq)
+	}
+	// The "currently in force" read shares the query and the tie-break.
+	now, ok, err := s.Declaration(tenantCtx(tenant), string(tenant))
+	if err != nil || !ok || now.ChainSeq != 9 {
+		t.Fatalf("current declaration = seq %d ok=%t err=%v, want 9", now.ChainSeq, ok, err)
+	}
+}
+
 // AC3 under -race: concurrent declares and reads serialize on the database.
 // Every declare appends, the retained history keeps every row, and the
 // declaration finally in force is one of the rows actually written — never a

@@ -8,6 +8,10 @@
 -- DROP POLICY IF EXISTS), so this file deliberately is not: dropping what
 -- never existed is an error an operator should see, not silence.
 
+DROP FUNCTION IF EXISTS agent.claim_enrolment_token(BYTEA, TEXT);
+-- The superseded (BYTEA, TEXT, TIMESTAMPTZ) overload: the up migration drops
+-- it on re-apply, so the down drops it too — a rollback must leave NO claim
+-- surface behind, whichever signature the database still carries.
 DROP FUNCTION IF EXISTS agent.claim_enrolment_token(BYTEA, TEXT, TIMESTAMPTZ);
 DROP FUNCTION IF EXISTS agent.lookup_enrolment_token(BYTEA);
 

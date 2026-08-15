@@ -29,13 +29,16 @@ type testCA struct {
 	pool *x509.CertPool
 }
 
-func newTestCA(t *testing.T, cn string) *testCA {
+func newTestCA(t *testing.T, cn string, anchor time.Time) *testCA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("ca key: %v", err)
 	}
-	now := time.Now()
+	// The CA's window is anchored to the SAME instant the test verifies at:
+	// a wall-clock CA misses a fixed test instant outside UTC, and the
+	// chain reads untrusted for a reason that has nothing to do with trust.
+	now := anchor
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: cn},
@@ -92,8 +95,8 @@ func (ca *testCA) issuePEM(t *testing.T, notBefore, notAfter time.Time) []byte {
 
 func TestApplyRotationOutcomes(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
-	ca := newTestCA(t, "test-ca")
-	otherCA := newTestCA(t, "other-ca")
+	ca := newTestCA(t, "test-ca", now)
+	otherCA := newTestCA(t, "other-ca", now)
 
 	cases := []struct {
 		name   string
@@ -186,7 +189,7 @@ func (failStore) Clear(context.Context) error { return nil }
 // TestApplyRotationPersistsCredential: a successful rotation replaces the stored credential.
 func TestApplyRotationPersistsCredential(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
-	ca := newTestCA(t, "test-ca")
+	ca := newTestCA(t, "test-ca", now)
 	store := &MemoryCertStore{}
 	if err := store.Save(context.Background(), []byte("old-credential")); err != nil {
 		t.Fatal(err)

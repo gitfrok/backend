@@ -2,8 +2,10 @@ package custody_test
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/pem"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -245,5 +247,156 @@ func TestRestoreRejectsUnparsableState(t *testing.T) {
 	}
 	if err := fresh.Restore(snap); err == nil {
 		t.Fatal("Restore accepted an unparsable root certificate")
+	}
+}
+
+// gatedSigner is a custody seam whose SignDigest can be held at a gate: the
+// race test parks one signature mid-flight while the window operations run
+// beside it. Until armed it passes through, so bootstrap self-signs freely.
+type gatedSigner struct {
+	mu    sync.Mutex
+	inner custody.Signer
+	began chan struct{} // closed over once per call while armed
+	gate  chan struct{} // the signature waits on this while armed
+	fail  bool          // refuse after the gate opens
+}
+
+func (g *gatedSigner) GenerateKey(ctx context.Context, name string) (custody.KeyRef, error) {
+	return g.inner.GenerateKey(ctx, name)
+}
+
+func (g *gatedSigner) PublicKey(ctx context.Context, ref custody.KeyRef) (*ecdsa.PublicKey, error) {
+	return g.inner.PublicKey(ctx, ref)
+}
+
+func (g *gatedSigner) SignDigest(ctx context.Context, ref custody.KeyRef, digest []byte) ([]byte, error) {
+	g.mu.Lock()
+	began, gate, fail := g.began, g.gate, g.fail
+	// One-shot: exactly ONE signature — the one the test parks — waits at
+	// the gate; every later seam call (a Stage's self-sign) passes through.
+	g.began, g.gate = nil, nil
+	g.mu.Unlock()
+	if began != nil {
+		began <- struct{}{}
+	}
+	if gate != nil {
+		<-gate
+	}
+	if fail {
+		return nil, errors.New("gated signer: seam outage")
+	}
+	return g.inner.SignDigest(ctx, ref, digest)
+}
+
+func (g *gatedSigner) arm() (gate, began chan struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.began = make(chan struct{}, 1)
+	g.gate = make(chan struct{})
+	return g.gate, g.began
+}
+
+// TestIssuanceInFlightHoldsItsRoot is the RemoveRoot race the reservation
+// closes: a signature for the OLD root is crossing the seam when the window
+// says the root may go. The removal must be REFUSED while the issuance is in
+// flight — its ledger entry does not exist yet, but the certificate will —
+// and the completed certificate must land under a root the bundle still
+// trusted at signature time.
+func TestIssuanceInFlightHoldsItsRoot(t *testing.T) {
+	fake := custody.NewFakeSigner()
+	gs := &gatedSigner{inner: fake}
+	clk := newClock()
+	bundle, err := custody.NewBundle(gs, clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	oldRef, err := bundle.Bootstrap(context.Background(), "agent-ca-race-a")
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	issuer, err := custody.NewIssuer(bundle)
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
+
+	// One issuance parks mid-flight at the seam, under the ONLY root.
+	gate, began := gs.arm()
+	done := make(chan error, 1)
+	go func() {
+		_, err := issuer.Issue(context.Background(), testIdentity, clk.Now(), time.Hour, time.Minute)
+		done <- err
+	}()
+	<-began // the signature is crossing the seam; the reservation is held
+
+	// The window opens and tries to retire the signing root in one motion.
+	if _, err := bundle.Stage(context.Background(), "agent-ca-race-b"); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if err := bundle.RemoveRoot(oldRef); !errors.Is(err, custody.ErrRootStillNeeded) {
+		t.Fatalf("RemoveRoot during in-flight issuance = %v, want ErrRootStillNeeded", err)
+	}
+
+	// The signature completes: the issuance lands, and the root stays held —
+	// now by its ledger entry instead of its reservation.
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatalf("in-flight Issue failed: %v", err)
+	}
+	if err := bundle.RemoveRoot(oldRef); !errors.Is(err, custody.ErrRootStillNeeded) {
+		t.Fatalf("RemoveRoot after in-flight issuance = %v, want ErrRootStillNeeded (the ledger now)", err)
+	}
+
+	// Once the certificate predates the removal, the root leaves cleanly.
+	clk.Advance(2 * time.Hour)
+	if err := bundle.RemoveRoot(oldRef); err != nil {
+		t.Fatalf("RemoveRoot after expiry = %v, want success", err)
+	}
+}
+
+// TestFailedIssuanceReleasesItsReservation is the reservation's other half: a
+// signature that FAILS at the seam must not hold its root hostage — the
+// abort releases the reservation, and the removal is admitted immediately.
+func TestFailedIssuanceReleasesItsReservation(t *testing.T) {
+	fake := custody.NewFakeSigner()
+	gs := &gatedSigner{inner: fake}
+	clk := newClock()
+	bundle, err := custody.NewBundle(gs, clk.Now)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+	if _, err := bundle.Bootstrap(context.Background(), "agent-ca-abort-a"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	newRef, err := bundle.Stage(context.Background(), "agent-ca-abort-b")
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	issuer, err := custody.NewIssuer(bundle)
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
+
+	gate, began := gs.arm()
+	gs.mu.Lock()
+	gs.fail = true
+	gs.mu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := issuer.Issue(context.Background(), testIdentity, clk.Now(), time.Hour, time.Minute)
+		done <- err
+	}()
+	<-began
+	// In flight: the NEWEST root (the issuance root) refuses removal.
+	if err := bundle.RemoveRoot(newRef); !errors.Is(err, custody.ErrRootStillNeeded) {
+		t.Fatalf("RemoveRoot during in-flight issuance = %v, want ErrRootStillNeeded", err)
+	}
+
+	// The seam fails: the issuance aborts and its reservation is released.
+	close(gate)
+	if err := <-done; err == nil {
+		t.Fatal("Issue succeeded against a failing seam")
+	}
+	if err := bundle.RemoveRoot(newRef); err != nil {
+		t.Fatalf("RemoveRoot after failed issuance = %v, want success — the reservation must be released", err)
 	}
 }

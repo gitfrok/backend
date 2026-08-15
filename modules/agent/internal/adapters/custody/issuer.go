@@ -14,7 +14,6 @@ import (
 	"io"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gitfrok/backend/modules/agent/api"
@@ -58,12 +57,12 @@ func (k *custodyKey) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([
 // a Bundle and signs every certificate through the custody seam
 // (ADR-0064 decisions 1–2, SPEC-0044 AC1).
 //
-// Issuer is safe for concurrent issuance.
+// Issuer is safe for concurrent issuance. Serial numbers carry no shared
+// counter: each is drawn fresh from crypto/rand (see randomSerial), so a
+// restarted control plane issuing under the SAME live root cannot replay a
+// serial it minted before the restart.
 type Issuer struct {
 	bundle *Bundle
-
-	mu     sync.Mutex
-	serial *big.Int
 }
 
 var _ api.CertificateIssuer = (*Issuer)(nil)
@@ -74,7 +73,29 @@ func NewIssuer(bundle *Bundle) (*Issuer, error) {
 	if bundle == nil {
 		return nil, errors.New("custody: nil bundle")
 	}
-	return &Issuer{bundle: bundle, serial: big.NewInt(1)}, nil
+	return &Issuer{bundle: bundle}, nil
+}
+
+// serialLimit is 2^63: every serial drawn stays positive and fits a signed
+// 64-bit word, which every verifier this certificate meets accepts.
+var serialLimit = new(big.Int).Lsh(big.NewInt(1), 63)
+
+// randomSerial draws one collision-resistant certificate serial (RFC 5280
+// §4.1.2.2 requires per-issuer uniqueness, not a sequence). A 63-bit
+// positive random makes collisions computationally impossible at this CA's
+// issuance rate WITHOUT shared state — the property a control-plane restart
+// needs: under the same live root, a new process restarts nothing, because
+// there is no counter to restart. Zero is redrawn: a serial must be positive.
+func randomSerial() (*big.Int, error) {
+	for {
+		n, err := rand.Int(rand.Reader, serialLimit)
+		if err != nil {
+			return nil, fmt.Errorf("custody: draw serial: %w", err)
+		}
+		if n.Sign() > 0 {
+			return n, nil
+		}
+	}
 }
 
 // Bundle exposes the issuer's staged trust bundle — the rotation surface the
@@ -98,10 +119,21 @@ func (i *Issuer) Issue(ctx context.Context, id api.Identity, now time.Time, life
 	if id.TenantID == "" || id.DataPlaneID == "" {
 		return api.IssuedCertificate{}, errors.New("custody: identity must name tenant and data plane")
 	}
-	ref, caCert, err := i.bundle.IssuanceRoot()
+	// Root selection, the seam call and the ledger entry run under ONE
+	// reservation: RemoveRoot cannot retire the chosen root while the
+	// signature is in flight, and the ledger entry lands in the same
+	// critical section that releases the reservation — no gap a concurrent
+	// removal-precondition check can observe (Bundle.ReserveIssuance).
+	ref, caCert, err := i.bundle.ReserveIssuance()
 	if err != nil {
 		return api.IssuedCertificate{}, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			i.bundle.AbortIssuance(ref)
+		}
+	}()
 	pub, err := i.bundle.signer.PublicKey(ctx, ref)
 	if err != nil {
 		return api.IssuedCertificate{}, fmt.Errorf("custody: issue: %w", err)
@@ -110,10 +142,10 @@ func (i *Issuer) Issue(ctx context.Context, id api.Identity, now time.Time, life
 	if err != nil {
 		return api.IssuedCertificate{}, fmt.Errorf("custody: generate leaf key: %w", err)
 	}
-	i.mu.Lock()
-	i.serial = new(big.Int).Add(i.serial, big.NewInt(1))
-	serial := new(big.Int).Set(i.serial)
-	i.mu.Unlock()
+	serial, err := randomSerial()
+	if err != nil {
+		return api.IssuedCertificate{}, err
+	}
 
 	// NotBefore backdated by the clock-skew leeway, NotAfter never extended —
 	// the same window semantics DevCA documents (SPEC-0038 AC4).
@@ -141,7 +173,8 @@ func (i *Issuer) Issue(ctx context.Context, id api.Identity, now time.Time, life
 
 	certID := ids.NewULID()
 	expiresAt := now.Add(lifetime)
-	i.bundle.RecordIssuance(certID, ref, expiresAt)
+	i.bundle.CompleteIssuance(certID, ref, expiresAt)
+	committed = true
 	return api.IssuedCertificate{CertificateID: certID, PEM: bundlePEM, ExpiresAt: expiresAt}, nil
 }
 

@@ -78,9 +78,11 @@ func (s *Store) Declaration(ctx context.Context, tenantID string) (api.Declarati
 }
 
 // DeclarationAt returns the declaration in force at one instant — the row
-// with the maximum effective_at <= at (SPEC-0042 AC3). The served index is
-// (tenant_id, effective_at); the history the read walks is retained because
-// nothing on this table ever updates or deletes a row.
+// with the maximum effective_at <= at (SPEC-0042 AC3). Ties on the effective
+// instant break deterministically on chain_seq: the LATER chain position wins
+// (it is the declaration appended after its same-instant predecessor). The
+// served index is (tenant_id, effective_at); the history the read walks is
+// retained because nothing on this table ever updates or deletes a row.
 func (s *Store) DeclarationAt(ctx context.Context, tenantID string, at time.Time) (api.Declaration, bool, error) {
 	ctx = scoped(ctx, tenantID)
 	var d api.Declaration
@@ -89,7 +91,7 @@ func (s *Store) DeclarationAt(ctx context.Context, tenantID string, at time.Time
 			`SELECT tenant_id, cloud, region, effective_at, actor_id, chain_seq, record_hash
 			   FROM residency.declarations
 			  WHERE effective_at <= $1
-			  ORDER BY effective_at DESC
+			  ORDER BY effective_at DESC, chain_seq DESC
 			  LIMIT 1`, at,
 		), &d)
 	})

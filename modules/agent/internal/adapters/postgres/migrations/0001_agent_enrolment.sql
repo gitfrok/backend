@@ -109,10 +109,21 @@ $$;
 -- A recorded data_plane_id is never overwritten: a claim released after a
 -- failed issuance re-binds its retry to the SAME identity (ADR-0060,
 -- SPEC-0042 AC6).
+--
+-- The clock is SERVER-SIDE — both the expiry guard and the spend instant
+-- read now(), exactly as identity.resolve_active_credential does (ADR-0043).
+-- A caller-supplied clock here would let a presenter argue a token into
+-- spendability with its own time; the database's clock is the one clock the
+-- durable single-use story already trusts.
+--
+-- The DROP of the superseded (BYTEA, TEXT, TIMESTAMPTZ) signature keeps the
+-- re-apply honest: CREATE OR REPLACE with a CHANGED argument list would
+-- otherwise leave the old overload beside the new one, and the exemption
+-- enumeration would see two claim functions.
+DROP FUNCTION IF EXISTS agent.claim_enrolment_token(BYTEA, TEXT, TIMESTAMPTZ);
 CREATE OR REPLACE FUNCTION agent.claim_enrolment_token(
   p_token_hash BYTEA,
-  p_data_plane_id TEXT,
-  p_now TIMESTAMPTZ
+  p_data_plane_id TEXT
 )
 RETURNS TABLE (
   id TEXT, tenant_id TEXT, issued_by TEXT, token_hash BYTEA,
@@ -124,14 +135,14 @@ SECURITY DEFINER
 SET search_path = pg_catalog, agent
 AS $$
   UPDATE agent.enrolment_tokens AS t
-     SET spent_at = p_now,
+     SET spent_at = now(),
          data_plane_id = CASE WHEN t.data_plane_id <> ''
                               THEN t.data_plane_id
                               ELSE p_data_plane_id END
    WHERE t.token_hash = p_token_hash
      AND t.spent_at IS NULL
      AND t.revoked_at IS NULL
-     AND t.expires_at > p_now
+     AND t.expires_at > now()
   RETURNING t.id, t.tenant_id, t.issued_by, t.token_hash,
             t.issued_at, t.expires_at, t.spent_at,
             t.data_plane_id, t.revoked_at
@@ -139,8 +150,8 @@ $$;
 
 REVOKE ALL ON FUNCTION agent.lookup_enrolment_token(BYTEA) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION agent.lookup_enrolment_token(BYTEA) TO gitfrok_app;
-REVOKE ALL ON FUNCTION agent.claim_enrolment_token(BYTEA, TEXT, TIMESTAMPTZ) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION agent.claim_enrolment_token(BYTEA, TEXT, TIMESTAMPTZ) TO gitfrok_app;
+REVOKE ALL ON FUNCTION agent.claim_enrolment_token(BYTEA, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION agent.claim_enrolment_token(BYTEA, TEXT) TO gitfrok_app;
 
 GRANT USAGE ON SCHEMA agent TO gitfrok_app;
 GRANT SELECT, INSERT, UPDATE ON agent.enrolment_tokens, agent.data_planes TO gitfrok_app;

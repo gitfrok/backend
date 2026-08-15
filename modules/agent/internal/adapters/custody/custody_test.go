@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"reflect"
 	"strings"
 	"sync"
@@ -287,5 +288,52 @@ func TestStagingOntoAnExistingKeyNameRefused(t *testing.T) {
 	}
 	if _, err := bundle.Stage(context.Background(), "agent-ca-once"); !errors.Is(err, custody.ErrKeyExists) {
 		t.Errorf("Stage onto an existing name = %v, want ErrKeyExists", err)
+	}
+}
+
+// TestSerialsAreCollisionResistant: RFC 5280 §4.1.2.2 requires per-issuer
+// serial UNIQUENESS, not a sequence. Every serial the issuer draws must be
+// distinct, positive, and hold a signed 64-bit word — across a batch of
+// issuances there is no counter to collide.
+func TestSerialsAreCollisionResistant(t *testing.T) {
+	_, _, issuer, clk := newTestCA(t, "agent-ca-serials")
+	seen := map[string]bool{}
+	limit := new(big.Int).Lsh(big.NewInt(1), 63)
+	for range 64 {
+		_, leaf := issueOne(t, issuer, clk, time.Hour)
+		s := leaf.SerialNumber
+		if s.Sign() <= 0 || s.Cmp(limit) >= 0 {
+			t.Fatalf("serial %v outside the positive 63-bit range", s)
+		}
+		if seen[s.String()] {
+			t.Fatalf("serial %v drawn twice — serials are not collision-resistant", s)
+		}
+		seen[s.String()] = true
+	}
+}
+
+// TestSerialsDoNotRestartPerProcess: a per-process counter restarted at 2
+// under the SAME live root — a second control-plane incarnation replayed the
+// first's serials, violating RFC 5280 per-issuer uniqueness. Two fresh
+// issuers over the same bundle (the restart shape) must draw serials that
+// are distinct from each other's and far outside any small counter range.
+func TestSerialsDoNotRestartPerProcess(t *testing.T) {
+	_, bundle, issuerA, clk := newTestCA(t, "agent-ca-restart")
+	issuerB, err := custody.NewIssuer(bundle) // the "restarted process"
+	if err != nil {
+		t.Fatalf("NewIssuer: %v", err)
+	}
+	_, leafA := issueOne(t, issuerA, clk, time.Hour)
+	_, leafB := issueOne(t, issuerB, clk, time.Hour)
+
+	sa, sb := leafA.SerialNumber, leafB.SerialNumber
+	if sa.Cmp(sb) == 0 {
+		t.Fatalf("second issuer replayed the first's serial %v — serials restart per process", sa)
+	}
+	// Neither serial is a small counter value: the old posture counted from
+	// 2, so anything in that neighbourhood is the regression itself.
+	floor := big.NewInt(1 << 32)
+	if sa.Cmp(floor) <= 0 || sb.Cmp(floor) <= 0 {
+		t.Fatalf("serials %v / %v sit in the counter range — expected collision-resistant draws", sa, sb)
 	}
 }

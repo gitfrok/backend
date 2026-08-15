@@ -79,12 +79,22 @@ func TestExemptPathsAreNarrowAndEnumerated(t *testing.T) {
 		"SET search_path = pg_catalog, agent",
 		"REVOKE ALL ON FUNCTION agent.lookup_enrolment_token(BYTEA) FROM PUBLIC",
 		"GRANT EXECUTE ON FUNCTION agent.lookup_enrolment_token(BYTEA) TO gitfrok_app",
-		"REVOKE ALL ON FUNCTION agent.claim_enrolment_token(BYTEA, TEXT, TIMESTAMPTZ) FROM PUBLIC",
-		"GRANT EXECUTE ON FUNCTION agent.claim_enrolment_token(BYTEA, TEXT, TIMESTAMPTZ) TO gitfrok_app",
+		"REVOKE ALL ON FUNCTION agent.claim_enrolment_token(BYTEA, TEXT) FROM PUBLIC",
+		"GRANT EXECUTE ON FUNCTION agent.claim_enrolment_token(BYTEA, TEXT) TO gitfrok_app",
+		// The re-apply drops the superseded caller-clock signature first, or
+		// CREATE OR REPLACE would leave two claim functions beside each other.
+		"DROP FUNCTION IF EXISTS agent.claim_enrolment_token(BYTEA, TEXT, TIMESTAMPTZ);",
 	} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("migration missing %q", want)
 		}
+	}
+
+	// The claim clock is SERVER-SIDE (identity.resolve_active_credential
+	// precedent): no caller-supplied time parameter survives anywhere in the
+	// migration, and both the spend instant and the expiry guard read now().
+	if strings.Contains(sql, "p_now") {
+		t.Error("claim function still takes a caller-supplied clock (p_now) — the guard and spent_at must read now()")
 	}
 
 	// Both exempt paths match the UNIQUE hash column only — never a tenant
@@ -96,9 +106,10 @@ func TestExemptPathsAreNarrowAndEnumerated(t *testing.T) {
 	// The claim is one atomic conditional UPDATE, not a select-then-update.
 	for _, want := range []string{
 		"UPDATE agent.enrolment_tokens AS t",
+		"SET spent_at = now()",
 		"t.spent_at IS NULL",
 		"t.revoked_at IS NULL",
-		"t.expires_at > p_now",
+		"t.expires_at > now()",
 		"RETURNING",
 	} {
 		if !strings.Contains(sql, want) {

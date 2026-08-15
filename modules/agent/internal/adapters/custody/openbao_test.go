@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -27,16 +28,26 @@ import (
 // protocol, with a REAL in-memory ECDSA P-256 key doing the signing. It
 // stands in for the provider in CI; the optional live suite below speaks to
 // the real one.
+//
+// The sign endpoint emits the REAL wire shape: a TYPE-PREFIXED signature
+// string ("ecdsa-p256:<base64-DER>"), never bare base64 — a bare payload
+// here once masked a decoder that failed against every real response.
+// sigPrefix lets one test swing the prefix to another real shape
+// ("vault:v1:"). Likewise the keys endpoint emits the public half as a PEM
+// block (the real shape); barePub swings one test to the bare-base64
+// older-wire fallback.
 type transitServer struct {
-	t       *testing.T
-	mux     *http.ServeMux
-	keys    map[string]*ecdsa.PrivateKey
-	sealed  bool
-	lastTok string
+	t         *testing.T
+	mux       *http.ServeMux
+	keys      map[string]*ecdsa.PrivateKey
+	sealed    bool
+	lastTok   string
+	sigPrefix string
+	barePub   bool
 }
 
 func newTransitServer(t *testing.T) *transitServer {
-	s := &transitServer{t: t, mux: http.NewServeMux(), keys: map[string]*ecdsa.PrivateKey{}}
+	s := &transitServer{t: t, mux: http.NewServeMux(), keys: map[string]*ecdsa.PrivateKey{}, sigPrefix: "ecdsa-p256:"}
 	s.mux.HandleFunc("/v1/transit/keys/", s.handleKeys)
 	s.mux.HandleFunc("/v1/transit/sign/", s.handleSign)
 	return s
@@ -74,10 +85,18 @@ func (s *transitServer) handleKeys(w http.ResponseWriter, r *http.Request) {
 			s.refuse(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// The REAL transit wire shape: the public half arrives as a PEM
+		// block, not bare base64. The mock emits what the service serves —
+		// a bare-base64 mock masked a decoder that failed on every real
+		// response until the live round-trip caught it.
+		pub := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+		if s.barePub {
+			pub = base64.StdEncoding.EncodeToString(der) // older-wire fallback the decoder keeps
+		}
 		out, _ := json.Marshal(map[string]any{"data": map[string]any{
 			"type": "ecdsa-p256", "exportable": false,
 			"keys": map[string]any{"1": map[string]string{
-				"public_key": base64.StdEncoding.EncodeToString(der),
+				"public_key": pub,
 			}},
 		}})
 		_, _ = w.Write(out)
@@ -120,13 +139,20 @@ func (s *transitServer) handleSign(w http.ResponseWriter, r *http.Request) {
 		Input         string `json:"input"`
 		HashAlgorithm string `json:"hash_algorithm"`
 		Marshaling    string `json:"marshaling_algorithm"`
+		Prehashed     bool   `json:"prehashed"`
+		SignatureAlg  string `json:"signature_algorithm"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		s.refuse(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if body.HashAlgorithm != "none" || body.Marshaling != "asn1" {
-		s.refuse(w, http.StatusBadRequest, "digest-in asn1-out is the only shape the CA signs with")
+	// The REAL provider refuses hash_algorithm "none" without prehashed and
+	// its literal pkcs1v15 companion — the mock enforces the same contract,
+	// so a request that the real service rejects fails here first.
+	if body.HashAlgorithm != "none" || body.Marshaling != "asn1" ||
+		!body.Prehashed || body.SignatureAlg != "pkcs1v15" {
+		s.refuse(w, http.StatusBadRequest,
+			"hash_algorithm=none requires both prehashed=true and signature_algorithm=pkcs1v15")
 		return
 	}
 	digest, err := base64.StdEncoding.DecodeString(body.Input)
@@ -139,8 +165,9 @@ func (s *transitServer) handleSign(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The REAL wire shape: a type prefix, then the base64 DER payload.
 	out, _ := json.Marshal(map[string]any{"data": map[string]string{
-		"signature": base64.StdEncoding.EncodeToString(sig),
+		"signature": s.sigPrefix + base64.StdEncoding.EncodeToString(sig),
 	}})
 	_, _ = w.Write(out)
 }
@@ -150,6 +177,9 @@ func newWireSigner(t *testing.T, s *transitServer) *custody.OpenBao {
 	signer, err := custody.NewOpenBao(custody.Config{
 		Address: s.ts(t).URL,
 		Token:   custody.StaticToken("wire-test-token"),
+		// The in-process stand-in serves plain HTTP on loopback; the flag is
+		// the ONLY shape under which NewOpenBao accepts that.
+		AllowHTTPForLocalTests: true,
 	})
 	if err != nil {
 		t.Fatalf("NewOpenBao: %v", err)
@@ -228,6 +258,27 @@ func TestOpenBaoPublicKeyPosture(t *testing.T) {
 	}
 }
 
+// TestOpenBaoPublicKeyBareBase64Fallback covers the older wire shape some
+// providers serve: the public half as bare base64 DER instead of a PEM
+// block. The decoder keeps accepting it.
+func TestOpenBaoPublicKeyBareBase64Fallback(t *testing.T) {
+	srv := newTransitServer(t)
+	srv.barePub = true
+	signer := newWireSigner(t, srv)
+	ctx := context.Background()
+
+	if _, err := signer.GenerateKey(ctx, "bare-key"); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	pub, err := signer.PublicKey(ctx, "bare-key")
+	if err != nil {
+		t.Fatalf("PublicKey over bare-base64 wire: %v", err)
+	}
+	if pub.Curve != elliptic.P256() {
+		t.Errorf("public key curve = %v, want P-256", pub.Curve.Params().Name)
+	}
+}
+
 // TestOpenBaoSignDigestWire proves digest-in, ASN.1-signature-out end to
 // end over the wire: the signature the signer returns verifies against the
 // transit server's real key.
@@ -254,6 +305,90 @@ func TestOpenBaoSignDigestWire(t *testing.T) {
 
 	if _, err := signer.SignDigest(ctx, "sign-key", make([]byte, 31)); err == nil {
 		t.Error("a 31-byte digest was accepted, want refusal")
+	}
+}
+
+// TestOpenBaoSignDigestMultiPartPrefix swings the wire to another real
+// prefix shape ("vault:v1:<b64>"): the decoder takes the payload after the
+// LAST ':', whatever names the type.
+func TestOpenBaoSignDigestMultiPartPrefix(t *testing.T) {
+	srv := newTransitServer(t)
+	srv.sigPrefix = "vault:v1:"
+	signer := newWireSigner(t, srv)
+	ctx := context.Background()
+
+	if _, err := signer.GenerateKey(ctx, "prefix-key"); err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	digest := sha256.Sum256([]byte("multi-part prefix digest"))
+	sig, err := signer.SignDigest(ctx, "prefix-key", digest[:])
+	if err != nil {
+		t.Fatalf("SignDigest over a vault:v1: prefixed signature: %v", err)
+	}
+	pub, err := signer.PublicKey(ctx, "prefix-key")
+	if err != nil {
+		t.Fatalf("PublicKey: %v", err)
+	}
+	if !ecdsa.VerifyASN1(pub, digest[:], sig) {
+		t.Error("signature decoded from a multi-part prefix does not verify")
+	}
+}
+
+// TestNewOpenBaoRequiresHTTPS is the transport posture (finding 8): the
+// signer refuses every non-https address; plain http survives ONLY on
+// loopback and ONLY behind the explicit local-test flag.
+func TestNewOpenBaoRequiresHTTPS(t *testing.T) {
+	tok := custody.StaticToken("t")
+	for _, tc := range []struct {
+		name    string
+		addr    string
+		devFlag bool
+		ok      bool
+	}{
+		{"https is always fine", "https://openbao.control-plane.svc:8200", false, true},
+		{"http refused by default", "http://openbao.control-plane.svc:8200", false, false},
+		{"http refused off-loopback even with the flag", "http://10.0.0.5:8200", true, false},
+		{"http on loopback needs the flag", "http://127.0.0.1:18200", false, false},
+		{"http on loopback with the flag", "http://127.0.0.1:18200", true, true},
+		{"http on localhost with the flag", "http://localhost:18200", true, true},
+		{"shapeless address refused", "openbao.svc:8200", true, false},
+	} {
+		_, err := custody.NewOpenBao(custody.Config{Address: tc.addr, Token: tok, AllowHTTPForLocalTests: tc.devFlag})
+		if tc.ok && err != nil {
+			t.Errorf("%s: NewOpenBao(%q, flag=%t) = %v, want success", tc.name, tc.addr, tc.devFlag, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("%s: NewOpenBao(%q, flag=%t) succeeded, want a refusal", tc.name, tc.addr, tc.devFlag)
+		}
+	}
+}
+
+// TestKubernetesAuthRequiresHTTPS applies the same posture to the login
+// endpoint: a service-account exchange over plain http to a non-loopback
+// host is refused before any request leaves the process.
+func TestKubernetesAuthRequiresHTTPS(t *testing.T) {
+	for _, tc := range []struct {
+		addr    string
+		devFlag bool
+		ok      bool
+	}{
+		{"http://10.0.0.5:8200", false, false},
+		{"http://10.0.0.5:8200", true, false},
+		{"http://127.0.0.1:8200", false, false},
+		{"https://openbao.control-plane.svc:8200", false, true}, // address ok; fails later on the JWT file
+	} {
+		auth := custody.KubernetesAuth{Address: tc.addr, Role: "r", JWTFile: "/nonexistent-jwt-file", AllowHTTPForLocalTests: tc.devFlag}
+		_, err := auth.Token(context.Background())
+		if err == nil {
+			t.Fatalf("Token(%q, flag=%t) succeeded, want a refusal", tc.addr, tc.devFlag)
+		}
+		rejectsAddress := strings.Contains(err.Error(), "https") || strings.Contains(err.Error(), "not an absolute URL")
+		if tc.ok && rejectsAddress {
+			t.Errorf("Token(%q, flag=%t) refused the ADDRESS: %v — the address is the allowed shape", tc.addr, tc.devFlag, err)
+		}
+		if !tc.ok && !rejectsAddress {
+			t.Errorf("Token(%q, flag=%t) = %v, want the address refusal", tc.addr, tc.devFlag, err)
+		}
 	}
 }
 
@@ -300,11 +435,13 @@ func TestKubernetesAuthExchangesServiceAccountJWT(t *testing.T) {
 
 	srv := newTransitServer(t)
 	signer, err := custody.NewOpenBao(custody.Config{
-		Address: srv.ts(t).URL,
+		Address:                srv.ts(t).URL,
+		AllowHTTPForLocalTests: true,
 		Token: custody.KubernetesAuth{
-			Address: login.URL,
-			Role:    "gitfrok-agent-ca",
-			JWTFile: jwtFile,
+			Address:                login.URL,
+			Role:                   "gitfrok-agent-ca",
+			JWTFile:                jwtFile,
+			AllowHTTPForLocalTests: true,
 		},
 	})
 	if err != nil {
@@ -344,6 +481,11 @@ func TestLiveOpenBaoCustodyRoundTrip(t *testing.T) {
 		Address: addr,
 		Mount:   envOr("GITFROK_TEST_OPENBAO_MOUNT", "transit"),
 		Token:   custody.StaticToken(token),
+		// The dev cluster serves plain HTTP on a loopback port-forward
+		// (svc/openbao is http inside the cluster); the flag allows exactly
+		// that loopback shape and nothing else — an https address needs no
+		// flag at all.
+		AllowHTTPForLocalTests: true,
 	})
 	if err != nil {
 		t.Fatalf("NewOpenBao: %v", err)

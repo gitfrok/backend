@@ -11,6 +11,7 @@ import (
 
 	"github.com/gitfrok/backend/modules/agent/api"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/memory"
+	"github.com/gitfrok/backend/modules/agent/internal/domain"
 	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	platformaudit "github.com/gitfrok/backend/platform/audit"
@@ -81,6 +82,76 @@ type stubPDP struct {
 func (p *stubPDP) Decide(_ context.Context, req policyapi.Request) (policyapi.Decision, error) {
 	p.last = req
 	return policyapi.Decision{Allowed: p.allow}, nil
+}
+
+// failingRegistry is a registry whose SetCertificate can be made to fail —
+// the post-spend registry-outage shape the AC6 extension covers.
+type failingRegistry struct {
+	*memory.Store
+	failSetCertificate bool
+}
+
+func (r *failingRegistry) SetCertificate(ctx context.Context, tenantID, id, certID string, expiresAt time.Time) error {
+	if r.failSetCertificate {
+		return errors.New("registry: unavailable")
+	}
+	return r.Store.SetCertificate(ctx, tenantID, id, certID, expiresAt)
+}
+
+// flakyBus forwards to a captureBus but fails the publish of ONE action —
+// the audit-outage shape for the post-spend tail tests.
+type flakyBus struct {
+	inner      *captureBus
+	failAction string
+}
+
+func (b *flakyBus) Publish(ctx context.Context, e bus.Event) error {
+	if a, ok := e.(interface{ Action() string }); ok && a.Action() == b.failAction {
+		return errors.New("bus: unavailable")
+	}
+	return b.inner.Publish(ctx, e)
+}
+func (b *flakyBus) Subscribe(topic string, h bus.Handler) { b.inner.Subscribe(topic, h) }
+
+// racedTokens simulates the claim losing its race mid-Enrol: the pre-claim
+// lookup serves the pristine token, the atomic claim refuses, and the
+// post-claim re-read serves the row as the winner (or the revocation or the
+// expiry) left it — which is exactly the state the refusal must name.
+type racedTokens struct {
+	*memory.Store
+	post    domain.Token
+	flipped bool
+}
+
+func (s *racedTokens) TokenByHash(ctx context.Context, hash [32]byte) (domain.Token, bool, error) {
+	if s.flipped {
+		return s.post, true, nil
+	}
+	return s.Store.TokenByHash(ctx, hash)
+}
+
+func (s *racedTokens) ClaimToken(_ context.Context, _ [32]byte, _ string, _ time.Time) (domain.Token, bool, error) {
+	s.flipped = true
+	return domain.Token{}, false, nil
+}
+
+// wiredService composes one Service over caller-chosen doubles with the
+// harness's clock and knobs — the post-spend recovery tests need stores and
+// buses the stock harness does not own.
+func wiredService(h *harness, tokens TokenStore, registry RegistryStore, b bus.Bus) *Service {
+	cfg := api.Config{
+		CertLifetime:          time.Hour,
+		RotationLead:          20 * time.Minute,
+		RotationRetryInterval: time.Minute,
+		StaleAfter:            5 * time.Minute,
+		TokenMaxLifetime:      24 * time.Hour,
+		HeartbeatInterval:     30 * time.Second,
+		ClockSkewLeeway:       5 * time.Minute,
+		Now:                   h.clock.now,
+	}
+	return New(h.pdp, b, h.issuer, tokens, registry, cfg, func(f string, a ...any) {
+		fmt.Fprintf(h.logs, f+"\n", a...)
+	})
 }
 
 // fakeIssuer mints certificates named "leaf:<id>". Chain trust and expiry are test knobs.
@@ -333,6 +404,155 @@ func TestEnrolReleasedClaimStillHonoursRevocation(t *testing.T) {
 	_, err := h.svc.Enrol(context.Background(), api.EnrolRequest{Token: secret})
 	if got := refusedReason(t, err); got != api.RefusalTokenRevoked {
 		t.Fatalf("retry after revocation = %q, want TOKEN_REVOKED", got)
+	}
+}
+
+// AC6 extended to the WHOLE post-spend tail: a registry failure AFTER a
+// successful issuance must not leave the token spent. The claim is released,
+// the failure audited, and the retry completes the SAME identity.
+func TestEnrolRegistryFailureAfterIssuanceReleasesClaim(t *testing.T) {
+	h := newHarness(t)
+	reg := &failingRegistry{Store: memory.New(), failSetCertificate: true}
+	svc := wiredService(h, memory.New(), reg, h.bus)
+	_, secret, err := svc.IssueEnrolmentToken(operatorCtx("acme", "op-1"), "acme", "op-1", time.Hour)
+	if err != nil {
+		t.Fatalf("IssueEnrolmentToken: %v", err)
+	}
+	ctx := context.Background()
+
+	_, err = svc.Enrol(ctx, api.EnrolRequest{Token: secret, Cloud: "GKE", Region: "eu-west1"})
+	if got := refusedReason(t, err); got != api.RefusalDenied {
+		t.Fatalf("failed Enrol reason = %q, want the coarse DENIED", got)
+	}
+	// The failure is audited under its own reason.
+	recs := h.bus.of(platformaudit.ActionAgentEnrolment)
+	if len(recs) != 1 {
+		t.Fatalf("enrolment audit records = %d, want 1 for the failed attempt", len(recs))
+	}
+	if ev := recs[0].(platformaudit.AgentEnrolment); ev.Reason != "certificate_record_failed" || ev.Outcome != "DENIED" {
+		t.Fatalf("failure record = %+v, want DENIED/certificate_record_failed", ev)
+	}
+
+	// The partial enrolment names the identity the retry must re-bind.
+	fleet, err := svc.Fleet(operatorCtx("acme", "op-1"), "acme", "op-1")
+	if err != nil {
+		t.Fatalf("Fleet: %v", err)
+	}
+	var partialID string
+	for _, v := range fleet {
+		if v.Plane.ID != "" {
+			partialID = v.Plane.ID
+		}
+	}
+	if partialID == "" {
+		t.Fatalf("fleet after failed enrolment = %+v, want the partial plane row", fleet)
+	}
+
+	// Registry recovers: the retry is admitted and re-binds the SAME identity.
+	reg.failSetCertificate = false
+	enrolment, err := svc.Enrol(ctx, api.EnrolRequest{Token: secret, Cloud: "GKE", Region: "eu-west1"})
+	if err != nil {
+		t.Fatalf("retry Enrol after released claim: %v", err)
+	}
+	if enrolment.DataPlaneID != partialID {
+		t.Fatalf("retry minted %q — the released claim's identity %q was not re-bound (ADR-0060)",
+			enrolment.DataPlaneID, partialID)
+	}
+	// Single use holds after the recovered retry.
+	if _, err := svc.Enrol(ctx, api.EnrolRequest{Token: secret}); refusedReason(t, err) != api.RefusalTokenSpent {
+		t.Fatalf("post-success replay = %v, want TOKEN_SPENT", err)
+	}
+}
+
+// AC6 extended to the audit tail: a publish failure after issuance AND the
+// certificate record releases the claim the same way — the token is not left
+// spent because the bus was down.
+func TestEnrolAuditFailureAfterIssuanceReleasesClaim(t *testing.T) {
+	h := newHarness(t)
+	inner := &captureBus{}
+	fb := &flakyBus{inner: inner, failAction: platformaudit.ActionAgentCertificateIssued}
+	svc := wiredService(h, memory.New(), memory.New(), fb)
+	_, secret, err := svc.IssueEnrolmentToken(operatorCtx("acme", "op-1"), "acme", "op-1", time.Hour)
+	if err != nil {
+		t.Fatalf("IssueEnrolmentToken: %v", err)
+	}
+	ctx := context.Background()
+
+	_, err = svc.Enrol(ctx, api.EnrolRequest{Token: secret, Cloud: "GKE", Region: "eu-west1"})
+	if got := refusedReason(t, err); got != api.RefusalDenied {
+		t.Fatalf("failed Enrol reason = %q, want the coarse DENIED", got)
+	}
+	// The DENIED recovery record reached the bus under its own reason.
+	recs := inner.of(platformaudit.ActionAgentEnrolment)
+	var denied *platformaudit.AgentEnrolment
+	for _, e := range recs {
+		ev := e.(platformaudit.AgentEnrolment)
+		if ev.Outcome == "DENIED" {
+			denied = &ev
+		}
+	}
+	if denied == nil || denied.Reason != "certificate_audit_failed" {
+		t.Fatalf("DENIED record = %+v, want reason certificate_audit_failed", denied)
+	}
+	partialID := denied.DataPlaneID
+	if partialID == "" {
+		t.Fatal("DENIED record carries no data-plane identity — the claim was not attributed")
+	}
+
+	// Bus recovers: the retry is admitted and re-binds the SAME identity.
+	fb.failAction = ""
+	enrolment, err := svc.Enrol(ctx, api.EnrolRequest{Token: secret, Cloud: "GKE", Region: "eu-west1"})
+	if err != nil {
+		t.Fatalf("retry Enrol after released claim: %v", err)
+	}
+	if enrolment.DataPlaneID != partialID {
+		t.Fatalf("retry minted %q — the released claim's identity %q was not re-bound (ADR-0060)",
+			enrolment.DataPlaneID, partialID)
+	}
+}
+
+// A refused claim names its TRUE cause: the re-read row distinguishes a
+// revocation and an expiry from the one true single-use race — each audited
+// under its own reason (SPEC-0042 finding 4).
+func TestEnrolClaimFailureNamesItsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*domain.Token, time.Time)
+		want   api.RefusalReason
+	}{
+		{"revoked while claiming", func(t *domain.Token, now time.Time) { t.RevokedAt = now }, api.RefusalTokenRevoked},
+		{"expired while claiming", func(t *domain.Token, now time.Time) { t.ExpiresAt = now.Add(-time.Minute) }, api.RefusalTokenExpired},
+		{"true single-use race", func(t *domain.Token, now time.Time) { t.SpentAt = now }, api.RefusalTokenSpent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			tokens := &racedTokens{Store: memory.New()}
+			svc := wiredService(h, tokens, memory.New(), h.bus)
+			_, secret, err := svc.IssueEnrolmentToken(operatorCtx("acme", "op-1"), "acme", "op-1", time.Hour)
+			if err != nil {
+				t.Fatalf("IssueEnrolmentToken: %v", err)
+			}
+			// The post-claim row: the stored token as the winner left it.
+			stored, ok, err := tokens.Store.TokenByHash(context.Background(), domain.HashSecret(secret))
+			if err != nil || !ok {
+				t.Fatalf("stored token: ok=%t err=%v", ok, err)
+			}
+			tc.mutate(&stored, h.clock.now())
+			tokens.post = stored
+
+			_, err = svc.Enrol(context.Background(), api.EnrolRequest{Token: secret})
+			if got := refusedReason(t, err); got != tc.want {
+				t.Fatalf("refusal reason = %q, want %q", got, tc.want)
+			}
+			// And the audit trail names the same cause.
+			recs := h.bus.of(platformaudit.ActionAgentEnrolment)
+			if len(recs) != 1 {
+				t.Fatalf("enrolment audit records = %d, want exactly 1", len(recs))
+			}
+			if ev := recs[0].(platformaudit.AgentEnrolment); ev.Reason != string(tc.want) || ev.Outcome != "DENIED" {
+				t.Fatalf("audit record = %+v, want DENIED/%s", ev, tc.want)
+			}
+		})
 	}
 }
 

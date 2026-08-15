@@ -153,13 +153,18 @@ func (s *Store) TokensByTenant(ctx context.Context, tenantID string) ([]domain.T
 // claimed is false for anything the guards refuse: spent, revoked, expired
 // or unknown. The function never overwrites a recorded data_plane_id, so a
 // released claim re-binds its retry to the SAME identity (ADR-0060).
-func (s *Store) ClaimToken(ctx context.Context, hash [32]byte, dataPlaneID string, now time.Time) (domain.Token, bool, error) {
+//
+// The expiry guard and the spend instant are SERVER-SIDE now() — the
+// identity module's resolve_active_credential precedent (ADR-0043) — so the
+// clock parameter is interface compatibility with the memory store only;
+// the database never trusts a caller-supplied time here.
+func (s *Store) ClaimToken(ctx context.Context, hash [32]byte, dataPlaneID string, _ time.Time) (domain.Token, bool, error) {
 	var tok domain.Token
 	err := s.pool.InTxUnscoped(ctx, unscopedTokenReason, func(ctx context.Context, tx pgx.Tx) error {
 		return scanToken(tx.QueryRow(ctx,
 			`SELECT id, tenant_id, issued_by, token_hash,
 			        issued_at, expires_at, spent_at, data_plane_id, revoked_at
-			   FROM agent.claim_enrolment_token($1, $2, $3)`, hash[:], dataPlaneID, now,
+			   FROM agent.claim_enrolment_token($1, $2)`, hash[:], dataPlaneID,
 		), &tok)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
