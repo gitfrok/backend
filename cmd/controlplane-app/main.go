@@ -111,7 +111,18 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		return nil, fmt.Errorf("agent ca: %w", err)
 	}
 
-	svc := agent.New(pdp, b, ca, cfg.enrolment, logf)
+	// The store selection mirrors the audit-trail branch above: with
+	// GITFROK_DATABASE_URL the agent's enrolment state is durable — a spent
+	// token stays spent across a kill-and-restart, staleness reads durable
+	// liveness (T-0036, SPEC-0042 AC1/AC2). Without it the dev/test
+	// in-memory composition stays the default (ADR-0062 decision 1).
+	var svc *agent.Service
+	if pool != nil {
+		stores := agent.NewPostgresStores(pool)
+		svc = agent.NewWithStores(pdp, b, ca, stores, stores, cfg.enrolment, logf)
+	} else {
+		svc = agent.New(pdp, b, ca, cfg.enrolment, logf)
+	}
 
 	// Residency composition (T-0033, SPEC-0040): the witnessed placement facts the
 	// evidence pack's residency section cites live on the tenant's audit trail. With

@@ -14,10 +14,12 @@ import (
 	agentgrpc "github.com/gitfrok/backend/modules/agent/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/memory"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/pki"
+	agentpg "github.com/gitfrok/backend/modules/agent/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/agent/internal/app"
 	meteringapi "github.com/gitfrok/backend/modules/metering/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
+	"github.com/gitfrok/backend/platform/db"
 )
 
 // Service is the composed context, aliased so cmd/ can hold it without naming a package
@@ -32,12 +34,37 @@ type GRPCServer = agentgrpc.Gateway
 // trust pool to the TLS configuration.
 type DevCA = pki.DevCA
 
-// New builds the context on the in-memory stores. A Postgres adapter is future work; the
-// stores are ports, so that is a composition-line change (invariant 13 of the module).
+// TokenStore and RegistryStore are the persistence ports, aliased so cmd/ can
+// name them without reaching into internal/.
+type (
+	TokenStore    = app.TokenStore
+	RegistryStore = app.RegistryStore
+)
+
+// New builds the context on the in-memory stores: the dev/test default
+// (ADR-0062 decision 1 — the fakes stay as test doubles, never as the
+// production path). A deployment that wants enrolment state to outlive the
+// process composes NewWithStores with NewPostgresStores instead.
 // The certificate issuer is injected: dev/test compositions pass NewDevCA, a custody-backed
 // issuer is an ADR-0057 follow-up, and the context cannot tell the difference.
 func New(pdp policyapi.DecisionPoint, events bus.Bus, issuer api.CertificateIssuer, cfg api.Config, logf func(format string, args ...any)) *Service {
 	return app.New(pdp, events, issuer, memory.New(), memory.New(), cfg, logf)
+}
+
+// NewWithStores builds the context on caller-supplied stores (T-0036,
+// SPEC-0042): with NewPostgresStores, a spent token stays spent across a
+// kill-and-restart and the registry's staleness machine reads durable
+// liveness — enrolment state becomes a property of the platform, not of the
+// process (ADR-0062).
+func NewWithStores(pdp policyapi.DecisionPoint, events bus.Bus, issuer api.CertificateIssuer, tokens TokenStore, registry RegistryStore, cfg api.Config, logf func(format string, args ...any)) *Service {
+	return app.New(pdp, events, issuer, tokens, registry, cfg, logf)
+}
+
+// NewPostgresStores returns the durable token store and data-plane registry
+// over pool. One value fills both ports: both halves live in one migration,
+// one schema and one isolation story.
+func NewPostgresStores(pool *db.Pool) *agentpg.Store {
+	return agentpg.New(pool)
 }
 
 // NewDevCA generates the DEV/TEST control-plane CA: an in-process key that never leaves
