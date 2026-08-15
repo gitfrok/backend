@@ -19,6 +19,7 @@ import (
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/memory"
 	"github.com/gitfrok/backend/modules/agent/internal/adapters/pki"
 	agentpg "github.com/gitfrok/backend/modules/agent/internal/adapters/postgres"
+	"github.com/gitfrok/backend/modules/agent/internal/adapters/releasebundle"
 	"github.com/gitfrok/backend/modules/agent/internal/app"
 	meteringapi "github.com/gitfrok/backend/modules/metering/api"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
@@ -51,6 +52,12 @@ type (
 	RegistryStore = app.RegistryStore
 )
 
+// PostgresStores is the durable store set, aliased so cmd/ can hold the one
+// value NewPostgresStores returns and attach its later seams — the release
+// trust applied registry among them (T-0041, SPEC-0045 AC2) — without naming
+// a package under internal/.
+type PostgresStores = agentpg.Store
+
 // New builds the context on the in-memory stores: the dev/test default
 // (ADR-0062 decision 1 — the fakes stay as test doubles, never as the
 // production path). A deployment that wants enrolment state to outlive the
@@ -74,7 +81,7 @@ func NewWithStores(pdp policyapi.DecisionPoint, events bus.Bus, issuer api.Certi
 // NewPostgresStores returns the durable token store and data-plane registry
 // over pool. One value fills both ports: both halves live in one migration,
 // one schema and one isolation story.
-func NewPostgresStores(pool *db.Pool) *agentpg.Store {
+func NewPostgresStores(pool *db.Pool) *PostgresStores {
 	return agentpg.New(pool)
 }
 
@@ -211,4 +218,69 @@ func AttachMetering(srv *GRPCServer, sink meteringapi.Sink, envelopes meteringap
 // rollout rather than silently withholding rotation state.
 func AttachCATrustBundle(srv *GRPCServer, source api.CATrustBundleSource) {
 	srv.AttachCATrustBundle(source)
+}
+
+// ReleaseTrustBundle is the control plane's versioned release-signing trust
+// bundle (T-0041, SPEC-0045, ADR-0065 decision 2): the cosign release-signing
+// verification keys of ADR-0044, staged and rotated with the same
+// dual-validate overlap as the custody bundle but named, persisted and
+// distributed strictly apart from it — the wire field is
+// DesiredState.release_trust_bundle, never ca_trust_bundle. Aliased so cmd/
+// can hold one without naming a package under internal/.
+type ReleaseTrustBundle = releasebundle.Bundle
+
+// ReleaseTrustBundleConfig wires the release trust bundle's durable state and
+// first startup (T-0041, SPEC-0045 AC2): SnapshotFile is where the bundle's
+// revision epoch lives across a restart (required — the channel's additive
+// field must never restart its epoch at one), and SeedKeyID/SeedPEMFile
+// bootstrap the very first startup when no snapshot exists yet (a PUBLIC key;
+// private material is refused by the bundle's parser). Composed apart from
+// the custody snapshot of SPEC-0044: different file, different format marker,
+// different config.
+type ReleaseTrustBundleConfig struct {
+	SnapshotFile string
+	SeedKeyID    string
+	SeedPEMFile  string
+	Now          func() time.Time
+	Logf         func(format string, args ...any)
+}
+
+// NewReleaseTrustBundle builds the restart-proof release trust bundle over a
+// file snapshot store. Every state change persists through the change hook
+// wired BEFORE the first state change, so a restart always finds the newest
+// window state the fleet saw; a corrupt snapshot fails the rollout rather
+// than falling through to bootstrap.
+func NewReleaseTrustBundle(cfg ReleaseTrustBundleConfig) (*ReleaseTrustBundle, error) {
+	store, err := releasebundle.NewFileSnapshotStore(cfg.SnapshotFile)
+	if err != nil {
+		return nil, fmt.Errorf("release trust bundle: %w", err)
+	}
+	bundle, err := releasebundle.Compose(releasebundle.ComposeConfig{
+		SnapshotFile: cfg.SnapshotFile,
+		SeedKeyID:    cfg.SeedKeyID,
+		SeedPEMFile:  cfg.SeedPEMFile,
+		Now:          cfg.Now,
+		Logf:         cfg.Logf,
+	}, store)
+	if err != nil {
+		return nil, fmt.Errorf("release trust bundle: %w", err)
+	}
+	return bundle, nil
+}
+
+// AttachReleaseTrustBundle wires the release-trust rotation seam onto an
+// established gateway (T-0041, SPEC-0045 AC2): every advance of the bundle's
+// staging revision is delivered to each stream as
+// DesiredState.release_trust_bundle. Post-construction like the other seams.
+func AttachReleaseTrustBundle(srv *GRPCServer, source api.ReleaseTrustBundleSource) {
+	srv.AttachReleaseTrustBundle(source)
+}
+
+// AttachReleaseTrustApplied wires the applied registry that records, keyed by
+// data_plane_id (ADR-0065 decision 3), the bundle revision each plane acked
+// (T-0041, SPEC-0045 AC2). Post-construction: the durable registry is the
+// Postgres store when the plane's stores are durable, absent in the dev
+// in-memory composition (the gateway tolerates no registry).
+func AttachReleaseTrustApplied(srv *GRPCServer, registry api.ReleaseTrustAppliedRegistry) {
+	srv.AttachReleaseTrustApplied(registry)
 }

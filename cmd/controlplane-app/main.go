@@ -60,9 +60,16 @@ type agentDoor struct {
 	usage     *ggrpc.Server // the UsageService door, when GITFROK_USAGE_GRPC_ADDR is set
 	residency *ggrpc.Server // the residency Declare door, when GITFROK_RESIDENCY_GRPC_ADDR is set
 	pool      *db.Pool
+	// releaseStop ends the release trust bundle's staging-directory reconcile
+	// loop with the door (T-0041, SPEC-0045 AC2). nil when distribution is
+	// not configured.
+	releaseStop chan struct{}
 }
 
 func (d *agentDoor) close() {
+	if d.releaseStop != nil {
+		close(d.releaseStop)
+	}
 	d.server.Stop()
 	if d.usage != nil {
 		d.usage.Stop()
@@ -139,8 +146,9 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 	// liveness (T-0036, SPEC-0042 AC1/AC2). Without it the dev/test
 	// in-memory composition stays the default (ADR-0062 decision 1).
 	var svc *agent.Service
+	var stores *agent.PostgresStores
 	if pool != nil {
-		stores := agent.NewPostgresStores(pool)
+		stores = agent.NewPostgresStores(pool)
 		svc = agent.NewWithStores(pdp, b, ca, stores, stores, cfg.enrolment, logf)
 	} else {
 		svc = agent.New(pdp, b, ca, cfg.enrolment, logf)
@@ -190,6 +198,79 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 	// bundle's staged state — a staged root, a completed removal — is
 	// delivered to each stream as DesiredState.ca_trust_bundle.
 	agent.AttachCATrustBundle(gateway, ca.Bundle())
+
+	// Release trust distribution (T-0041, SPEC-0045 AC2, ADR-0065 decision 2):
+	// the versioned RELEASE trust bundle — the cosign release-signing keys of
+	// ADR-0044 — rides the same reconcile channel on its OWN desired-state
+	// field (release_trust_bundle), composed strictly apart from the CA bundle
+	// above: different config, different snapshot file, different wire field.
+	// Unconfigured is an honest absence: the additive field stays empty and
+	// the door logs it loudly — never an accidental empty-bundle distribution.
+	var releaseStop chan struct{}
+	releaseCfg, err := loadReleaseTrustConfig(os.Getenv)
+	if err != nil {
+		if pool != nil {
+			pool.Close()
+		}
+		return nil, err
+	}
+	if releaseCfg.enabled {
+		rtb, err := agent.NewReleaseTrustBundle(agent.ReleaseTrustBundleConfig{
+			SnapshotFile: releaseCfg.snapshotFile,
+			SeedKeyID:    releaseCfg.seedID,
+			SeedPEMFile:  releaseCfg.seedPEMFile,
+			Now:          time.Now,
+			Logf:         logf,
+		})
+		if err != nil {
+			if pool != nil {
+				pool.Close()
+			}
+			return nil, err
+		}
+		agent.AttachReleaseTrustBundle(gateway, rtb)
+		// The applied registry records, keyed by data_plane_id, the bundle
+		// revision each plane acked. Durable whenever the plane's stores are;
+		// absent in the dev in-memory composition (the gateway tolerates no
+		// registry).
+		if stores != nil {
+			agent.AttachReleaseTrustApplied(gateway, stores)
+		}
+		// The staged-key actuation seam: the staging directory declares the
+		// desired live key set and this loop converges the bundle toward it.
+		// A first pass that fails fails the rollout — a configured staging
+		// directory that cannot be read or holds unparseable material is a
+		// configuration error, not a runtime surprise; later passes log loudly
+		// and retry, because a mid-write declaration is legitimately transient.
+		if releaseCfg.stagingDir != "" {
+			if err := rtb.ReconcileDir(releaseCfg.stagingDir); err != nil {
+				if pool != nil {
+					pool.Close()
+				}
+				return nil, fmt.Errorf("release trust staging directory %q is unusable at startup: %w", releaseCfg.stagingDir, err)
+			}
+			releaseStop = make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(releaseCfg.reconcileEvery)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-releaseStop:
+						return
+					case <-ticker.C:
+						if err := rtb.ReconcileDir(releaseCfg.stagingDir); err != nil {
+							logf("release trust: staging reconcile %q failed: %v — retried every %s", releaseCfg.stagingDir, err, releaseCfg.reconcileEvery)
+						}
+					}
+				}
+			}()
+		}
+		logf("release trust bundle: distribution ENABLED (snapshot %s, seed %s, staging dir %q)",
+			releaseCfg.snapshotFile, orNone(releaseCfg.seedID), orNone(releaseCfg.stagingDir))
+	} else {
+		logf("release trust bundle: distribution NOT CONFIGURED (%s unset) — DesiredState.release_trust_bundle stays empty",
+			releaseTrustSnapshotFileEnv)
+	}
 
 	// Metering composition (T-0034, SPEC-0041, ADR-0061): the control plane counts from
 	// the telemetry it RECEIVES on the agent channel. The gateway forwards every
@@ -284,7 +365,16 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		}
 	}()
 	fmt.Printf("controlplane-app: AgentGateway listening on %s (custody-backed CA)\n", cfg.grpcAddr)
-	return &agentDoor{server: server, usage: usageServer, residency: residencyServer, pool: pool}, nil
+	return &agentDoor{server: server, usage: usageServer, residency: residencyServer, pool: pool, releaseStop: releaseStop}, nil
+}
+
+// orNone renders a configuration value for a log line: the value itself, or
+// the word none — an unset optional is a posture, named as one.
+func orNone(v string) string {
+	if v == "" {
+		return "none"
+	}
+	return v
 }
 
 func main() {
