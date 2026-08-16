@@ -15,16 +15,21 @@ import (
 // reports, by SPEC-0024 identity; an UNAVAILABLE comparison is reported with
 // its reason, never degraded to an empty result set.
 
-// fakeResolver answers merge-base resolution from test state.
+// fakeResolver answers merge-base resolution from test state. It captures
+// the roles it was asked under: storage decides repo.read over the subject
+// it is handed, so the threading of the actor's verified roles is part of
+// the contract under test (north-star Stage D).
 type fakeResolver struct {
 	base  string
 	found bool
 	err   error
 	calls int
+	roles []string
 }
 
-func (f *fakeResolver) MergeBase(_ context.Context, _, _, _, _, _ string) (string, bool, error) {
+func (f *fakeResolver) MergeBase(_ context.Context, _, _, _ string, actorRoles []string, _, _ string) (string, bool, error) {
 	f.calls++
+	f.roles = actorRoles
 	return f.base, f.found, f.err
 }
 
@@ -479,7 +484,7 @@ func TestAttributionSecondScanAtSameHeadUpdatesMaterialization(t *testing.T) {
 		t.Fatalf("a changed materialization must re-emit honestly: %+v", h.attributed)
 	}
 
-	facts, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", "mr-1")
+	facts, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
 	if err != nil || facts.High != 1 || facts.HighestAttributedSeverity != "HIGH" {
 		t.Fatalf("gate facts must follow the rescan: %+v err=%v", facts, err)
 	}

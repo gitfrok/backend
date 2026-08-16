@@ -103,7 +103,7 @@ func (s *Service) onMergeRequestUpdated(ctx context.Context, e codereviewapi.Mer
 		SourceRef: e.SourceRef, TargetRef: e.TargetRef, HeadRevision: e.HeadRevision,
 	}
 	s.attrMu.Unlock()
-	_, _ = s.computeAttribution(ctx, e.TenantID, e.MergeRequestID, precomputeActor)
+	_, _ = s.computeAttribution(ctx, e.TenantID, e.MergeRequestID, precomputeActor, nil)
 	return nil
 }
 
@@ -133,7 +133,7 @@ func (s *Service) onScanIngestedAttribution(ctx context.Context, e api.ScanInges
 	s.attrMu.Unlock()
 	slices.Sort(targets)
 	for _, id := range targets {
-		_, _ = s.computeAttribution(ctx, e.TenantID, id, precomputeActor)
+		_, _ = s.computeAttribution(ctx, e.TenantID, id, precomputeActor, nil)
 	}
 	return nil
 }
@@ -165,7 +165,7 @@ func (s *Service) SetMergeBaseResolver(r api.MergeBaseResolver) {
 // unchanged recompute emits nothing new (SPEC-0028 idempotency). A nil
 // record with no error means the comparison is UNAVAILABLE and reason says
 // why.
-func (s *Service) computeAttribution(ctx context.Context, tenantID, mergeRequestID, actorID string) (attributionOutcome, error) {
+func (s *Service) computeAttribution(ctx context.Context, tenantID, mergeRequestID, actorID string, actorRoles []string) (attributionOutcome, error) {
 	mr, ok := s.projectionFor(tenantID, mergeRequestID)
 	if !ok || mr.HeadRevision == "" {
 		return attributionOutcome{reason: api.AttributionUnavailableHeadScanNotRun}, nil
@@ -189,7 +189,7 @@ func (s *Service) computeAttribution(ctx context.Context, tenantID, mergeRequest
 		// unnamed UNSPECIFIED (SPEC-0028 AC7).
 		return attributionOutcome{reason: api.AttributionUnavailableMergeBaseResolverNotComposed}, nil
 	}
-	base, baseFound, err := resolver.MergeBase(ctx, tenantID, mr.RepositoryID, actorID, mr.SourceRef, mr.TargetRef)
+	base, baseFound, err := resolver.MergeBase(ctx, tenantID, mr.RepositoryID, actorID, actorRoles, mr.SourceRef, mr.TargetRef)
 	if err != nil {
 		return attributionOutcome{}, err
 	}
@@ -358,7 +358,7 @@ func (s *Service) ListMergeRequestFindings(ctx context.Context, req api.MergeReq
 		return api.MergeRequestFindingsPage{}, api.ErrDenied
 	}
 
-	outcome, err := s.computeAttribution(ctx, req.TenantID, req.MergeRequestID, req.ActorID)
+	outcome, err := s.computeAttribution(ctx, req.TenantID, req.MergeRequestID, req.ActorID, req.Context.ActorRoles)
 	if err != nil || outcome.record == nil {
 		// The current comparison cannot be answered. A materialized record
 		// from an earlier triple is served as stale — never as current

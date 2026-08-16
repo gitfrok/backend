@@ -120,11 +120,15 @@ func (f FindingsGateFacts) Context() map[string]string {
 // merge itself was asked under and the merge request the facts are about.
 type FindingsFactsProvider interface {
 	// FindingsFacts returns the attributed-findings facts for one merge
-	// request, current at its head revision. A non-nil error means the facts
+	// request, current at its head revision, assembled under the merge's
+	// verified actor — identity AND roles: the merge-base read the
+	// comparison needs is resolved under the subject being decided about,
+	// and storage's PDP denies a role-less repo.read (north-star Stage D).
+	// A non-nil error means the facts
 	// did not assemble — missing, stale, or malformed — and the merge gate
 	// engages the security rule WITHOUT the facts, which the reviewed policy
 	// denies: fail closed, never a fail-open default and never a synchronous
 	// cross-context table read to recover them (SPEC-0029 AC9, SPEC-0030
 	// AC4).
-	FindingsFacts(ctx context.Context, tenantID, repositoryID, actorID, mergeRequestID string) (FindingsGateFacts, error)
+	FindingsFacts(ctx context.Context, tenantID, repositoryID, actorID string, actorRoles []string, mergeRequestID string) (FindingsGateFacts, error)
 }

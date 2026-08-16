@@ -49,7 +49,7 @@ var mergeGateSeverityRank = map[api.Severity]int{
 // ATTRIBUTED, and current at the projection's head. Anything else — unknown
 // merge request, UNAVAILABLE comparison, stale record, a triage read that
 // fails — is errMergeFactsUnavailable, and the merge gate fails closed on it.
-func (s *Service) MergeFindingsFacts(ctx context.Context, tenantID, repositoryID, actorID, mergeRequestID string) (codereviewapi.FindingsGateFacts, error) {
+func (s *Service) MergeFindingsFacts(ctx context.Context, tenantID, repositoryID, actorID string, actorRoles []string, mergeRequestID string) (codereviewapi.FindingsGateFacts, error) {
 	if tenantID == "" || repositoryID == "" || actorID == "" || mergeRequestID == "" {
 		return codereviewapi.FindingsGateFacts{}, errMergeFactsUnavailable
 	}
@@ -59,10 +59,13 @@ func (s *Service) MergeFindingsFacts(ctx context.Context, tenantID, repositoryID
 	}
 
 	// The comparison is the same server fact the read surface serves,
-	// recomputed under the merge's own actor — but a gate fact accepts no
+	// recomputed under the merge's own actor — WITH the merge's verified
+	// roles: the merge-base read asks storage's PDP for repo.read on the
+	// subject it is handed, and a role-less subject is denied, which would
+	// fail every gate closed (north-star Stage D). A gate fact accepts no
 	// stale fallback: a record lagging the head is a fail-closed denial, not
 	// a served stale page (SPEC-0029 AC9).
-	outcome, err := s.computeAttribution(ctx, tenantID, mergeRequestID, actorID)
+	outcome, err := s.computeAttribution(ctx, tenantID, mergeRequestID, actorID, actorRoles)
 	if err != nil || outcome.record == nil || outcome.record.status != api.AttributionAttributed {
 		return codereviewapi.FindingsGateFacts{}, errMergeFactsUnavailable
 	}

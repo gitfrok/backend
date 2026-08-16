@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestMergeFactsBelowThreshold(t *testing.T) {
 	med.Severity = api.SeverityMedium
 	factsSetup(t, h, low, med)
 
-	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", "mr-1")
+	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
 	if err != nil {
 		t.Fatalf("facts must assemble: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestMergeFactsBelowThreshold(t *testing.T) {
 func TestMergeFactsCleanComparison(t *testing.T) {
 	h := newHarness(true)
 	factsSetup(t, h)
-	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", "mr-1")
+	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
 	if err != nil {
 		t.Fatalf("facts must assemble: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestMergeFactsCleanComparison(t *testing.T) {
 func TestMergeFactsUncoveredBreach(t *testing.T) {
 	h := newHarness(true)
 	factsSetup(t, h, rawFinding("rule-high", "high.py", "fn-high"))
-	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", "mr-1")
+	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
 	if err != nil {
 		t.Fatalf("facts must assemble: %v", err)
 	}
@@ -114,7 +115,7 @@ func TestMergeFactsFullExemption(t *testing.T) {
 		triageIDs[acceptTriage(t, h, "req-triage-"+string(rune('a'+i)), v.Finding.ID)] = true
 	}
 
-	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", "mr-1")
+	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
 	if err != nil {
 		t.Fatalf("facts must assemble: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestMergeFactsPartialCoverageDenies(t *testing.T) {
 		rawFinding("rule-h1", "h1.py", "fn-h1"), rawFinding("rule-h2", "h2.py", "fn-h2"))
 	acceptTriage(t, h, "req-triage-a", views[0].Finding.ID)
 
-	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", "mr-1")
+	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
 	if err != nil {
 		t.Fatalf("facts must assemble: %v", err)
 	}
@@ -161,7 +162,7 @@ func TestMergeFactsDeferDoesNotExempt(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SetTriage: %v", err)
 	}
-	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", "mr-1")
+	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
 	if err != nil {
 		t.Fatalf("facts must assemble: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestMergeFactsPreExistingExcluded(t *testing.T) {
 	}
 	announceMR(h, "rev-head")
 
-	facts, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", "mr-1")
+	facts, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
 	if err != nil {
 		t.Fatalf("facts must assemble: %v", err)
 	}
@@ -205,21 +206,21 @@ func TestMergeFactsFailClosed(t *testing.T) {
 
 	t.Run("unknown merge request", func(t *testing.T) {
 		h := newHarness(true)
-		if _, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", "mr-nope"); err == nil {
+		if _, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-nope"); err == nil {
 			t.Fatal("an unknown MR must not assemble")
 		}
 	})
 	t.Run("wrong repository", func(t *testing.T) {
 		h := newHarness(true)
 		factsSetup(t, h)
-		if _, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-2", "actor-1", "mr-1"); err == nil {
+		if _, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-2", "actor-1", []string{"owner"}, "mr-1"); err == nil {
 			t.Fatal("a cross-repository request must not assemble")
 		}
 	})
 	t.Run("empty arguments", func(t *testing.T) {
 		h := newHarness(true)
 		factsSetup(t, h)
-		if _, err := h.svc.MergeFindingsFacts(ctx, "", "repo-1", "actor-1", "mr-1"); err == nil {
+		if _, err := h.svc.MergeFindingsFacts(ctx, "", "repo-1", "actor-1", []string{"owner"}, "mr-1"); err == nil {
 			t.Fatal("an empty tenant must not assemble")
 		}
 	})
@@ -231,7 +232,7 @@ func TestMergeFactsFailClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		announceMR(h, "rev-head")
-		if _, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", "mr-1"); err == nil {
+		if _, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1"); err == nil {
 			t.Fatal("an UNAVAILABLE comparison must not assemble")
 		}
 	})
@@ -241,8 +242,70 @@ func TestMergeFactsFailClosed(t *testing.T) {
 		// The head moves; no scan of the new head exists: a gate fact accepts
 		// no stale fallback.
 		announceMR(h, "rev-head2")
-		if _, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", "mr-1"); err == nil {
+		if _, err := h.svc.MergeFindingsFacts(ctx, "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1"); err == nil {
 			t.Fatal("a stale comparison must not assemble")
 		}
 	})
+}
+
+// roleGatedResolver mimics git-storaged's PDP-guarded merge-base read: the
+// repo.read decision is made over the SUBJECT it is handed, and a subject
+// without verified roles is denied — exactly the shape that denied every
+// live read in the north-star Stage D proof.
+type roleGatedResolver struct {
+	base  string
+	found bool
+	got   []string
+}
+
+func (r *roleGatedResolver) MergeBase(_ context.Context, _, _, _ string, actorRoles []string, _, _ string) (string, bool, error) {
+	r.got = actorRoles
+	if len(actorRoles) == 0 {
+		return "", false, errors.New("repository unavailable")
+	}
+	return r.base, r.found, nil
+}
+
+// Regression (caught live by the north-star Stage D proof): the merge gate's
+// facts assemble under the MERGING actor's verified roles. Before the fix
+// the merge-base resolver dropped them; storage's PDP denied the role-less
+// repo.read, attribution never materialized, and every merge through the
+// security gate failed closed on every real plane.
+func TestMergeFactsResolveMergeBaseUnderTheMergingActorsRoles(t *testing.T) {
+	seed := func(t *testing.T) (*harness, *roleGatedResolver) {
+		t.Helper()
+		h := newHarness(true)
+		resolver := &roleGatedResolver{base: "rev-base", found: true}
+		h.svc.SetMergeBaseResolver(resolver)
+		ctx := context.Background()
+		if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-base", "req-b", 0)); err != nil {
+			t.Fatalf("base scan: %v", err)
+		}
+		if _, err := h.svc.IngestScanResults(ctx, chunkAt("rev-head", "req-h", time.Hour,
+			rawFinding("rule-new", "new.py", "fn-new"))); err != nil {
+			t.Fatalf("head scan: %v", err)
+		}
+		announceMR(h, "rev-head")
+		return h, resolver
+	}
+
+	// No verified roles: storage's PDP denies the merge-base read, and the
+	// gate facts fail closed — never assemble on a degraded comparison.
+	h, _ := seed(t)
+	if _, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", nil, "mr-1"); err == nil {
+		t.Fatal("a role-less merge-base read must fail the facts closed")
+	}
+
+	// The merging actor's verified roles reach storage and the facts assemble.
+	h, resolver := seed(t)
+	facts, err := h.svc.MergeFindingsFacts(context.Background(), "t-1", "repo-1", "actor-1", []string{"owner"}, "mr-1")
+	if err != nil {
+		t.Fatalf("facts must assemble under the merging actor's roles: %v", err)
+	}
+	if facts.High != 1 || facts.HighestAttributedSeverity != "HIGH" {
+		t.Fatalf("facts mismatch: %+v", facts)
+	}
+	if len(resolver.got) != 1 || resolver.got[0] != "owner" { //arch:allow-inline-authz test asserts role PLUMBING to the resolver, not an access decision
+		t.Fatalf("merge-base resolved under roles %v, want the merging actor's verified roles [owner]", resolver.got)
+	}
 }

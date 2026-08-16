@@ -343,7 +343,7 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 		return api.MergeRequest{}, api.ErrDenied
 	}
 	decision, allowed := s.decide(ctx, req.Context, "merge_request.merge", "merge_request", mr.ID,
-		s.mergeGateContext(ctx, mr, req.ActorID, map[string]string{
+		s.mergeGateContext(ctx, mr, req.ActorID, slices.Clone(req.ActorRoles), map[string]string{
 			"target_ref":         mr.TargetRef,
 			"protected":          strconv.FormatBool(protected),
 			"valid_approvals":    strconv.Itoa(valid),
@@ -448,14 +448,16 @@ func (s *Service) SetProtection(ctx context.Context, req api.ProtectionRequest) 
 // the reviewed policy denies (SPEC-0029 AC9). A fact that cannot be assembled
 // fails closed — never a fail-open default, and never a synchronous
 // cross-context read to recover it. The facts assemble under the merge's own
-// verified actor: the merge-base read the comparison needs is resolved under
-// the identity being decided about, never under a privileged server handle.
-func (s *Service) mergeGateContext(ctx context.Context, mr api.MergeRequest, actorID string, base map[string]string) map[string]string {
+// verified actor — identity AND roles: the merge-base read the comparison
+// needs is resolved under the subject being decided about, never under a
+// privileged server handle, and storage's PDP denies a role-less repo.read
+// (north-star Stage D).
+func (s *Service) mergeGateContext(ctx context.Context, mr api.MergeRequest, actorID string, actorRoles []string, base map[string]string) map[string]string {
 	if s.findings == nil {
 		return base
 	}
 	base[api.ContextKeyFindingsGate] = "true"
-	facts, err := s.findings.FindingsFacts(ctx, mr.TenantID, mr.RepositoryID, actorID, mr.ID)
+	facts, err := s.findings.FindingsFacts(ctx, mr.TenantID, mr.RepositoryID, actorID, actorRoles, mr.ID)
 	if err != nil {
 		return base
 	}

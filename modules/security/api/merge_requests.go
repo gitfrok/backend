@@ -174,8 +174,12 @@ type MergeRequestFindingsPage struct {
 // RepositoryReader.GetMergeBase route, and an unresolved resolver leaves
 // attribution honestly UNAVAILABLE rather than guessing.
 type MergeBaseResolver interface {
-	// MergeBase returns the merge-base revision of refA and refB. Found is
+	// MergeBase returns the merge-base revision of refA and refB, resolved
+	// under the named actor WITH their verified roles: the storage side asks
+	// its PDP for repo.read on the subject it is given, so a role-less read
+	// is a denial and the comparison fails closed (north-star Stage D caught
+	// the role-less shape denying every merge-base read live). Found is
 	// false — not an error — when the pair has no common ancestor. An error
 	// means the comparison could not be answered at all.
-	MergeBase(ctx context.Context, tenantID, repositoryID, actorID, refA, refB string) (mergeBase string, found bool, err error)
+	MergeBase(ctx context.Context, tenantID, repositoryID, actorID string, actorRoles []string, refA, refB string) (mergeBase string, found bool, err error)
 }

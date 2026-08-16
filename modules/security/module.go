@@ -11,6 +11,7 @@ package security
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
@@ -138,7 +139,7 @@ func (w trailAuditWitness) IngestAuditRecorded(ctx context.Context, tenantID, re
 // own, and its only legitimate consumer is the merge decision whose input it
 // assembles. The composition root is the only place the two meet.
 type mergeFactsSource interface {
-	MergeFindingsFacts(ctx context.Context, tenantID, repositoryID, actorID, mergeRequestID string) (codereviewapi.FindingsGateFacts, error)
+	MergeFindingsFacts(ctx context.Context, tenantID, repositoryID, actorID string, actorRoles []string, mergeRequestID string) (codereviewapi.FindingsGateFacts, error)
 }
 
 // mergeFactsAdapter presents the assembler on Code Review's port: the port
@@ -147,8 +148,8 @@ type mergeFactsSource interface {
 // translation.
 type mergeFactsAdapter struct{ source mergeFactsSource }
 
-func (a mergeFactsAdapter) FindingsFacts(ctx context.Context, tenantID, repositoryID, actorID, mergeRequestID string) (codereviewapi.FindingsGateFacts, error) {
-	return a.source.MergeFindingsFacts(ctx, tenantID, repositoryID, actorID, mergeRequestID)
+func (a mergeFactsAdapter) FindingsFacts(ctx context.Context, tenantID, repositoryID, actorID string, actorRoles []string, mergeRequestID string) (codereviewapi.FindingsGateFacts, error) {
+	return a.source.MergeFindingsFacts(ctx, tenantID, repositoryID, actorID, actorRoles, mergeRequestID)
 }
 
 // NewFindingsFactsProvider adapts the Findings surface to Code Review's
@@ -180,11 +181,15 @@ func NewMergeBaseResolver(reader repositoryv1.RepositoryReaderClient) api.MergeB
 	return grpcMergeBaseResolver{reader: reader}
 }
 
-func (r grpcMergeBaseResolver) MergeBase(ctx context.Context, tenantID, repositoryID, actorID, refA, refB string) (string, bool, error) {
+func (r grpcMergeBaseResolver) MergeBase(ctx context.Context, tenantID, repositoryID, actorID string, actorRoles []string, refA, refB string) (string, bool, error) {
 	resp, err := r.reader.GetMergeBase(ctx, &repositoryv1.GetMergeBaseRequest{
 		Context: &repositoryv1.ReadContext{
 			TenantId: tenantID, RepositoryId: repositoryID,
 			ActorId: actorID, RequestId: ids.NewULID(),
+			// The storage side decides repo.read over the subject it is
+			// handed; the verified roles travel with the actor, never a
+			// privileged server handle (SPEC-0028, north-star Stage D).
+			ActorRoles: slices.Clone(actorRoles),
 		},
 		RefA: refA, RefB: refB,
 	})

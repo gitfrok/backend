@@ -764,13 +764,17 @@ type fakeFactsProvider struct {
 	facts api.FindingsGateFacts
 	err   error
 	calls int
-	last  struct{ tenant, repository, actor, mergeRequest string }
+	last  struct {
+		tenant, repository, actor, mergeRequest string
+		roles                                   []string
+	}
 }
 
-func (f *fakeFactsProvider) FindingsFacts(_ context.Context, tenantID, repositoryID, actorID, mergeRequestID string) (api.FindingsGateFacts, error) {
+func (f *fakeFactsProvider) FindingsFacts(_ context.Context, tenantID, repositoryID, actorID string, actorRoles []string, mergeRequestID string) (api.FindingsGateFacts, error) {
 	f.calls++
 	f.last.tenant, f.last.repository = tenantID, repositoryID
 	f.last.actor, f.last.mergeRequest = actorID, mergeRequestID
+	f.last.roles = actorRoles
 	return f.facts, f.err
 }
 
@@ -847,6 +851,33 @@ func TestMergeGateComposesFindingsFactsWithApprovalFacts(t *testing.T) {
 	}
 	if _, present := req.Context[api.ContextKeyReliedUponTriageIDs]; present {
 		t.Fatalf("no exemption was applied, yet relied-upon triage was presented: %v", req.Context)
+	}
+}
+
+// Regression (caught live by the north-star Stage D proof): the facts assemble
+// under the merge's verified actor — identity AND ROLES. The merge-base read
+// the comparison needs is a PDP-guarded repo.read on storage's side; the
+// role-less shape denied every read live and failed every merge closed. The
+// provider must therefore receive the merge context's verified roles, exactly
+// as the decision receives them.
+func TestMergeGatePresentsTheMergingActorsRolesToTheFactsProvider(t *testing.T) {
+	service, _, _, _ := newService(t)
+	provider := &fakeFactsProvider{facts: api.FindingsGateFacts{HighestAttributedSeverity: "NONE"}}
+	service.SetFindingsFacts(provider)
+	mr := protectedWithApproval(t, service)
+
+	if _, err := service.Merge(t.Context(), api.MergeRequestCommand{
+		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
+	}); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("facts assembled %d times, want exactly one", provider.calls)
+	}
+	if len(provider.last.roles) != 1 || provider.last.roles[0] != "member" { //arch:allow-inline-authz test asserts role PLUMBING to the facts provider, not an access decision
+		t.Fatalf("facts assembled under roles %v, want the merge context's verified roles [member] — "+
+			"a role-less assembly is the north-star Stage D defect", provider.last.roles)
 	}
 }
 
