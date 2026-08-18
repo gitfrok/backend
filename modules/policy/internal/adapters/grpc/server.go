@@ -13,6 +13,7 @@ package grpc
 import (
 	"context"
 	"errors"
+	"time"
 
 	policyv1 "github.com/gitfrok/backend/gen/proto/policy/v1"
 	"github.com/gitfrok/backend/modules/policy/api"
@@ -41,13 +42,22 @@ type Server struct {
 	policyv1.UnimplementedPolicyDecisionPointServer
 	pdp     api.DecisionPoint
 	records api.DecisionRecords // nil on a plane without a decision-record surface
+	// loadedAt is when this process loaded its bundle, as RFC3339. It is the
+	// process's own fact — not a claim about when the bundle was built.
+	loadedAt string
+}
+
+// revisionReporter is anything that knows which bundle it loaded. The OPA PDP does; a test double
+// may not, and a PDP that cannot say reports an empty revision rather than a guess.
+type revisionReporter interface {
+	Revision() string
 }
 
 // NewServer returns a server backed by pdp, serving the provenance RPCs from records when it
 // is non-nil. A nil records is honest, not degraded: the provenance RPCs then report
 // Unimplemented rather than being served by something else.
 func NewServer(pdp api.DecisionPoint, records api.DecisionRecords) *Server {
-	return &Server{pdp: pdp, records: records}
+	return &Server{pdp: pdp, records: records, loadedAt: time.Now().UTC().Format(time.RFC3339)}
 }
 
 // Decide answers one authorization question.
@@ -217,4 +227,30 @@ func recordToProto(r api.Record) *policyv1.DecisionRecord {
 		Allowed:   r.Allowed,
 		DecidedAt: timestamppb.New(r.DecidedAt),
 	}
+}
+
+// GetBundleStatus reports which policy bundle is in force (T-0062, SPEC-0055 AC1).
+//
+// It is a read, and the only one on this service that is not about a specific decision. Note what
+// it does not return: the bundle's SOURCE. The bundle is a platform artifact, its contents are not
+// a tenant read, and rendering Rego to a tenant is not what "see what is in force" means here.
+//
+// Note also what this service still cannot do: write. ADR-0073 records why that is structural, and
+// check-contracts.sh check 14 keeps it so.
+func (s *Server) GetBundleStatus(ctx context.Context, req *policyv1.GetBundleStatusRequest) (*policyv1.GetBundleStatusResponse, error) {
+	if req.GetTenantId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "tenant is required")
+	}
+	reporter, ok := s.pdp.(revisionReporter)
+	if !ok {
+		// A PDP that cannot report its revision answers empty rather than
+		// inventing one: "we do not know which bundle is in force" is a fact,
+		// and a made-up revision on a compliance surface is worse than no
+		// answer.
+		return &policyv1.GetBundleStatusResponse{}, nil
+	}
+	return &policyv1.GetBundleStatusResponse{
+		BundleRevision: reporter.Revision(),
+		LoadedAt:       s.loadedAt,
+	}, nil
 }

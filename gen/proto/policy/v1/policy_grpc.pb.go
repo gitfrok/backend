@@ -35,9 +35,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PolicyDecisionPoint_Decide_FullMethodName         = "/gitsaas.policy.v1.PolicyDecisionPoint/Decide"
-	PolicyDecisionPoint_EvaluateDryRun_FullMethodName = "/gitsaas.policy.v1.PolicyDecisionPoint/EvaluateDryRun"
-	PolicyDecisionPoint_GetDecision_FullMethodName    = "/gitsaas.policy.v1.PolicyDecisionPoint/GetDecision"
+	PolicyDecisionPoint_Decide_FullMethodName          = "/gitsaas.policy.v1.PolicyDecisionPoint/Decide"
+	PolicyDecisionPoint_EvaluateDryRun_FullMethodName  = "/gitsaas.policy.v1.PolicyDecisionPoint/EvaluateDryRun"
+	PolicyDecisionPoint_GetDecision_FullMethodName     = "/gitsaas.policy.v1.PolicyDecisionPoint/GetDecision"
+	PolicyDecisionPoint_GetBundleStatus_FullMethodName = "/gitsaas.policy.v1.PolicyDecisionPoint/GetBundleStatus"
 )
 
 // PolicyDecisionPointClient is the client API for PolicyDecisionPoint service.
@@ -70,6 +71,17 @@ type PolicyDecisionPointClient interface {
 	// decided it": a decision is only useful as evidence if it can be read back,
 	// by ID, with its deciding bundle revision, input digest and mode.
 	GetDecision(ctx context.Context, in *GetDecisionRequest, opts ...grpc.CallOption) (*GetDecisionResponse, error)
+	// GetBundleStatus reports which policy bundle is in force. Additive for
+	// SPEC-0055.
+	//
+	// Read only, and note what this service still has no verb for: writing a
+	// policy. ADR-0073 records why that is structural rather than missing —
+	// policies live in governance/ and ADR-0001 makes governance the Source of
+	// Truth, so a web form that writes policy is a second source of truth for
+	// the same decisions. check-contracts.sh check 14 asserts no RPC here begins
+	// Put, Create, Update, Delete or Author, so the deferral is a property of
+	// the contract rather than an intention someone remembers.
+	GetBundleStatus(ctx context.Context, in *GetBundleStatusRequest, opts ...grpc.CallOption) (*GetBundleStatusResponse, error)
 }
 
 type policyDecisionPointClient struct {
@@ -110,6 +122,16 @@ func (c *policyDecisionPointClient) GetDecision(ctx context.Context, in *GetDeci
 	return out, nil
 }
 
+func (c *policyDecisionPointClient) GetBundleStatus(ctx context.Context, in *GetBundleStatusRequest, opts ...grpc.CallOption) (*GetBundleStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBundleStatusResponse)
+	err := c.cc.Invoke(ctx, PolicyDecisionPoint_GetBundleStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PolicyDecisionPointServer is the server API for PolicyDecisionPoint service.
 // All implementations must embed UnimplementedPolicyDecisionPointServer
 // for forward compatibility.
@@ -140,6 +162,17 @@ type PolicyDecisionPointServer interface {
 	// decided it": a decision is only useful as evidence if it can be read back,
 	// by ID, with its deciding bundle revision, input digest and mode.
 	GetDecision(context.Context, *GetDecisionRequest) (*GetDecisionResponse, error)
+	// GetBundleStatus reports which policy bundle is in force. Additive for
+	// SPEC-0055.
+	//
+	// Read only, and note what this service still has no verb for: writing a
+	// policy. ADR-0073 records why that is structural rather than missing —
+	// policies live in governance/ and ADR-0001 makes governance the Source of
+	// Truth, so a web form that writes policy is a second source of truth for
+	// the same decisions. check-contracts.sh check 14 asserts no RPC here begins
+	// Put, Create, Update, Delete or Author, so the deferral is a property of
+	// the contract rather than an intention someone remembers.
+	GetBundleStatus(context.Context, *GetBundleStatusRequest) (*GetBundleStatusResponse, error)
 	mustEmbedUnimplementedPolicyDecisionPointServer()
 }
 
@@ -158,6 +191,9 @@ func (UnimplementedPolicyDecisionPointServer) EvaluateDryRun(context.Context, *E
 }
 func (UnimplementedPolicyDecisionPointServer) GetDecision(context.Context, *GetDecisionRequest) (*GetDecisionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetDecision not implemented")
+}
+func (UnimplementedPolicyDecisionPointServer) GetBundleStatus(context.Context, *GetBundleStatusRequest) (*GetBundleStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetBundleStatus not implemented")
 }
 func (UnimplementedPolicyDecisionPointServer) mustEmbedUnimplementedPolicyDecisionPointServer() {}
 func (UnimplementedPolicyDecisionPointServer) testEmbeddedByValue()                             {}
@@ -234,6 +270,24 @@ func _PolicyDecisionPoint_GetDecision_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PolicyDecisionPoint_GetBundleStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBundleStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PolicyDecisionPointServer).GetBundleStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PolicyDecisionPoint_GetBundleStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PolicyDecisionPointServer).GetBundleStatus(ctx, req.(*GetBundleStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PolicyDecisionPoint_ServiceDesc is the grpc.ServiceDesc for PolicyDecisionPoint service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -252,6 +306,10 @@ var PolicyDecisionPoint_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDecision",
 			Handler:    _PolicyDecisionPoint_GetDecision_Handler,
+		},
+		{
+			MethodName: "GetBundleStatus",
+			Handler:    _PolicyDecisionPoint_GetBundleStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
