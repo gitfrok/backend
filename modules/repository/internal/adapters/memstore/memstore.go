@@ -8,6 +8,7 @@ package memstore
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/gitfrok/backend/modules/repository/internal/domain"
@@ -47,4 +48,28 @@ func (s *Store) Load(_ context.Context, tenant domain.TenantID, id domain.RepoID
 		return domain.Repository{}, fmt.Errorf("memstore: repository %s not found", id)
 	}
 	return r, nil
+}
+
+// Candidates returns up to limit of one tenant's repositories whose ID sorts after afterID, in
+// ascending ID order. Another tenant's repositories are not candidates — they are not filtered
+// out, they are never gathered, which is the same shape RLS gives the Postgres adapter.
+//
+// It answers nothing about authorization: which candidates the caller may see is asked above this
+// port, so an adapter cannot become a decision point by accident (invariant 2).
+func (s *Store) Candidates(_ context.Context, tenant domain.TenantID, afterID domain.RepoID, limit int) ([]domain.Repository, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []domain.Repository
+	for k, r := range s.repos {
+		if k.tenant != tenant || k.id <= afterID {
+			continue
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

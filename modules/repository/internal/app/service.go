@@ -20,12 +20,18 @@ import (
 type Store interface {
 	Save(ctx context.Context, r domain.Repository) error
 	Load(ctx context.Context, tenant domain.TenantID, id domain.RepoID) (domain.Repository, error)
+	// Candidates returns up to limit repositories of one tenant whose ID sorts after afterID,
+	// in ascending ID order. It is the store's whole contribution to listing: which of them the
+	// caller may see is the PDP's answer, asked above this port, so no adapter can accidentally
+	// become an authorization point (invariant 2).
+	Candidates(ctx context.Context, tenant domain.TenantID, afterID domain.RepoID, limit int) ([]domain.Repository, error)
 }
 
 // Service implements api.Reader over a Store and publishes the context's domain events.
 type Service struct {
 	store Store
 	bus   bus.Bus
+	auth  api.Authorizer
 	newID func() string
 	now   func() time.Time
 }
@@ -38,6 +44,16 @@ func WithClock(now func() time.Time) Option { return func(s *Service) { s.now = 
 
 // WithIDs replaces the event-id source so a test can assert on event_id.
 func WithIDs(newID func() string) Option { return func(s *Service) { s.newID = newID } }
+
+// WithAuthorizer wires the abstraction that derives the listable set.
+//
+// It is an option rather than a constructor argument because Get and Create predate it and are
+// authorized at their own call sites; listing is the first answer this context derives from
+// authorization itself. A Service without one refuses to list rather than returning nothing —
+// see List.
+func WithAuthorizer(a api.Authorizer) Option {
+	return func(s *Service) { s.auth = a }
+}
 
 // New builds the Repository application service over the ports it was given.
 func New(s Store, b bus.Bus, opts ...Option) *Service {

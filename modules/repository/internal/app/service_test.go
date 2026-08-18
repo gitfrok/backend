@@ -139,6 +139,9 @@ func (failingStore) Save(context.Context, domain.Repository) error {
 func (failingStore) Load(context.Context, domain.TenantID, domain.RepoID) (domain.Repository, error) {
 	return domain.Repository{}, errors.New("store unavailable")
 }
+func (failingStore) Candidates(context.Context, domain.TenantID, domain.RepoID, int) ([]domain.Repository, error) {
+	return nil, errors.New("store unavailable")
+}
 
 type failingBus struct{}
 

@@ -13,16 +13,37 @@ package repository
 import (
 	"github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/modules/repository/internal/adapters/memstore"
+	repopg "github.com/gitfrok/backend/modules/repository/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/repository/internal/app"
 	"github.com/gitfrok/backend/modules/repository/internal/replica"
 	"github.com/gitfrok/backend/platform/bus"
+	"github.com/gitfrok/backend/platform/db"
 )
 
 // NewInMemory assembles the Repository context on the in-memory store adapter, publishing its
-// events to b. This is the adapter for local runs and tests; the Postgres one arrives with the
-// tenancy baseline (T-0004) as a second constructor taking the pool from cmd/.
-func NewInMemory(b bus.Bus) api.Repositories {
-	return app.New(memstore.New(), b)
+// events to b.
+//
+// This is the adapter for tests and for a run with no database. It is NOT the one a plane binary
+// should hold: the registry it keeps empties when the process does, while the repositories
+// themselves are bare git repositories on block volumes that do not (ADR-0071). A list served
+// from it would omit repositories that exist, which asserts they do not.
+//
+// auth may be nil, in which case listing refuses rather than returning nothing
+// (api.ErrNoDecisionPoint).
+func NewInMemory(b bus.Bus, auth api.Authorizer) api.Repositories {
+	return app.New(memstore.New(), b, app.WithAuthorizer(auth))
+}
+
+// NewPostgres assembles the Repository context on the durable registry (T-0053, SPEC-0052,
+// ADR-0071). This is the constructor a plane binary calls.
+//
+// auth derives the listable set at request time. It is api.Authorizer rather than the Policy
+// context's DecisionPoint because this module is a leaf and must stay one — the composition root
+// adapts the PDP onto it. A nil one is accepted at construction and refused at List, so a
+// misconfigured plane fails loudly on the surface that needs authorization rather than silently
+// serving an empty list that reads as "you may see nothing".
+func NewPostgres(pool *db.Pool, b bus.Bus, auth api.Authorizer) api.Repositories {
+	return app.New(repopg.New(pool), b, app.WithAuthorizer(auth))
 }
 
 // NewInMemoryCoordinator assembles the single-process replica coordinator used by git-storaged and

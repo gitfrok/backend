@@ -100,9 +100,20 @@ func newDataplane(b bus.Bus, pdp policyapi.DecisionPoint, ciConfig ci.RunnerConf
 		panic("dataplane: no PDP — every protected action needs a decision (invariant 2)")
 	}
 
-	// Repository context, on the in-memory adapter until the Postgres one lands with the tenancy
-	// baseline (T-0004). Swapping adapters is a change to this line and nothing else.
-	repositories := repository.NewInMemory(b)
+	// Repository context. The durable registry is the default and the in-memory one is the
+	// fallback for a plane with no database (T-0053, SPEC-0052, ADR-0071).
+	//
+	// The difference is not a detail: the in-memory registry empties when this process does,
+	// while the repositories themselves are bare git repositories on block volumes that do not.
+	// A list served from it omits repositories that exist, which asserts they do not — so a
+	// plane that means to serve one needs the pool.
+	var repositories repoapi.Repositories
+	repoAuth := repoAuthorizer{pdp: pdp}
+	if findingsPool != nil {
+		repositories = repository.NewPostgres(findingsPool, b, repoAuth)
+	} else {
+		repositories = repository.NewInMemory(b, repoAuth)
+	}
 
 	// Code Search context, handed the bus it listens on, the Repository read port it resolves
 	// names against, and the PDP every result path asks (invariant 2) — the only in-process
