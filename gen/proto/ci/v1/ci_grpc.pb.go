@@ -28,6 +28,7 @@ const (
 	CIJobService_EnqueueJob_FullMethodName = "/gitsaas.ci.v1.CIJobService/EnqueueJob"
 	CIJobService_GetJob_FullMethodName     = "/gitsaas.ci.v1.CIJobService/GetJob"
 	CIJobService_CancelJob_FullMethodName  = "/gitsaas.ci.v1.CIJobService/CancelJob"
+	CIJobService_ListJobs_FullMethodName   = "/gitsaas.ci.v1.CIJobService/ListJobs"
 )
 
 // CIJobServiceClient is the client API for CIJobService service.
@@ -37,6 +38,14 @@ type CIJobServiceClient interface {
 	EnqueueJob(ctx context.Context, in *EnqueueJobRequest, opts ...grpc.CallOption) (*EnqueueJobResponse, error)
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*GetJobResponse, error)
 	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error)
+	// ListJobs answers which runs the caller may see. Additive for SPEC-0054.
+	//
+	// The listable set is derived server-side from the caller's authorization at
+	// request time — one decision per candidate's repository, because being told
+	// a run happened is being told something about the repository. There is no
+	// job set, state filter or repository allow-list a caller could use to widen
+	// it; repository_id only narrows, and every candidate is decided anyway.
+	ListJobs(ctx context.Context, in *ListJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
 }
 
 type cIJobServiceClient struct {
@@ -77,6 +86,16 @@ func (c *cIJobServiceClient) CancelJob(ctx context.Context, in *CancelJobRequest
 	return out, nil
 }
 
+func (c *cIJobServiceClient) ListJobs(ctx context.Context, in *ListJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListJobsResponse)
+	err := c.cc.Invoke(ctx, CIJobService_ListJobs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CIJobServiceServer is the server API for CIJobService service.
 // All implementations must embed UnimplementedCIJobServiceServer
 // for forward compatibility.
@@ -84,6 +103,14 @@ type CIJobServiceServer interface {
 	EnqueueJob(context.Context, *EnqueueJobRequest) (*EnqueueJobResponse, error)
 	GetJob(context.Context, *GetJobRequest) (*GetJobResponse, error)
 	CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error)
+	// ListJobs answers which runs the caller may see. Additive for SPEC-0054.
+	//
+	// The listable set is derived server-side from the caller's authorization at
+	// request time — one decision per candidate's repository, because being told
+	// a run happened is being told something about the repository. There is no
+	// job set, state filter or repository allow-list a caller could use to widen
+	// it; repository_id only narrows, and every candidate is decided anyway.
+	ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error)
 	mustEmbedUnimplementedCIJobServiceServer()
 }
 
@@ -102,6 +129,9 @@ func (UnimplementedCIJobServiceServer) GetJob(context.Context, *GetJobRequest) (
 }
 func (UnimplementedCIJobServiceServer) CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CancelJob not implemented")
+}
+func (UnimplementedCIJobServiceServer) ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListJobs not implemented")
 }
 func (UnimplementedCIJobServiceServer) mustEmbedUnimplementedCIJobServiceServer() {}
 func (UnimplementedCIJobServiceServer) testEmbeddedByValue()                      {}
@@ -178,6 +208,24 @@ func _CIJobService_CancelJob_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CIJobService_ListJobs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListJobsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CIJobServiceServer).ListJobs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CIJobService_ListJobs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CIJobServiceServer).ListJobs(ctx, req.(*ListJobsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CIJobService_ServiceDesc is the grpc.ServiceDesc for CIJobService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -196,6 +244,10 @@ var CIJobService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelJob",
 			Handler:    _CIJobService_CancelJob_Handler,
+		},
+		{
+			MethodName: "ListJobs",
+			Handler:    _CIJobService_ListJobs_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -54,6 +54,37 @@ func (s *Server) GetJob(ctx context.Context, req *civ1.GetJobRequest) (*civ1.Get
 	return &civ1.GetJobResponse{Job: toCIJobProto(job)}, nil
 }
 
+// ListJobs answers which runs the caller may see (T-0060, SPEC-0054).
+//
+// Note the one case that is NOT the coarse refusal: a caller who may see no
+// runs gets an empty response with no error, because "you may see none" and
+// "there are none" have to be indistinguishable.
+func (s *Server) ListJobs(ctx context.Context, req *civ1.ListJobsRequest) (*civ1.ListJobsResponse, error) {
+	ctx, in, err := intoContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, denial()
+	}
+	page, err := s.jobs.List(ctx, api.ListQuery{
+		TenantID:     in.TenantID,
+		ActorID:      in.ActorID,
+		ActorRoles:   in.ActorRoles,
+		RepositoryID: req.GetRepositoryId(),
+		PageToken:    req.GetPageToken(),
+		PageSize:     req.GetPageSize(),
+	})
+	if err != nil {
+		return nil, denial()
+	}
+	out := &civ1.ListJobsResponse{
+		Jobs:          make([]*civ1.CIJob, 0, len(page.Jobs)),
+		NextPageToken: page.NextPageToken,
+	}
+	for _, job := range page.Jobs {
+		out.Jobs = append(out.Jobs, toCIJobProto(job))
+	}
+	return out, nil
+}
+
 func (s *Server) CancelJob(ctx context.Context, req *civ1.CancelJobRequest) (*civ1.CancelJobResponse, error) {
 	ctx, in, err := intoContext(ctx, req.GetContext())
 	if err != nil {
