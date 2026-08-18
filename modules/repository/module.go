@@ -12,6 +12,7 @@ package repository
 
 import (
 	"github.com/gitfrok/backend/modules/repository/api"
+	repogrpc "github.com/gitfrok/backend/modules/repository/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/repository/internal/adapters/memstore"
 	repopg "github.com/gitfrok/backend/modules/repository/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/repository/internal/app"
@@ -53,3 +54,12 @@ func NewPostgres(pool *db.Pool, b bus.Bus, auth api.Authorizer) api.Repositories
 func NewInMemoryCoordinator(localNodeID string, b bus.Bus) api.Coordinator {
 	return replica.NewInMemoryCoordinator(localNodeID, b)
 }
+
+// NewGRPCServer adapts the listing port onto the RepositoryRegistry contract (T-0054).
+//
+// It is a second service rather than another method on RepositoryReader because they are served
+// by different processes: RepositoryReader is git-storaged, which reads bare repositories off
+// block volumes and holds no record of which repositories the product knows about, while the
+// registry is this context in the data plane — and per ADR-0071 the registry, not the disk, is
+// the product's truth for existence.
+func NewGRPCServer(l api.Lister) *repogrpc.Server { return repogrpc.NewServer(l) }

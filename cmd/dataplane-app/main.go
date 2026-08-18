@@ -399,6 +399,11 @@ func main() {
 		securityv1.RegisterFindingsServiceServer(doors.policyServer, security.NewGRPCServer(dp.findings))
 		auditv1.RegisterEvidenceServiceServer(doors.policyServer, audit.NewEvidenceGRPCServer(dp.evidence))
 		searchv1.RegisterSearchServiceServer(doors.policyServer, codesearch.NewGRPCServer(dp.searchIndex))
+		// The repository registry (T-0054, SPEC-0052). It is served HERE rather than by
+		// git-storaged, which serves RepositoryReader: that process reads bare repositories off
+		// block volumes and holds no record of which repositories the product knows about, and
+		// ADR-0071 makes the registry — this context — the truth for existence.
+		repositoryv1.RegisterRepositoryRegistryServer(doors.policyServer, repository.NewGRPCServer(dp.repositories))
 		if dp.codeReview != nil {
 			codereviewv1.RegisterMergeRequestServiceServer(doors.policyServer, codereview.NewGRPCServer(dp.codeReview))
 		}
