@@ -73,4 +73,38 @@ type Jobs interface {
 	Enqueue(context.Context, EnqueueRequest) (Job, error)
 	Get(context.Context, Context, string) (Job, error)
 	Cancel(context.Context, Context, string) (Job, error)
+	List(context.Context, ListQuery) (ListPage, error)
+}
+
+// ListQuery asks which runs the caller may see (T-0059, SPEC-0054 AC4).
+//
+// It carries no job set, state filter or repository allow-list, and there is
+// deliberately no field for one: the listable set is derived server-side from
+// the caller's authorization at request time, the same property the repository
+// list and code search have. An optional RepositoryID narrows to one
+// repository the caller must already be allowed to read — it cannot widen
+// anything, because every candidate is decided individually regardless.
+type ListQuery struct {
+	TenantID   string
+	ActorID    string
+	ActorRoles []string
+	// RepositoryID optionally narrows to one repository. Empty means every
+	// repository this caller may read.
+	RepositoryID string
+	PageToken    string
+	PageSize     int32
+}
+
+// ListPage is one page of runs.
+//
+// No total, for the reason it is absent elsewhere: no field here is capable of
+// expressing how many runs the caller may NOT see, so non-enumeration is a
+// property of the type (SPEC-0054 AC5).
+//
+// And no logs. api.Job withholds raw output, ADR-0072 defers log retention to
+// its own decision, and a field on this page is exactly how that deferral
+// would erode.
+type ListPage struct {
+	Jobs          []Job
+	NextPageToken string
 }

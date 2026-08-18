@@ -123,7 +123,10 @@ func newDataplane(b bus.Bus, pdp policyapi.DecisionPoint, ciConfig ci.RunnerConf
 
 	// CI/CD context. It shares this plane's bus, so a RefUpdated published by
 	// Repository reaches CI without either module calling the other (invariant 14).
-	ciRuntime := ci.NewRuntime(pdp, b, ciConfig, ciLauncher)
+	// The durable job history is the default; the in-memory one is the fallback
+	// for a plane with no database (T-0059, ADR-0072). A runs list served from
+	// memory would report that nothing has run, about jobs that did.
+	ciRuntime := ci.NewRuntimeWithStore(findingsPool, pdp, b, ciConfig, ciLauncher)
 
 	// Security/Findings context. Every ingest and read is a PDP decision
 	// with server-derived context; identities and lifecycle are computed

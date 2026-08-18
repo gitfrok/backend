@@ -15,6 +15,7 @@ import (
 	"github.com/gitfrok/backend/modules/ci/api"
 	"github.com/gitfrok/backend/modules/ci/internal/adapters/grpc"
 	"github.com/gitfrok/backend/modules/ci/internal/adapters/k8s"
+	cipg "github.com/gitfrok/backend/modules/ci/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/ci/internal/app"
 	"github.com/gitfrok/backend/modules/ci/internal/dev"
 	"github.com/gitfrok/backend/modules/ci/internal/dispatcher"
@@ -23,6 +24,7 @@ import (
 	"github.com/gitfrok/backend/modules/ci/internal/reportstore"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
+	"github.com/gitfrok/backend/platform/db"
 )
 
 // RunnerConfig is the environment-resolved runner configuration, restated here so
@@ -92,8 +94,24 @@ type Runtime struct {
 // environment dispatches nothing: the job API still accepts and records jobs, and
 // no sandbox is ever created.
 func NewRuntime(pdp policyapi.DecisionPoint, events bus.Bus, config RunnerConfig, launcher Launcher) *Runtime {
+	return NewRuntimeWithStore(nil, pdp, events, config, launcher)
+}
+
+// NewRuntimeWithStore is NewRuntime with the durable job history (T-0059,
+// SPEC-0054, ADR-0072). A nil pool falls back to the in-memory store, which is
+// the adapter for tests and for a plane with no database.
+//
+// The difference matters to one surface only, and matters completely there:
+// the in-memory history empties when the process does, so a runs list served
+// from it would report that nothing has run — about jobs that did.
+func NewRuntimeWithStore(pool *db.Pool, pdp policyapi.DecisionPoint, events bus.Bus, config RunnerConfig, launcher Launcher) *Runtime {
 	queue := memory.NewQueue()
-	store := app.NewMemoryStore()
+	var store app.Store
+	if pool != nil {
+		store = cipg.New(pool)
+	} else {
+		store = app.NewMemoryStore()
+	}
 	gauge := kedametrics.NewGauge()
 	// The fair-use caps holder is created whether or not this environment
 	// dispatches: the agent client always has a sink to apply envelope state

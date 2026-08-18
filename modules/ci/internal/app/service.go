@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 
@@ -201,3 +202,42 @@ func (m *memoryStore) Save(_ context.Context, job api.Job) error {
 	return nil
 }
 func (m *memoryStore) count() int { m.mu.Lock(); defer m.mu.Unlock(); return len(m.jobs) }
+
+// Candidates lets the in-memory store answer a list, in the same
+// (queued_at DESC, job_id DESC) order the durable one uses. Another tenant's
+// jobs are never gathered rather than filtered out — the same shape RLS gives
+// the Postgres adapter.
+func (m *memoryStore) Candidates(_ context.Context, tenantID, repositoryID string, after ListCursor, limit int) ([]api.Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var out []api.Job
+	for _, job := range m.jobs {
+		if job.TenantID != tenantID {
+			continue
+		}
+		if repositoryID != "" && job.RepositoryID != repositoryID {
+			continue
+		}
+		if !after.QueuedAt.IsZero() {
+			// Strictly after the cursor in the descending order.
+			if job.QueuedAt.After(after.QueuedAt) {
+				continue
+			}
+			if job.QueuedAt.Equal(after.QueuedAt) && job.ID >= after.JobID {
+				continue
+			}
+		}
+		out = append(out, job)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].QueuedAt.Equal(out[j].QueuedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].QueuedAt.After(out[j].QueuedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
