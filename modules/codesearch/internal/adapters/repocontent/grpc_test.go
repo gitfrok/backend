@@ -90,6 +90,14 @@ func (f *fakeReader) GetMergeBase(context.Context, *repositoryv1.GetMergeBaseReq
 	return nil, errors.New("repocontent: GetMergeBase is not a code-search route")
 }
 
+func (f *fakeReader) GetHistory(context.Context, *repositoryv1.GetHistoryRequest, ...grpc.CallOption) (*repositoryv1.GetHistoryResponse, error) {
+	return nil, errors.New("repocontent: GetHistory is not a code-search route")
+}
+
+func (f *fakeReader) GetBlame(context.Context, *repositoryv1.GetBlameRequest, ...grpc.CallOption) (*repositoryv1.GetBlameResponse, error) {
+	return nil, errors.New("repocontent: GetBlame is not a code-search route")
+}
+
 func entry(kind repositoryv1.EntryKind, path string, size int64) *repositoryv1.TreeEntry {
 	return &repositoryv1.TreeEntry{Kind: kind, Path: path, SizeBytes: size}
 }

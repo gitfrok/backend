@@ -23,6 +23,8 @@ const (
 	RepositoryReader_GetFile_FullMethodName      = "/gitsaas.repository.v1.RepositoryReader/GetFile"
 	RepositoryReader_GetDiff_FullMethodName      = "/gitsaas.repository.v1.RepositoryReader/GetDiff"
 	RepositoryReader_GetMergeBase_FullMethodName = "/gitsaas.repository.v1.RepositoryReader/GetMergeBase"
+	RepositoryReader_GetHistory_FullMethodName   = "/gitsaas.repository.v1.RepositoryReader/GetHistory"
+	RepositoryReader_GetBlame_FullMethodName     = "/gitsaas.repository.v1.RepositoryReader/GetBlame"
 )
 
 // RepositoryReaderClient is the client API for RepositoryReader service.
@@ -40,6 +42,11 @@ type RepositoryReaderClient interface {
 	// target branch, and nothing on this surface computed a merge base before.
 	// Authorization stays server-side exactly as for the other reads.
 	GetMergeBase(ctx context.Context, in *GetMergeBaseRequest, opts ...grpc.CallOption) (*GetMergeBaseResponse, error)
+	// GetHistory and GetBlame complete PR-8, which has named both since Phase 1.
+	// Additive for SPEC-0053. They belong here, unlike the registry list: both
+	// are reads of one named repository, which is what this surface is.
+	GetHistory(ctx context.Context, in *GetHistoryRequest, opts ...grpc.CallOption) (*GetHistoryResponse, error)
+	GetBlame(ctx context.Context, in *GetBlameRequest, opts ...grpc.CallOption) (*GetBlameResponse, error)
 }
 
 type repositoryReaderClient struct {
@@ -108,6 +115,26 @@ func (c *repositoryReaderClient) GetMergeBase(ctx context.Context, in *GetMergeB
 	return out, nil
 }
 
+func (c *repositoryReaderClient) GetHistory(ctx context.Context, in *GetHistoryRequest, opts ...grpc.CallOption) (*GetHistoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetHistoryResponse)
+	err := c.cc.Invoke(ctx, RepositoryReader_GetHistory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repositoryReaderClient) GetBlame(ctx context.Context, in *GetBlameRequest, opts ...grpc.CallOption) (*GetBlameResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBlameResponse)
+	err := c.cc.Invoke(ctx, RepositoryReader_GetBlame_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RepositoryReaderServer is the server API for RepositoryReader service.
 // All implementations must embed UnimplementedRepositoryReaderServer
 // for forward compatibility.
@@ -123,6 +150,11 @@ type RepositoryReaderServer interface {
 	// target branch, and nothing on this surface computed a merge base before.
 	// Authorization stays server-side exactly as for the other reads.
 	GetMergeBase(context.Context, *GetMergeBaseRequest) (*GetMergeBaseResponse, error)
+	// GetHistory and GetBlame complete PR-8, which has named both since Phase 1.
+	// Additive for SPEC-0053. They belong here, unlike the registry list: both
+	// are reads of one named repository, which is what this surface is.
+	GetHistory(context.Context, *GetHistoryRequest) (*GetHistoryResponse, error)
+	GetBlame(context.Context, *GetBlameRequest) (*GetBlameResponse, error)
 	mustEmbedUnimplementedRepositoryReaderServer()
 }
 
@@ -144,6 +176,12 @@ func (UnimplementedRepositoryReaderServer) GetDiff(*GetDiffRequest, grpc.ServerS
 }
 func (UnimplementedRepositoryReaderServer) GetMergeBase(context.Context, *GetMergeBaseRequest) (*GetMergeBaseResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetMergeBase not implemented")
+}
+func (UnimplementedRepositoryReaderServer) GetHistory(context.Context, *GetHistoryRequest) (*GetHistoryResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetHistory not implemented")
+}
+func (UnimplementedRepositoryReaderServer) GetBlame(context.Context, *GetBlameRequest) (*GetBlameResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetBlame not implemented")
 }
 func (UnimplementedRepositoryReaderServer) mustEmbedUnimplementedRepositoryReaderServer() {}
 func (UnimplementedRepositoryReaderServer) testEmbeddedByValue()                          {}
@@ -224,6 +262,42 @@ func _RepositoryReader_GetMergeBase_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepositoryReader_GetHistory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetHistoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryReaderServer).GetHistory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepositoryReader_GetHistory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryReaderServer).GetHistory(ctx, req.(*GetHistoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RepositoryReader_GetBlame_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBlameRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryReaderServer).GetBlame(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepositoryReader_GetBlame_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryReaderServer).GetBlame(ctx, req.(*GetBlameRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RepositoryReader_ServiceDesc is the grpc.ServiceDesc for RepositoryReader service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -238,6 +312,14 @@ var RepositoryReader_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetMergeBase",
 			Handler:    _RepositoryReader_GetMergeBase_Handler,
+		},
+		{
+			MethodName: "GetHistory",
+			Handler:    _RepositoryReader_GetHistory_Handler,
+		},
+		{
+			MethodName: "GetBlame",
+			Handler:    _RepositoryReader_GetBlame_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
