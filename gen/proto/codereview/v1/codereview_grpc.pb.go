@@ -33,6 +33,8 @@ const (
 	MergeRequestService_SubmitReview_FullMethodName        = "/gitsaas.codereview.v1.MergeRequestService/SubmitReview"
 	MergeRequestService_MergeMergeRequest_FullMethodName   = "/gitsaas.codereview.v1.MergeRequestService/MergeMergeRequest"
 	MergeRequestService_SetBranchProtection_FullMethodName = "/gitsaas.codereview.v1.MergeRequestService/SetBranchProtection"
+	MergeRequestService_LinkExternalIssue_FullMethodName   = "/gitsaas.codereview.v1.MergeRequestService/LinkExternalIssue"
+	MergeRequestService_UnlinkExternalIssue_FullMethodName = "/gitsaas.codereview.v1.MergeRequestService/UnlinkExternalIssue"
 )
 
 // MergeRequestServiceClient is the client API for MergeRequestService service.
@@ -44,6 +46,22 @@ type MergeRequestServiceClient interface {
 	SubmitReview(ctx context.Context, in *SubmitReviewRequest, opts ...grpc.CallOption) (*SubmitReviewResponse, error)
 	MergeMergeRequest(ctx context.Context, in *MergeMergeRequestRequest, opts ...grpc.CallOption) (*MergeMergeRequestResponse, error)
 	SetBranchProtection(ctx context.Context, in *SetBranchProtectionRequest, opts ...grpc.CallOption) (*SetBranchProtectionResponse, error)
+	// LinkExternalIssue and UnlinkExternalIssue reference an issue that lives in
+	// the customer's own tracker (SPEC-0059, PR-28's accepted scope, ADR-0074).
+	//
+	// This product does not build an issue tracker. It records a POINTER: a
+	// tracker label, an issue key and a URL. Nothing here fetches, polls,
+	// authenticates against, or receives a webhook from that tracker, which is
+	// why the reference carries no title and no state — a field the platform
+	// could only fill by becoming a client of somebody else's system is a
+	// freshness promise nobody can keep.
+	//
+	// Separate verbs rather than a field on CreateMergeRequest: opening a merge
+	// request and referencing an issue are separate acts with separate
+	// authorization, and a create that could carry references would make this
+	// path optional — which is how one of two paths stops being tested.
+	LinkExternalIssue(ctx context.Context, in *LinkExternalIssueRequest, opts ...grpc.CallOption) (*LinkExternalIssueResponse, error)
+	UnlinkExternalIssue(ctx context.Context, in *UnlinkExternalIssueRequest, opts ...grpc.CallOption) (*UnlinkExternalIssueResponse, error)
 }
 
 type mergeRequestServiceClient struct {
@@ -104,6 +122,26 @@ func (c *mergeRequestServiceClient) SetBranchProtection(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *mergeRequestServiceClient) LinkExternalIssue(ctx context.Context, in *LinkExternalIssueRequest, opts ...grpc.CallOption) (*LinkExternalIssueResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LinkExternalIssueResponse)
+	err := c.cc.Invoke(ctx, MergeRequestService_LinkExternalIssue_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *mergeRequestServiceClient) UnlinkExternalIssue(ctx context.Context, in *UnlinkExternalIssueRequest, opts ...grpc.CallOption) (*UnlinkExternalIssueResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnlinkExternalIssueResponse)
+	err := c.cc.Invoke(ctx, MergeRequestService_UnlinkExternalIssue_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MergeRequestServiceServer is the server API for MergeRequestService service.
 // All implementations must embed UnimplementedMergeRequestServiceServer
 // for forward compatibility.
@@ -113,6 +151,22 @@ type MergeRequestServiceServer interface {
 	SubmitReview(context.Context, *SubmitReviewRequest) (*SubmitReviewResponse, error)
 	MergeMergeRequest(context.Context, *MergeMergeRequestRequest) (*MergeMergeRequestResponse, error)
 	SetBranchProtection(context.Context, *SetBranchProtectionRequest) (*SetBranchProtectionResponse, error)
+	// LinkExternalIssue and UnlinkExternalIssue reference an issue that lives in
+	// the customer's own tracker (SPEC-0059, PR-28's accepted scope, ADR-0074).
+	//
+	// This product does not build an issue tracker. It records a POINTER: a
+	// tracker label, an issue key and a URL. Nothing here fetches, polls,
+	// authenticates against, or receives a webhook from that tracker, which is
+	// why the reference carries no title and no state — a field the platform
+	// could only fill by becoming a client of somebody else's system is a
+	// freshness promise nobody can keep.
+	//
+	// Separate verbs rather than a field on CreateMergeRequest: opening a merge
+	// request and referencing an issue are separate acts with separate
+	// authorization, and a create that could carry references would make this
+	// path optional — which is how one of two paths stops being tested.
+	LinkExternalIssue(context.Context, *LinkExternalIssueRequest) (*LinkExternalIssueResponse, error)
+	UnlinkExternalIssue(context.Context, *UnlinkExternalIssueRequest) (*UnlinkExternalIssueResponse, error)
 	mustEmbedUnimplementedMergeRequestServiceServer()
 }
 
@@ -137,6 +191,12 @@ func (UnimplementedMergeRequestServiceServer) MergeMergeRequest(context.Context,
 }
 func (UnimplementedMergeRequestServiceServer) SetBranchProtection(context.Context, *SetBranchProtectionRequest) (*SetBranchProtectionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetBranchProtection not implemented")
+}
+func (UnimplementedMergeRequestServiceServer) LinkExternalIssue(context.Context, *LinkExternalIssueRequest) (*LinkExternalIssueResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LinkExternalIssue not implemented")
+}
+func (UnimplementedMergeRequestServiceServer) UnlinkExternalIssue(context.Context, *UnlinkExternalIssueRequest) (*UnlinkExternalIssueResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UnlinkExternalIssue not implemented")
 }
 func (UnimplementedMergeRequestServiceServer) mustEmbedUnimplementedMergeRequestServiceServer() {}
 func (UnimplementedMergeRequestServiceServer) testEmbeddedByValue()                             {}
@@ -249,6 +309,42 @@ func _MergeRequestService_SetBranchProtection_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MergeRequestService_LinkExternalIssue_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LinkExternalIssueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MergeRequestServiceServer).LinkExternalIssue(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MergeRequestService_LinkExternalIssue_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MergeRequestServiceServer).LinkExternalIssue(ctx, req.(*LinkExternalIssueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MergeRequestService_UnlinkExternalIssue_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnlinkExternalIssueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MergeRequestServiceServer).UnlinkExternalIssue(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MergeRequestService_UnlinkExternalIssue_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MergeRequestServiceServer).UnlinkExternalIssue(ctx, req.(*UnlinkExternalIssueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MergeRequestService_ServiceDesc is the grpc.ServiceDesc for MergeRequestService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -275,6 +371,14 @@ var MergeRequestService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetBranchProtection",
 			Handler:    _MergeRequestService_SetBranchProtection_Handler,
+		},
+		{
+			MethodName: "LinkExternalIssue",
+			Handler:    _MergeRequestService_LinkExternalIssue_Handler,
+		},
+		{
+			MethodName: "UnlinkExternalIssue",
+			Handler:    _MergeRequestService_UnlinkExternalIssue_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

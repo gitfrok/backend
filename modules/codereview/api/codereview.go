@@ -67,6 +67,10 @@ type MergeRequest struct {
 	CreatedAt, UpdatedAt time.Time
 	// Version is server-assigned and positive. Every mutation is guarded by it.
 	Version int64
+	// ExternalIssues are references to issues in the customer's own tracker
+	// (SPEC-0059). They are inert: nothing here satisfies a merge policy, changes a
+	// review outcome, or closes anything — see external_issue.go.
+	ExternalIssues []ExternalIssue
 }
 
 // BranchProtection is an exact `refs/heads/...` rule. Zero required approvals
@@ -387,4 +391,10 @@ type MergeRequests interface {
 	Review(context.Context, ReviewRequest) (MergeRequest, error)
 	Merge(context.Context, MergeRequestCommand) (MergeRequest, error)
 	SetProtection(context.Context, ProtectionRequest) (BranchProtection, error)
+	// LinkExternalIssue and UnlinkExternalIssue reference an issue that lives
+	// elsewhere (SPEC-0059). They are on this port rather than a new one because a
+	// reference is a property of a merge request, and there is no Issues context
+	// for them to belong to — which is the whole of ADR-0074's accepted scope.
+	LinkExternalIssue(context.Context, LinkExternalIssueRequest) (MergeRequest, error)
+	UnlinkExternalIssue(context.Context, UnlinkExternalIssueRequest) (MergeRequest, error)
 }

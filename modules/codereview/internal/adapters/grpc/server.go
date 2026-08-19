@@ -166,7 +166,8 @@ func toProto(mr api.MergeRequest) *codereviewv1.MergeRequest {
 		CreatorId: mr.CreatorID, State: stateProto(mr.State),
 		HeadRevision: mr.HeadRevision,
 		CreatedAt:    timestamppb.New(mr.CreatedAt), UpdatedAt: timestamppb.New(mr.UpdatedAt),
-		Version: mr.Version,
+		Version:        mr.Version,
+		ExternalIssues: externalIssuesProto(mr.ExternalIssues),
 	}
 }
 
