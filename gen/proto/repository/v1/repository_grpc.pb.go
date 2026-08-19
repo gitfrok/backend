@@ -25,6 +25,7 @@ const (
 	RepositoryReader_GetMergeBase_FullMethodName = "/gitsaas.repository.v1.RepositoryReader/GetMergeBase"
 	RepositoryReader_GetHistory_FullMethodName   = "/gitsaas.repository.v1.RepositoryReader/GetHistory"
 	RepositoryReader_GetBlame_FullMethodName     = "/gitsaas.repository.v1.RepositoryReader/GetBlame"
+	RepositoryReader_ListTags_FullMethodName     = "/gitsaas.repository.v1.RepositoryReader/ListTags"
 )
 
 // RepositoryReaderClient is the client API for RepositoryReader service.
@@ -47,6 +48,13 @@ type RepositoryReaderClient interface {
 	// are reads of one named repository, which is what this surface is.
 	GetHistory(ctx context.Context, in *GetHistoryRequest, opts ...grpc.CallOption) (*GetHistoryResponse, error)
 	GetBlame(ctx context.Context, in *GetBlameRequest, opts ...grpc.CallOption) (*GetBlameResponse, error)
+	// ListTags serves a repository's tags. Additive for SPEC-0056.
+	//
+	// It belongs here rather than in release/v1 because a tag is a git object in
+	// the bare repository, and this is the surface that reads those. The Release
+	// context never asks what a tag means — it records what one meant when a
+	// release was published (SPEC-0056 AC6).
+	ListTags(ctx context.Context, in *ListTagsRequest, opts ...grpc.CallOption) (*ListTagsResponse, error)
 }
 
 type repositoryReaderClient struct {
@@ -135,6 +143,16 @@ func (c *repositoryReaderClient) GetBlame(ctx context.Context, in *GetBlameReque
 	return out, nil
 }
 
+func (c *repositoryReaderClient) ListTags(ctx context.Context, in *ListTagsRequest, opts ...grpc.CallOption) (*ListTagsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListTagsResponse)
+	err := c.cc.Invoke(ctx, RepositoryReader_ListTags_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RepositoryReaderServer is the server API for RepositoryReader service.
 // All implementations must embed UnimplementedRepositoryReaderServer
 // for forward compatibility.
@@ -155,6 +173,13 @@ type RepositoryReaderServer interface {
 	// are reads of one named repository, which is what this surface is.
 	GetHistory(context.Context, *GetHistoryRequest) (*GetHistoryResponse, error)
 	GetBlame(context.Context, *GetBlameRequest) (*GetBlameResponse, error)
+	// ListTags serves a repository's tags. Additive for SPEC-0056.
+	//
+	// It belongs here rather than in release/v1 because a tag is a git object in
+	// the bare repository, and this is the surface that reads those. The Release
+	// context never asks what a tag means — it records what one meant when a
+	// release was published (SPEC-0056 AC6).
+	ListTags(context.Context, *ListTagsRequest) (*ListTagsResponse, error)
 	mustEmbedUnimplementedRepositoryReaderServer()
 }
 
@@ -182,6 +207,9 @@ func (UnimplementedRepositoryReaderServer) GetHistory(context.Context, *GetHisto
 }
 func (UnimplementedRepositoryReaderServer) GetBlame(context.Context, *GetBlameRequest) (*GetBlameResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBlame not implemented")
+}
+func (UnimplementedRepositoryReaderServer) ListTags(context.Context, *ListTagsRequest) (*ListTagsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListTags not implemented")
 }
 func (UnimplementedRepositoryReaderServer) mustEmbedUnimplementedRepositoryReaderServer() {}
 func (UnimplementedRepositoryReaderServer) testEmbeddedByValue()                          {}
@@ -298,6 +326,24 @@ func _RepositoryReader_GetBlame_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepositoryReader_ListTags_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTagsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositoryReaderServer).ListTags(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepositoryReader_ListTags_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositoryReaderServer).ListTags(ctx, req.(*ListTagsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RepositoryReader_ServiceDesc is the grpc.ServiceDesc for RepositoryReader service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -320,6 +366,10 @@ var RepositoryReader_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetBlame",
 			Handler:    _RepositoryReader_GetBlame_Handler,
+		},
+		{
+			MethodName: "ListTags",
+			Handler:    _RepositoryReader_ListTags_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

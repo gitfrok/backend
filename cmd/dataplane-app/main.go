@@ -24,6 +24,7 @@ import (
 	codereviewv1 "github.com/gitfrok/backend/gen/proto/codereview/v1"
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
+	releasev1 "github.com/gitfrok/backend/gen/proto/release/v1"
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
 	searchv1 "github.com/gitfrok/backend/gen/proto/search/v1"
 	securityv1 "github.com/gitfrok/backend/gen/proto/security/v1"
@@ -38,6 +39,7 @@ import (
 	identityapi "github.com/gitfrok/backend/modules/identity/api"
 	"github.com/gitfrok/backend/modules/policy"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
+	"github.com/gitfrok/backend/modules/release"
 	"github.com/gitfrok/backend/modules/repository"
 	repoapi "github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/modules/security"
@@ -407,6 +409,15 @@ func main() {
 		// block volumes and holds no record of which repositories the product knows about, and
 		// ADR-0071 makes the registry — this context — the truth for existence.
 		repositoryv1.RegisterRepositoryRegistryServer(doors.policyServer, repository.NewGRPCServer(dp.repositories))
+		// The Release context (T-0064, SPEC-0056). It needs a database — there is
+		// deliberately no in-memory constructor, because a record of what was
+		// announced that empties with the process is the gap ADR-0071 closed.
+		if dbPool != nil {
+			releasev1.RegisterReleaseServiceServer(doors.policyServer, release.NewGRPCServer(
+				release.NewPostgres(dbPool, pdp),
+				releaseTagResolver{reader: repositoryv1.NewRepositoryReaderClient(doors.conn)},
+			))
+		}
 		if dp.codeReview != nil {
 			codereviewv1.RegisterMergeRequestServiceServer(doors.policyServer, codereview.NewGRPCServer(dp.codeReview))
 		}

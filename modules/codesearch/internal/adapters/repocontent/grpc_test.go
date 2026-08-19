@@ -98,6 +98,10 @@ func (f *fakeReader) GetBlame(context.Context, *repositoryv1.GetBlameRequest, ..
 	return nil, errors.New("repocontent: GetBlame is not a code-search route")
 }
 
+func (f *fakeReader) ListTags(context.Context, *repositoryv1.ListTagsRequest, ...grpc.CallOption) (*repositoryv1.ListTagsResponse, error) {
+	return nil, errors.New("repocontent: ListTags is not a code-search route")
+}
+
 func entry(kind repositoryv1.EntryKind, path string, size int64) *repositoryv1.TreeEntry {
 	return &repositoryv1.TreeEntry{Kind: kind, Path: path, SizeBytes: size}
 }
