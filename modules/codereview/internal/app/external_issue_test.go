@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -174,7 +175,7 @@ func TestAReferenceListIsBoundedInCount(t *testing.T) {
 	service, _, _, _ := newService(t)
 	mr := openOne(t, service, "request-open")
 
-	for i := 0; i < api.MaxExternalIssues; i++ {
+	for i := range api.MaxExternalIssues {
 		if _, err := linkOne(t, service, mr.ID, "JIRA", "PLAT-"+strings.Repeat("1", i+1), "https://tracker.example.test/x"); err != nil {
 			t.Fatalf("link %d: %v", i, err)
 		}
@@ -285,5 +286,51 @@ func TestTheReferenceIsStoredExactlyAsGiven(t *testing.T) {
 	// carries no field that could hold what the issue says.
 	if got := linked.ExternalIssues[0]; got.Tracker == "" || got.IssueKey == "" {
 		t.Errorf("unexpected reference %+v", got)
+	}
+}
+
+// A write does not reach into a copy somebody else is holding.
+//
+// The store keeps the aggregate by value, so a merge request handed to two callers
+// shares one backing array. slices.Delete shifts in place and append can write into
+// spare capacity, so both paths clone first — otherwise a refused Save would leave
+// the store holding a list whose tail had already moved, and a caller holding a
+// merge request would watch its references change under it.
+func TestAWriteDoesNotMutateAnotherHoldersReferences(t *testing.T) {
+	service, _, _, _ := newService(t)
+	mr := openOne(t, service, "request-open")
+	principalCtx := principal("tenant-a", "actor-a", "request-get", "member")
+
+	for _, key := range []string{"PLAT-1", "PLAT-2", "PLAT-3"} {
+		if _, err := linkOne(t, service, mr.ID, "JIRA", key, "https://tracker.example.test/"+key); err != nil {
+			t.Fatalf("link %s: %v", key, err)
+		}
+	}
+
+	// The copy a reader is holding, before anything is removed.
+	before, err := service.Get(t.Context(), principalCtx, mr.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	held := slices.Clone(before.ExternalIssues)
+
+	if _, err := service.UnlinkExternalIssue(t.Context(), api.UnlinkExternalIssueRequest{
+		Context:        principal("tenant-a", "actor-a", "request-unlink", "member"),
+		MergeRequestID: mr.ID, Tracker: "JIRA", IssueKey: "PLAT-1",
+	}); err != nil {
+		t.Fatalf("UnlinkExternalIssue: %v", err)
+	}
+
+	if !slices.EqualFunc(before.ExternalIssues, held, func(a, b api.ExternalIssue) bool { return a.SameAs(b) }) {
+		t.Errorf("the earlier read's references moved under it: %+v, was %+v", before.ExternalIssues, held)
+	}
+
+	// And a fresh read sees exactly the removal.
+	after, err := service.Get(t.Context(), principalCtx, mr.ID)
+	if err != nil {
+		t.Fatalf("Get after unlink: %v", err)
+	}
+	if len(after.ExternalIssues) != 2 || slices.ContainsFunc(after.ExternalIssues, api.ExternalIssue{Tracker: "JIRA", IssueKey: "PLAT-1"}.SameAs) {
+		t.Errorf("unexpected references after unlink: %+v", after.ExternalIssues)
 	}
 }

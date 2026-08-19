@@ -190,7 +190,7 @@ func TestTheFleetMessagesCarryNoAuditRecordAndNoPerson(t *testing.T) {
 		&agentpb.ListFleetResponse{}, &agentpb.FleetContext{},
 	} {
 		fields := m.ProtoReflect().Descriptor().Fields()
-		for i := 0; i < fields.Len(); i++ {
+		for i := range fields.Len() {
 			if name := string(fields.Get(i).Name()); excluded[name] {
 				t.Errorf("%s carries %q — outside ADR-0077's accepted increment",
 					m.ProtoReflect().Descriptor().FullName(), name)

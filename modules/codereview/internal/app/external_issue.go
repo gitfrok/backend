@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,10 +53,8 @@ func (s *Service) LinkExternalIssue(ctx context.Context, req api.LinkExternalIss
 	}) {
 		return api.MergeRequest{}, api.ErrDenied
 	}
-	for _, existing := range mr.ExternalIssues {
-		if existing.SameAs(candidate) {
-			return mr, nil
-		}
+	if slices.ContainsFunc(mr.ExternalIssues, candidate.SameAs) {
+		return mr, nil
 	}
 	if len(mr.ExternalIssues) >= api.MaxExternalIssues {
 		return api.MergeRequest{}, api.ErrTooManyExternalIssues
@@ -63,7 +62,13 @@ func (s *Service) LinkExternalIssue(ctx context.Context, req api.LinkExternalIss
 
 	now := s.now().UTC()
 	candidate.LinkedAt = now
-	mr.ExternalIssues = append(mr.ExternalIssues, candidate)
+	// Clone before appending. The store keeps the aggregate BY VALUE, so the slice
+	// header is copied while the backing array is shared with whatever the caller
+	// still holds — an append within spare capacity, or a delete below, would reach
+	// into that shared array. The write must not be observable until Save accepts
+	// it, which is the same rule domain.Repository.WithSettings follows by returning
+	// a new value rather than mutating.
+	mr.ExternalIssues = append(slices.Clone(mr.ExternalIssues), candidate)
 	mr.Version, mr.UpdatedAt = mr.Version+1, now
 	if err := s.store.Save(ctx, mr); err != nil {
 		return api.MergeRequest{}, api.ErrDenied
@@ -94,22 +99,20 @@ func (s *Service) UnlinkExternalIssue(ctx context.Context, req api.UnlinkExterna
 		return api.MergeRequest{}, api.ErrDenied
 	}
 
-	kept := make([]api.ExternalIssue, 0, len(mr.ExternalIssues))
-	var removed api.ExternalIssue
-	found := false
-	for _, existing := range mr.ExternalIssues {
-		if !found && existing.SameAs(target) {
-			removed, found = existing, true
-			continue
-		}
-		kept = append(kept, existing)
-	}
-	if !found {
+	// The FIRST match is the one removed, which is what makes this idempotent
+	// against a list that cannot hold two of the same reference anyway — Link
+	// refuses the duplicate, so an index is an identity here.
+	at := slices.IndexFunc(mr.ExternalIssues, target.SameAs)
+	if at < 0 {
 		return mr, nil
 	}
+	removed := mr.ExternalIssues[at]
 
 	now := s.now().UTC()
-	mr.ExternalIssues = kept
+	// Cloned for the reason the link path clones: slices.Delete shifts elements in
+	// place, and the array underneath is the stored aggregate's. A refused Save would
+	// otherwise leave the store holding a list whose tail had already moved.
+	mr.ExternalIssues = slices.Delete(slices.Clone(mr.ExternalIssues), at, at+1)
 	mr.Version, mr.UpdatedAt = mr.Version+1, now
 	if err := s.store.Save(ctx, mr); err != nil {
 		return api.MergeRequest{}, api.ErrDenied

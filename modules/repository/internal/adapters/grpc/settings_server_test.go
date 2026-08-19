@@ -194,7 +194,7 @@ func TestTheSettingsMessagesCarryNoExcludedField(t *testing.T) {
 		&repositoryv1.SetArchivedRequest{}, &repositoryv1.SetArchivedResponse{},
 	} {
 		fields := m.ProtoReflect().Descriptor().Fields()
-		for i := 0; i < fields.Len(); i++ {
+		for i := range fields.Len() {
 			name := string(fields.Get(i).Name())
 			if excluded[name] {
 				t.Errorf("%s carries %q — outside ADR-0076's accepted increment",
@@ -211,7 +211,7 @@ func TestTheSettingsServiceHasNoDeleteVerb(t *testing.T) {
 		t.Fatal("RepositorySettings is not in the descriptor")
 	}
 	methods := sd.Methods()
-	for i := 0; i < methods.Len(); i++ {
+	for i := range methods.Len() {
 		if name := methods.Get(i).Name(); len(name) >= 6 && name[:6] == "Delete" {
 			t.Errorf("RepositorySettings carries %q — deletion is ADR-0076's deferred decision", name)
 		}
