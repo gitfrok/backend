@@ -64,6 +64,7 @@ type agentDoor struct {
 	usage     *ggrpc.Server // the UsageService door, when GITFROK_USAGE_GRPC_ADDR is set
 	residency *ggrpc.Server // the residency Declare door, when GITFROK_RESIDENCY_GRPC_ADDR is set
 	enrolment *ggrpc.Server // the enrolment issuance door, when GITFROK_ENROLMENT_GRPC_ADDR is set
+	fleet     *ggrpc.Server // the admin area's fleet report door, when GITFROK_FLEET_GRPC_ADDR is set
 	pool      *db.Pool
 	// releaseStop ends the release trust bundle's staging-directory reconcile
 	// loop with the door (T-0041, SPEC-0045 AC2). nil when distribution is
@@ -81,6 +82,9 @@ func (d *agentDoor) close() {
 	}
 	if d.residency != nil {
 		d.residency.Stop()
+	}
+	if d.fleet != nil {
+		d.fleet.Stop()
 	}
 	if d.enrolment != nil {
 		d.enrolment.Stop()
@@ -311,6 +315,36 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		fmt.Printf("controlplane-app: UsageService listening on %s\n", mcfg.usageAddr)
 	}
 
+	// The admin area's fleet report door (T-0071, SPEC-0058, ADR-0077). Its own
+	// listener rather than a second service on the usage door, so a deployment can
+	// serve one without the other — and so a BFF that has not been given this
+	// address reports the report unavailable instead of an empty fleet.
+	//
+	// It is registered here rather than on the enrolment door because the callers
+	// differ: enrolment verifies a PAT-bearing operator, and this read is an org
+	// administrator's, arriving through the BFF under a session with the tenant and
+	// actor already verified. Nothing on this door authorizes anything itself — the
+	// agent service asks the PDP agent.dataplane.read, which the policy bundle
+	// grants to owner and to nobody else (ADR-0077 decision 2).
+	var fleetServer *ggrpc.Server
+	if fleetAddr := fleetGRPCAddr(os.Getenv); fleetAddr != "" {
+		lis, err := net.Listen("tcp", fleetAddr)
+		if err != nil {
+			if pool != nil {
+				pool.Close()
+			}
+			return nil, fmt.Errorf("fleet reader listen %s: %w", fleetAddr, err)
+		}
+		fleetServer = ggrpc.NewServer()
+		agentv1.RegisterFleetReaderServer(fleetServer, agent.NewFleetDoor(svc))
+		go func() {
+			if serveErr := fleetServer.Serve(lis); serveErr != nil {
+				logf("fleet reader stopped: %v", serveErr)
+			}
+		}()
+		fmt.Printf("controlplane-app: FleetReader listening on %s\n", fleetAddr)
+	}
+
 	// The residency Declare admin door (T-0038, SPEC-0043, ADR-0063). It mirrors the
 	// UsageService door's registration, but differs in one deliberate way: the door
 	// verifies its caller through the identity seam BEFORE any policy decision — the
@@ -414,7 +448,7 @@ func startAgentDoor(cfg agentConfig, mcfg meteringConfig) (*agentDoor, error) {
 		}
 	}()
 	fmt.Printf("controlplane-app: AgentGateway listening on %s (custody-backed CA)\n", cfg.grpcAddr)
-	return &agentDoor{server: server, usage: usageServer, residency: residencyServer, enrolment: enrolmentServer, pool: pool, releaseStop: releaseStop}, nil
+	return &agentDoor{server: server, usage: usageServer, residency: residencyServer, enrolment: enrolmentServer, fleet: fleetServer, pool: pool, releaseStop: releaseStop}, nil
 }
 
 // orNone renders a configuration value for a log line: the value itself, or

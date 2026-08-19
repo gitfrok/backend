@@ -289,3 +289,163 @@ var EnrolmentService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "proto/agent/v1/agent.proto",
 }
+
+const (
+	FleetReader_ListFleet_FullMethodName = "/gitsaas.agent.v1.FleetReader/ListFleet"
+)
+
+// FleetReaderClient is the client API for FleetReader service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ---------------------------------------------------------------------------
+// Fleet visibility for an org administrator  (SPEC-0058 AC1, PR-31, ADR-0077)
+// ---------------------------------------------------------------------------
+// FleetReader serves the admin area's fleet report: which data planes a tenant
+// has, what each last said, and WHEN it last said it.
+//
+// It is a new service rather than an RPC on EnrolmentService because the callers
+// differ in kind. EnrolmentService is an operator door authenticated by a PAT,
+// and deliberately carries no tenant or actor field — both are properties of the
+// verified principal on the call. This read is made by an org administrator
+// through the BFF under a session, so it carries a context the way usage/v1
+// does. One service with two authentication stories is how a door ends up
+// trusting the wrong one.
+//
+// WHAT IS ABSENT HERE IS ADR-0077 DECISION 1. There is no audit-trail read on
+// this service and none anywhere in this package: the audit log is reached
+// through a scoped, time-boxed, revocable grant (SPEC-0033), never through a
+// role, and an unbounded trail browser behind an "administrator" would make that
+// grant machinery decorative. check-contracts' check 17 asserts the absence
+// against the compiled descriptor.
+//
+// There is also no per-person field. `Last active` on a member is presence
+// telemetry about people, nothing else in this product collects any, and this is
+// not the surface that starts.
+type FleetReaderClient interface {
+	// ListFleet returns one tenant's data planes and its provisioned-but-never-
+	// connected rows. It is an `agent.dataplane.read` decision — the action the
+	// Agent context already asks, granted to `owner` and to nobody else. This
+	// surface adds no action and no role (ADR-0077 decision 2).
+	ListFleet(ctx context.Context, in *ListFleetRequest, opts ...grpc.CallOption) (*ListFleetResponse, error)
+}
+
+type fleetReaderClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewFleetReaderClient(cc grpc.ClientConnInterface) FleetReaderClient {
+	return &fleetReaderClient{cc}
+}
+
+func (c *fleetReaderClient) ListFleet(ctx context.Context, in *ListFleetRequest, opts ...grpc.CallOption) (*ListFleetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListFleetResponse)
+	err := c.cc.Invoke(ctx, FleetReader_ListFleet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// FleetReaderServer is the server API for FleetReader service.
+// All implementations must embed UnimplementedFleetReaderServer
+// for forward compatibility.
+//
+// ---------------------------------------------------------------------------
+// Fleet visibility for an org administrator  (SPEC-0058 AC1, PR-31, ADR-0077)
+// ---------------------------------------------------------------------------
+// FleetReader serves the admin area's fleet report: which data planes a tenant
+// has, what each last said, and WHEN it last said it.
+//
+// It is a new service rather than an RPC on EnrolmentService because the callers
+// differ in kind. EnrolmentService is an operator door authenticated by a PAT,
+// and deliberately carries no tenant or actor field — both are properties of the
+// verified principal on the call. This read is made by an org administrator
+// through the BFF under a session, so it carries a context the way usage/v1
+// does. One service with two authentication stories is how a door ends up
+// trusting the wrong one.
+//
+// WHAT IS ABSENT HERE IS ADR-0077 DECISION 1. There is no audit-trail read on
+// this service and none anywhere in this package: the audit log is reached
+// through a scoped, time-boxed, revocable grant (SPEC-0033), never through a
+// role, and an unbounded trail browser behind an "administrator" would make that
+// grant machinery decorative. check-contracts' check 17 asserts the absence
+// against the compiled descriptor.
+//
+// There is also no per-person field. `Last active` on a member is presence
+// telemetry about people, nothing else in this product collects any, and this is
+// not the surface that starts.
+type FleetReaderServer interface {
+	// ListFleet returns one tenant's data planes and its provisioned-but-never-
+	// connected rows. It is an `agent.dataplane.read` decision — the action the
+	// Agent context already asks, granted to `owner` and to nobody else. This
+	// surface adds no action and no role (ADR-0077 decision 2).
+	ListFleet(context.Context, *ListFleetRequest) (*ListFleetResponse, error)
+	mustEmbedUnimplementedFleetReaderServer()
+}
+
+// UnimplementedFleetReaderServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedFleetReaderServer struct{}
+
+func (UnimplementedFleetReaderServer) ListFleet(context.Context, *ListFleetRequest) (*ListFleetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListFleet not implemented")
+}
+func (UnimplementedFleetReaderServer) mustEmbedUnimplementedFleetReaderServer() {}
+func (UnimplementedFleetReaderServer) testEmbeddedByValue()                     {}
+
+// UnsafeFleetReaderServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to FleetReaderServer will
+// result in compilation errors.
+type UnsafeFleetReaderServer interface {
+	mustEmbedUnimplementedFleetReaderServer()
+}
+
+func RegisterFleetReaderServer(s grpc.ServiceRegistrar, srv FleetReaderServer) {
+	// If the following call pancis, it indicates UnimplementedFleetReaderServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&FleetReader_ServiceDesc, srv)
+}
+
+func _FleetReader_ListFleet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListFleetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FleetReaderServer).ListFleet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FleetReader_ListFleet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FleetReaderServer).ListFleet(ctx, req.(*ListFleetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// FleetReader_ServiceDesc is the grpc.ServiceDesc for FleetReader service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var FleetReader_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "gitsaas.agent.v1.FleetReader",
+	HandlerType: (*FleetReaderServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ListFleet",
+			Handler:    _FleetReader_ListFleet_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/agent/v1/agent.proto",
+}

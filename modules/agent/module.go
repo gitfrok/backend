@@ -215,6 +215,18 @@ func NewEnrolmentDoor(op api.Operator, auth identityapi.Authenticator, logf func
 	return agentgrpc.NewEnrolmentDoor(op, auth, logf)
 }
 
+// NewFleetDoor adapts the Operator port onto the agent/v1 FleetReader contract
+// (T-0071, SPEC-0058).
+//
+// A second door over the same port, and deliberately not the same door: the
+// enrolment one verifies a PAT-bearing operator and takes no tenant field, while
+// this one is read by an org administrator through the BFF under a session and so
+// carries a verified FleetContext. One door with two authentication stories is
+// how it ends up trusting the wrong one.
+func NewFleetDoor(op api.Operator) agentv1.FleetReaderServer {
+	return agentgrpc.NewFleetDoor(op)
+}
+
 // AttachMetering wires the metering seams onto an established gateway (T-0034,
 // SPEC-0041): every TelemetrySample and UsageSample the stream RECEIVES is forwarded to
 // the sink, and the newest envelope desired state is delivered and acknowledged (AC9).
