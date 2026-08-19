@@ -524,3 +524,245 @@ var RepositoryRegistry_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "proto/repository/v1/repository.proto",
 }
+
+const (
+	RepositorySettings_GetSettings_FullMethodName    = "/gitsaas.repository.v1.RepositorySettings/GetSettings"
+	RepositorySettings_UpdateSettings_FullMethodName = "/gitsaas.repository.v1.RepositorySettings/UpdateSettings"
+	RepositorySettings_SetArchived_FullMethodName    = "/gitsaas.repository.v1.RepositorySettings/SetArchived"
+)
+
+// RepositorySettingsClient is the client API for RepositorySettings service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// RepositorySettings reads and changes the properties of one repository
+// (SPEC-0057, PR-30, ADR-0076). Additive, and a THIRD service in this package
+// for the same reason RepositoryRegistry is separate from RepositoryReader: a
+// service is the surface one process serves, and these are not the same
+// question.
+//
+// RepositoryRegistry answers which repositories exist for a caller and is
+// deliberately unwidenable — it has no field a caller could use to ask
+// differently (ADR-0071 decision 4). Settings name one repository and change
+// it. A write verb on the listing service would put a mutation behind the one
+// surface whose whole property is that it cannot be steered.
+//
+// WHAT IS ABSENT HERE IS THE DECISION. ADR-0076 accepted name, description and
+// archival only. There is no visibility field, no member or role field, no
+// branch-protection or approval field, and no Delete verb anywhere in this
+// package — asserted against the compiled descriptor by check-contracts' check
+// 16, with a fixture that proves the check can fail.
+//
+// PR-10 says branch protection and approval requirements are enforced
+// server-side and expressed as policy, not UI toggles. A settings surface is
+// exactly where that sentence erodes: not by anyone deciding to break it, but
+// by a "require approvals" checkbox appearing where a user would look for one.
+// The absence is a type property so that it cannot arrive quietly.
+type RepositorySettingsClient interface {
+	GetSettings(ctx context.Context, in *GetSettingsRequest, opts ...grpc.CallOption) (*GetSettingsResponse, error)
+	// UpdateSettings changes the name and the description. It cannot change
+	// anything else, because the request carries nothing else.
+	UpdateSettings(ctx context.Context, in *UpdateSettingsRequest, opts ...grpc.CallOption) (*UpdateSettingsResponse, error)
+	// SetArchived sets or clears the archived state. Archival is a LABEL: an
+	// archived repository still lists, still reads and is still writable
+	// (SPEC-0057's archival rule). Making it refuse writes would be a read-only
+	// condition, and one of those must name its cause from the two-member
+	// vocabulary in repository/api/readonly.go — a git-write-path decision, not
+	// a setting.
+	SetArchived(ctx context.Context, in *SetArchivedRequest, opts ...grpc.CallOption) (*SetArchivedResponse, error)
+}
+
+type repositorySettingsClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewRepositorySettingsClient(cc grpc.ClientConnInterface) RepositorySettingsClient {
+	return &repositorySettingsClient{cc}
+}
+
+func (c *repositorySettingsClient) GetSettings(ctx context.Context, in *GetSettingsRequest, opts ...grpc.CallOption) (*GetSettingsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSettingsResponse)
+	err := c.cc.Invoke(ctx, RepositorySettings_GetSettings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repositorySettingsClient) UpdateSettings(ctx context.Context, in *UpdateSettingsRequest, opts ...grpc.CallOption) (*UpdateSettingsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateSettingsResponse)
+	err := c.cc.Invoke(ctx, RepositorySettings_UpdateSettings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repositorySettingsClient) SetArchived(ctx context.Context, in *SetArchivedRequest, opts ...grpc.CallOption) (*SetArchivedResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetArchivedResponse)
+	err := c.cc.Invoke(ctx, RepositorySettings_SetArchived_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RepositorySettingsServer is the server API for RepositorySettings service.
+// All implementations must embed UnimplementedRepositorySettingsServer
+// for forward compatibility.
+//
+// RepositorySettings reads and changes the properties of one repository
+// (SPEC-0057, PR-30, ADR-0076). Additive, and a THIRD service in this package
+// for the same reason RepositoryRegistry is separate from RepositoryReader: a
+// service is the surface one process serves, and these are not the same
+// question.
+//
+// RepositoryRegistry answers which repositories exist for a caller and is
+// deliberately unwidenable — it has no field a caller could use to ask
+// differently (ADR-0071 decision 4). Settings name one repository and change
+// it. A write verb on the listing service would put a mutation behind the one
+// surface whose whole property is that it cannot be steered.
+//
+// WHAT IS ABSENT HERE IS THE DECISION. ADR-0076 accepted name, description and
+// archival only. There is no visibility field, no member or role field, no
+// branch-protection or approval field, and no Delete verb anywhere in this
+// package — asserted against the compiled descriptor by check-contracts' check
+// 16, with a fixture that proves the check can fail.
+//
+// PR-10 says branch protection and approval requirements are enforced
+// server-side and expressed as policy, not UI toggles. A settings surface is
+// exactly where that sentence erodes: not by anyone deciding to break it, but
+// by a "require approvals" checkbox appearing where a user would look for one.
+// The absence is a type property so that it cannot arrive quietly.
+type RepositorySettingsServer interface {
+	GetSettings(context.Context, *GetSettingsRequest) (*GetSettingsResponse, error)
+	// UpdateSettings changes the name and the description. It cannot change
+	// anything else, because the request carries nothing else.
+	UpdateSettings(context.Context, *UpdateSettingsRequest) (*UpdateSettingsResponse, error)
+	// SetArchived sets or clears the archived state. Archival is a LABEL: an
+	// archived repository still lists, still reads and is still writable
+	// (SPEC-0057's archival rule). Making it refuse writes would be a read-only
+	// condition, and one of those must name its cause from the two-member
+	// vocabulary in repository/api/readonly.go — a git-write-path decision, not
+	// a setting.
+	SetArchived(context.Context, *SetArchivedRequest) (*SetArchivedResponse, error)
+	mustEmbedUnimplementedRepositorySettingsServer()
+}
+
+// UnimplementedRepositorySettingsServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedRepositorySettingsServer struct{}
+
+func (UnimplementedRepositorySettingsServer) GetSettings(context.Context, *GetSettingsRequest) (*GetSettingsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSettings not implemented")
+}
+func (UnimplementedRepositorySettingsServer) UpdateSettings(context.Context, *UpdateSettingsRequest) (*UpdateSettingsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateSettings not implemented")
+}
+func (UnimplementedRepositorySettingsServer) SetArchived(context.Context, *SetArchivedRequest) (*SetArchivedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetArchived not implemented")
+}
+func (UnimplementedRepositorySettingsServer) mustEmbedUnimplementedRepositorySettingsServer() {}
+func (UnimplementedRepositorySettingsServer) testEmbeddedByValue()                            {}
+
+// UnsafeRepositorySettingsServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to RepositorySettingsServer will
+// result in compilation errors.
+type UnsafeRepositorySettingsServer interface {
+	mustEmbedUnimplementedRepositorySettingsServer()
+}
+
+func RegisterRepositorySettingsServer(s grpc.ServiceRegistrar, srv RepositorySettingsServer) {
+	// If the following call pancis, it indicates UnimplementedRepositorySettingsServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&RepositorySettings_ServiceDesc, srv)
+}
+
+func _RepositorySettings_GetSettings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositorySettingsServer).GetSettings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepositorySettings_GetSettings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositorySettingsServer).GetSettings(ctx, req.(*GetSettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RepositorySettings_UpdateSettings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateSettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositorySettingsServer).UpdateSettings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepositorySettings_UpdateSettings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositorySettingsServer).UpdateSettings(ctx, req.(*UpdateSettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RepositorySettings_SetArchived_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetArchivedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositorySettingsServer).SetArchived(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepositorySettings_SetArchived_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositorySettingsServer).SetArchived(ctx, req.(*SetArchivedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// RepositorySettings_ServiceDesc is the grpc.ServiceDesc for RepositorySettings service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var RepositorySettings_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "gitsaas.repository.v1.RepositorySettings",
+	HandlerType: (*RepositorySettingsServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetSettings",
+			Handler:    _RepositorySettings_GetSettings_Handler,
+		},
+		{
+			MethodName: "UpdateSettings",
+			Handler:    _RepositorySettings_UpdateSettings_Handler,
+		},
+		{
+			MethodName: "SetArchived",
+			Handler:    _RepositorySettings_SetArchived_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "proto/repository/v1/repository.proto",
+}

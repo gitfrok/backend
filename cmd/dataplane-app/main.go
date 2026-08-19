@@ -368,6 +368,14 @@ func main() {
 	// "audited" — the trail is the truth the backfill decision needs
 	// (SPEC-0025 AC5, wave-2 N5).
 	security.AttachAuditWitness(dp.findings, security.NewTrailAuditWitness(trail))
+	// The Repository context's settings surface (T-0068, SPEC-0057). Attached here rather than at
+	// construction because the trail is built late — once the plane knows whether it has a
+	// database — and the registry is built early, since Code Search resolves repository names
+	// through it. Until this call every settings write refuses: an unaudited or unauthorized
+	// change is worse than a refused one, and PR-30's clause is "each change audited".
+	if !repository.AttachSettings(dp.repositories, repoAdministrator{pdp: dp.policy}, repoSettingsWitness{trail}) {
+		fmt.Fprintln(os.Stderr, "dataplane repository settings: the Repository context is not this module's service; settings writes will refuse")
+	}
 	var grants identityapi.AuditorGrants
 	witness := grantTrailWitness{trail}
 	if dbPool != nil {
@@ -409,6 +417,12 @@ func main() {
 		// block volumes and holds no record of which repositories the product knows about, and
 		// ADR-0071 makes the registry — this context — the truth for existence.
 		repositoryv1.RegisterRepositoryRegistryServer(doors.policyServer, repository.NewGRPCServer(dp.repositories))
+		// Repository settings (T-0068, SPEC-0057). A third service in the same package, served
+		// by this process because the registry record is what it changes. What it may never
+		// carry — visibility, membership, branch protection, approvals, a delete verb — is
+		// asserted against the compiled descriptor by check-contracts' check 16, not by this
+		// registration.
+		repositoryv1.RegisterRepositorySettingsServer(doors.policyServer, repository.NewSettingsGRPCServer(dp.repositories))
 		// The Release context (T-0064, SPEC-0056). It needs a database — there is
 		// deliberately no in-memory constructor, because a record of what was
 		// announced that empties with the process is the gap ADR-0071 closed.

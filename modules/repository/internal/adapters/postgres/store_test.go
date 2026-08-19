@@ -39,6 +39,11 @@ func TestMain(m *testing.M) {
 	if dsn := os.Getenv("TEST_SUPERUSER_DATABASE_URL"); dsn != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		err := applyMigration(ctx, dsn, "migrations/0001_repository_registry.sql")
+		if err == nil {
+			// 0002 adds the settings columns (T-0068, SPEC-0057). Applied in order, because
+			// it ALTERs the table 0001 creates.
+			err = applyMigration(ctx, dsn, "migrations/0002_repository_settings.sql")
+		}
 		cancel()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "repository postgres tests: could not self-apply migration: %v\n", err)

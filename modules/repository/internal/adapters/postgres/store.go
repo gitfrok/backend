@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -45,10 +46,14 @@ var _ app.Store = (*Store)(nil)
 // Save registers a repository, or converges the row if it is already registered.
 //
 // An upsert rather than an insert: the aggregate's identity is (tenant, repo), and re-registering
-// the same repository with the same name is the same fact stated twice. It is not a rename path —
-// nothing in the product renames a repository yet (that is PR-30, Tier C) — but converging on
-// name here means a replayed create cannot fail on a duplicate key and leave the caller unsure
-// whether the repository exists.
+// the same repository with the same name is the same fact stated twice. Converging here means a
+// replayed create cannot fail on a duplicate key and leave the caller unsure whether the repository
+// exists.
+//
+// Since SPEC-0057 it IS also the rename and archival path — the whole aggregate is written, so the
+// settings a caller changed and the settings it did not both arrive as they now are. Authorization
+// and auditing happen above this port; an adapter that decided either would be a second place the
+// product answers those questions (invariant 2).
 func (s *Store) Save(ctx context.Context, r domain.Repository) error {
 	ctx, err := scoped(ctx, string(r.Tenant))
 	if err != nil {
@@ -56,10 +61,17 @@ func (s *Store) Save(ctx context.Context, r domain.Repository) error {
 	}
 	return s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO repo.repositories (tenant_id, repo_id, name)
-			 VALUES ($1, $2, $3)
-			 ON CONFLICT (tenant_id, repo_id) DO UPDATE SET name = EXCLUDED.name`,
-			string(r.Tenant), string(r.ID), r.Name,
+			`INSERT INTO repo.repositories
+			      (tenant_id, repo_id, name, description, archived_at, settings_updated_at, settings_updated_by)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 ON CONFLICT (tenant_id, repo_id) DO UPDATE SET
+			      name                = EXCLUDED.name,
+			      description         = EXCLUDED.description,
+			      archived_at         = EXCLUDED.archived_at,
+			      settings_updated_at = EXCLUDED.settings_updated_at,
+			      settings_updated_by = EXCLUDED.settings_updated_by`,
+			string(r.Tenant), string(r.ID), r.Name, r.Description,
+			nullableTime(r.ArchivedAt), nullableTime(r.SettingsUpdatedAt), nullableString(r.SettingsUpdatedBy),
 		)
 		if err != nil {
 			return fmt.Errorf("repository postgres: save %s: %w", r.ID, err)
@@ -80,13 +92,24 @@ func (s *Store) Load(ctx context.Context, tenant domain.TenantID, id domain.Repo
 	}
 	var r domain.Repository
 	err = s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		var tenantID, repoID, name string
+		var tenantID, repoID, name, description string
+		var archivedAt, settingsUpdatedAt *time.Time
+		var settingsUpdatedBy *string
 		if err := tx.QueryRow(ctx,
-			`SELECT tenant_id, repo_id, name FROM repo.repositories WHERE repo_id = $1`, string(id),
-		).Scan(&tenantID, &repoID, &name); err != nil {
+			`SELECT tenant_id, repo_id, name, description, archived_at, settings_updated_at, settings_updated_by
+			   FROM repo.repositories WHERE repo_id = $1`, string(id),
+		).Scan(&tenantID, &repoID, &name, &description, &archivedAt, &settingsUpdatedAt, &settingsUpdatedBy); err != nil {
 			return err
 		}
-		r = domain.Repository{Tenant: domain.TenantID(tenantID), ID: domain.RepoID(repoID), Name: name}
+		r = domain.Repository{
+			Tenant:            domain.TenantID(tenantID),
+			ID:                domain.RepoID(repoID),
+			Name:              name,
+			Description:       description,
+			ArchivedAt:        timeOrZero(archivedAt),
+			SettingsUpdatedAt: timeOrZero(settingsUpdatedAt),
+			SettingsUpdatedBy: stringOrEmpty(settingsUpdatedBy),
+		}
 		return nil
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -115,7 +138,7 @@ func (s *Store) Candidates(ctx context.Context, tenant domain.TenantID, afterID 
 	var out []domain.Repository
 	err = s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT tenant_id, repo_id, name
+			`SELECT tenant_id, repo_id, name, description, archived_at
 			   FROM repo.repositories
 			  WHERE repo_id > $1
 			  ORDER BY repo_id ASC
@@ -126,12 +149,20 @@ func (s *Store) Candidates(ctx context.Context, tenant domain.TenantID, afterID 
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var tenantID, repoID, name string
-			if err := rows.Scan(&tenantID, &repoID, &name); err != nil {
+			var tenantID, repoID, name, description string
+			var archivedAt *time.Time
+			if err := rows.Scan(&tenantID, &repoID, &name, &description, &archivedAt); err != nil {
 				return err
 			}
+			// An archived repository is a candidate like any other. Omitting it would make
+			// archival narrow a list, which is exactly the authorization-shaped behaviour
+			// ADR-0076 decision 1 keeps off this surface (SPEC-0057 AC7).
 			out = append(out, domain.Repository{
-				Tenant: domain.TenantID(tenantID), ID: domain.RepoID(repoID), Name: name,
+				Tenant:      domain.TenantID(tenantID),
+				ID:          domain.RepoID(repoID),
+				Name:        name,
+				Description: description,
+				ArchivedAt:  timeOrZero(archivedAt),
 			})
 		}
 		return rows.Err()
@@ -160,4 +191,42 @@ func scoped(ctx context.Context, tenantID string) (context.Context, error) {
 			tenantID, current)
 	}
 	return tenancy.WithTenant(ctx, tenancy.ID(tenantID)), nil
+}
+
+// nullableTime maps the zero time onto SQL NULL.
+//
+// The columns are nullable because "not archived" and "never had its settings changed" are absences,
+// not instants. Writing a zero timestamp instead would make every unarchived repository claim it was
+// archived at the start of the Common Era, and the constraint pairing actor and instant would then
+// pass on a record that means nothing.
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC()
+}
+
+// nullableString maps the empty string onto SQL NULL, so the settings_updated_by/at pair is either
+// wholly present or wholly absent — which is what repositories_settings_change_is_whole checks.
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// timeOrZero reads a nullable timestamp back as the zero time the domain uses for "absent".
+func timeOrZero(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
+// stringOrEmpty reads a nullable text column back as the empty string.
+func stringOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

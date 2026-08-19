@@ -32,8 +32,13 @@ type Service struct {
 	store Store
 	bus   bus.Bus
 	auth  api.Authorizer
-	newID func() string
-	now   func() time.Time
+	// admin authorizes a settings change and witness records one (SPEC-0057). Both are nil until
+	// wired, and every settings write refuses while either is: an unauthorized change and an
+	// unaudited one are both worse than a refused one.
+	admin   api.Administrator
+	witness api.Witness
+	newID   func() string
+	now     func() time.Time
 }
 
 // Option adjusts a Service at construction. Only cmd/ and tests pass these.
@@ -113,4 +118,7 @@ func viewOf(r domain.Repository) api.RepositoryView {
 	return api.RepositoryView{TenantID: string(r.Tenant), RepoID: string(r.ID), Name: r.Name}
 }
 
-var _ api.Reader = (*Service)(nil)
+var (
+	_ api.Reader       = (*Service)(nil)
+	_ api.Repositories = (*Service)(nil)
+)

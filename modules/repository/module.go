@@ -35,6 +35,14 @@ func NewInMemory(b bus.Bus, auth api.Authorizer) api.Repositories {
 	return app.New(memstore.New(), b, app.WithAuthorizer(auth))
 }
 
+// NewInMemoryWithSettings is NewInMemory with the settings surface wired (SPEC-0057).
+//
+// It is a separate constructor rather than more parameters on NewInMemory because most callers of
+// the in-memory store are testing listing or creation and have no opinion about settings. A Service
+// built by NewInMemory refuses every settings WRITE — api.ErrNoAdministrationPoint or
+// api.ErrNoWitness — which is the honest answer for a service nobody told how to authorize or audit
+// one.
+
 // NewPostgres assembles the Repository context on the durable registry (T-0053, SPEC-0052,
 // ADR-0071). This is the constructor a plane binary calls.
 //
@@ -45,6 +53,28 @@ func NewInMemory(b bus.Bus, auth api.Authorizer) api.Repositories {
 // serving an empty list that reads as "you may see nothing".
 func NewPostgres(pool *db.Pool, b bus.Bus, auth api.Authorizer) api.Repositories {
 	return app.New(repopg.New(pool), b, app.WithAuthorizer(auth))
+}
+
+// AttachSettings wires the settings decision point and the audit witness after construction
+// (T-0068, SPEC-0057).
+//
+// Post-construction because of the order the plane is built in: the Repository context is assembled
+// early — Code Search resolves repository names through it — and the audit trail is assembled late,
+// once the plane knows whether it has a database. Rather than reorder the composition root around
+// one surface, the settings ports are attached when they exist, which is the same shape
+// security.AttachAuditWitness uses for the ingest replay guard.
+//
+// It reports whether the wiring took. A false means the caller holds a Repositories that is not this
+// module's service, which is a composition bug: settings writes will refuse with
+// api.ErrNoAdministrationPoint rather than proceeding unauthorized.
+func AttachSettings(r api.Repositories, admin api.Administrator, witness api.Witness) bool {
+	svc, ok := r.(*app.Service)
+	if !ok {
+		return false
+	}
+	app.WithAdministrator(admin)(svc)
+	app.WithWitness(witness)(svc)
+	return true
 }
 
 // NewInMemoryCoordinator assembles the single-process replica coordinator used by git-storaged and
@@ -63,3 +93,12 @@ func NewInMemoryCoordinator(localNodeID string, b bus.Bus) api.Coordinator {
 // registry is this context in the data plane — and per ADR-0071 the registry, not the disk, is
 // the product's truth for existence.
 func NewGRPCServer(l api.Lister) *repogrpc.Server { return repogrpc.NewServer(l) }
+
+// NewSettingsGRPCServer adapts the settings port onto the RepositorySettings contract (T-0068).
+//
+// A third service in the package for the reason the registry is a second one: a service is the
+// surface one process serves, and the registry's whole property is that a caller cannot steer it. A
+// write verb there would put a mutation behind exactly that surface (SPEC-0057).
+func NewSettingsGRPCServer(s api.Settings) *repogrpc.SettingsServer {
+	return repogrpc.NewSettingsServer(s)
+}

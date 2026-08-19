@@ -89,4 +89,8 @@ type Repositories interface {
 	Reader
 	Writer
 	Lister
+	// Settings arrived with SPEC-0057. It is part of the full surface rather than a separate
+	// service over the same store: settings are properties of the registry record, and two
+	// services over one row would be two places that decide what a repository is.
+	Settings
 }
