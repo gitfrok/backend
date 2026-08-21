@@ -46,6 +46,35 @@ func (MergeRequestMerged) EventName() string { return EventAudit }
 func (MergeRequestMerged) Action() string    { return ActionMergeRequestMerged }
 func (e MergeRequestMerged) Tenant() string  { return e.TenantID }
 
+// ActionMergeRequestMergeCompensated is the `action` value recording a merge
+// whose ref move failed AFTER the guarded Save had recorded it merged: the
+// record was re-opened under its own version bump (SPEC-0061 AC12, ADR-0084
+// decision 3). The trail must say so — between the save and the compensation
+// the record said MERGED, and an investigation reading only the merge record
+// would believe a ref moved that never did.
+const ActionMergeRequestMergeCompensated = "codereview.merge.compensated"
+
+// MergeRequestMergeCompensated records one such compensation, correlated to the
+// decision that admitted the merge and carrying the move's refusal reason.
+type MergeRequestMergeCompensated struct {
+	TenantID         string
+	ActorID          string
+	RepositoryID     string
+	MergeRequestID   string
+	TargetRef        string
+	HeadRevision     string
+	RequestID        string
+	PolicyDecisionID string
+	Reason           string
+	OccurredAt       time.Time
+}
+
+func (MergeRequestMergeCompensated) EventName() string { return EventAudit }
+func (MergeRequestMergeCompensated) Action() string {
+	return ActionMergeRequestMergeCompensated
+}
+func (e MergeRequestMergeCompensated) Tenant() string { return e.TenantID }
+
 // ActionMergeRequestExternalIssueLinked and ...Unlinked are the `action` values for
 // referencing an issue that lives in the customer's own tracker (SPEC-0059).
 const (

@@ -71,7 +71,7 @@ func (s *Service) LinkExternalIssue(ctx context.Context, req api.LinkExternalIss
 	mr.ExternalIssues = append(slices.Clone(mr.ExternalIssues), candidate)
 	mr.Version, mr.UpdatedAt = mr.Version+1, now
 	if err := s.store.Save(ctx, mr); err != nil {
-		return api.MergeRequest{}, api.ErrDenied
+		return api.MergeRequest{}, saveErr(err)
 	}
 	if err := s.announceExternalIssue(ctx, mr, req.Context, candidate, now, true); err != nil {
 		return api.MergeRequest{}, err
@@ -115,7 +115,7 @@ func (s *Service) UnlinkExternalIssue(ctx context.Context, req api.UnlinkExterna
 	mr.ExternalIssues = slices.Delete(slices.Clone(mr.ExternalIssues), at, at+1)
 	mr.Version, mr.UpdatedAt = mr.Version+1, now
 	if err := s.store.Save(ctx, mr); err != nil {
-		return api.MergeRequest{}, api.ErrDenied
+		return api.MergeRequest{}, saveErr(err)
 	}
 	if err := s.announceExternalIssue(ctx, mr, req.Context, removed, now, false); err != nil {
 		return api.MergeRequest{}, err

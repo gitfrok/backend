@@ -278,7 +278,15 @@ func main() {
 				fmt.Fprintf(os.Stderr, "dataplane search backfill: %v\n", err)
 			}
 		}()
-		dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
+		// Code Review, durable when this plane has a pool (T-0078, SPEC-0061, ADR-0080). The
+		// in-memory fallback keeps a plane without a database working, and loses every merge
+		// request, review and branch-protection rule on restart — which is a dev convenience,
+		// not a production posture.
+		if dbPool != nil {
+			dp.codeReview = codereview.NewPostgres(dbPool, codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
+		} else {
+			dp.codeReview = codereview.New(codereview.NewRefMover(doors.storageClient), dp.policy, dp.bus)
+		}
 		// Security/Findings attribution resolves the merge base over the same
 		// route to Git storage: git-storaged serves the RepositoryReader
 		// contract, and a plane without storage reports attribution as

@@ -15,9 +15,11 @@ import (
 	"github.com/gitfrok/backend/modules/codereview/internal/adapters/gitlab"
 	"github.com/gitfrok/backend/modules/codereview/internal/adapters/gitwire"
 	codereviewgrpc "github.com/gitfrok/backend/modules/codereview/internal/adapters/grpc"
+	crpg "github.com/gitfrok/backend/modules/codereview/internal/adapters/postgres"
 	"github.com/gitfrok/backend/modules/codereview/internal/app"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/platform/bus"
+	"github.com/gitfrok/backend/platform/db"
 )
 
 // RefMover is Repository/Git's boundary for moving a ref on behalf of an
@@ -65,6 +67,19 @@ func NewImportPacer(interval time.Duration) Pacer {
 // current without this context reading Git state.
 func New(refs RefMover, pdp policyapi.DecisionPoint, events bus.Bus) api.MergeRequests {
 	service := app.New(app.NewMemoryStore(), refs, pdp, events)
+	service.SubscribeRefUpdates(events)
+	return service
+}
+
+// NewPostgres assembles the Code Review context on the durable store (T-0078, SPEC-0061, ADR-0080).
+// This is the constructor a plane binary calls when it has a pool.
+//
+// The difference from New is not a detail. On the in-memory store, every merge request, review,
+// branch-protection rule and external issue reference empties when the process does — and what
+// empties is who approved what, at which revision, against which rule. The audit trail keeps the
+// approval act (SPEC-0019 AC6); the merge request that gives it meaning did not survive a deploy.
+func NewPostgres(pool *db.Pool, refs RefMover, pdp policyapi.DecisionPoint, events bus.Bus) api.MergeRequests {
+	service := app.New(crpg.New(pool), refs, pdp, events)
 	service.SubscribeRefUpdates(events)
 	return service
 }

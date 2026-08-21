@@ -71,8 +71,19 @@ type Store interface {
 	// RefRevision returns the last announced revision for a ref, empty when this
 	// context has never been told about it.
 	RefRevision(ctx context.Context, tenantID, repositoryID, ref string) (string, error)
-	// Save persists a merge request whose Version has already been incremented.
+	// Save persists a merge request whose Version has already been incremented, and
+	// only serves those bumped writers — SubmitReview, Merge, and the other
+	// caller-editing paths. A store that finds the stored row no longer at the
+	// version this write read reports an api.ErrVersionConflict rather than
+	// writing over whoever won the race (ADR-0080 decision 3, ADR-0084 decision 1).
 	Save(ctx context.Context, mr api.MergeRequest) error
+	// SaveProjection is the event path's version-preserving write (ADR-0084
+	// decision 1). It writes the projected fields — TargetRevision, HeadRevision —
+	// without advancing the version, because a ref moving under a merge request is
+	// not a caller edit and must not invalidate a review mid-submission. A store
+	// whose row moved under the projection re-reads and re-applies rather than
+	// surfacing a conflict a caller would have to interpret.
+	SaveProjection(ctx context.Context, mr api.MergeRequest) error
 	// PutReview replaces the submitting actor's current review.
 	PutReview(ctx context.Context, mergeRequestID string, review Review) error
 	Reviews(ctx context.Context, mergeRequestID string) ([]Review, error)
@@ -141,9 +152,10 @@ func (s *Service) onRefUpdated(ctx context.Context, event repoapi.RefUpdated) er
 		// Only the projected view of the target moves. The version guards the
 		// caller's own edits, and a ref moving under a merge request is not one of
 		// them — bumping it here would invalidate a review the author is mid-way
-		// through submitting.
+		// through submitting. SaveProjection is the write shaped for exactly this:
+		// version-preserving by construction (ADR-0084 decision 1).
 		mr.TargetRevision = event.NewSha
-		if err := s.store.Save(ctx, mr); err != nil {
+		if err := s.store.SaveProjection(ctx, mr); err != nil {
 			return err
 		}
 		// The merge base can move when the target moves, so attribution
@@ -169,7 +181,7 @@ func (s *Service) onRefUpdated(ctx context.Context, event repoapi.RefUpdated) er
 			continue
 		}
 		mr.HeadRevision = event.NewSha
-		if err := s.store.Save(ctx, mr); err != nil {
+		if err := s.store.SaveProjection(ctx, mr); err != nil {
 			return err
 		}
 		if err := s.bus.Publish(ctx, api.MergeRequestUpdated{
@@ -294,7 +306,7 @@ func (s *Service) Review(ctx context.Context, req api.ReviewRequest) (api.MergeR
 	}
 	mr.Version, mr.UpdatedAt = mr.Version+1, now
 	if err := s.store.Save(ctx, mr); err != nil {
-		return api.MergeRequest{}, api.ErrDenied
+		return api.MergeRequest{}, saveErr(err)
 	}
 
 	if err := s.bus.Publish(ctx, api.ReviewSubmitted{
@@ -360,9 +372,20 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 		return mr, nil
 	}
 
+	now := s.now().UTC()
+	mr.State, mr.Version, mr.UpdatedAt = api.StateMerged, mr.Version+1, now
+	// The record is saved BEFORE the ref moves (ADR-0084 decision 3): a version
+	// conflict refuses the merge while nothing has moved. The memory posture hid
+	// this ordering because its Save could not fail; the durable one can.
+	if err := s.store.Save(ctx, mr); err != nil {
+		return api.MergeRequest{}, saveErr(err)
+	}
+
 	// The move names the target revision this context last saw. If the ref has
 	// moved since — someone else merged, or a push landed — storage refuses, and
-	// the merge fails rather than landing on state nobody decided about.
+	// the merge fails rather than landing on state nobody decided about. The
+	// record already says MERGED, so the refusal is compensated: a re-open under
+	// its own version bump and a named audit record (SPEC-0061 AC12).
 	if err := s.refs.MoveRef(ctx, MergeRefCommand{
 		TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
 		ActorID: req.ActorID, RequestID: req.RequestID,
@@ -370,14 +393,12 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 		TargetRef:  mr.TargetRef, Revision: mr.HeadRevision,
 		ExpectedCurrentRevision: mr.TargetRevision,
 	}); err != nil {
+		if compErr := s.compensateMerge(ctx, mr, req.ActorID, req.RequestID, decision.DecisionID, err.Error()); compErr != nil {
+			return api.MergeRequest{}, compErr
+		}
 		return api.MergeRequest{}, api.ErrDenied
 	}
 
-	now := s.now().UTC()
-	mr.State, mr.Version, mr.UpdatedAt = api.StateMerged, mr.Version+1, now
-	if err := s.store.Save(ctx, mr); err != nil {
-		return api.MergeRequest{}, api.ErrDenied
-	}
 	if err := s.bus.Publish(ctx, api.MergeRequestMerged{
 		EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
 		ActorID: req.ActorID, TargetRef: mr.TargetRef, HeadRevision: mr.HeadRevision, OccurredAt: now,
@@ -389,6 +410,52 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 		MergeRequestID: mr.ID, TargetRef: mr.TargetRef, HeadRevision: mr.HeadRevision,
 		RequestID: req.RequestID, PolicyDecisionID: decision.DecisionID, OccurredAt: now,
 	})
+}
+
+// saveErr keeps a version conflict distinguishable from every other way a write
+// can fail: a stale version is the one failure a caller can act on, and it has
+// always surfaced as api.ErrVersionConflict — the guard moved into the durable
+// write, and the wire did not move with it (ADR-0084 decision 2).
+func saveErr(err error) error {
+	if errors.Is(err, api.ErrVersionConflict) {
+		return api.ErrVersionConflict
+	}
+	return api.ErrDenied
+}
+
+// compensateMerge re-opens a merge request whose ref move failed after the
+// guarded Save had already recorded it MERGED, and names the compensation on the
+// audit trail (SPEC-0061 AC12, ADR-0084 decision 3). Without it a retry would
+// find a MERGED record pointing at a ref that never moved.
+//
+// The re-open retries against whatever row is there now — the same
+// re-read-and-re-apply posture as the projection write — because a compensation
+// that could itself be lost would leave exactly the hazard it exists for.
+func (s *Service) compensateMerge(ctx context.Context, merged api.MergeRequest, actorID, requestID, decisionID, reason string) error {
+	current := merged
+	for range 8 {
+		if current.State == api.StateMerged {
+			current.State, current.Version, current.UpdatedAt = api.StateOpen, current.Version+1, s.now().UTC()
+			err := s.store.Save(ctx, current)
+			if errors.Is(err, api.ErrVersionConflict) {
+				reloaded, getErr := s.store.Get(ctx, merged.ID)
+				if getErr != nil {
+					return getErr
+				}
+				current = reloaded
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return s.bus.Publish(ctx, audit.MergeRequestMergeCompensated{
+			TenantID: merged.TenantID, ActorID: actorID, RepositoryID: merged.RepositoryID,
+			MergeRequestID: merged.ID, TargetRef: merged.TargetRef, HeadRevision: merged.HeadRevision,
+			RequestID: requestID, PolicyDecisionID: decisionID, Reason: reason, OccurredAt: s.now().UTC(),
+		})
+	}
+	return api.ErrVersionConflict
 }
 
 // SetProtection replaces the exact-ref rule and announces it. Repository/Git
@@ -550,8 +617,11 @@ type memoryStore struct {
 	refs map[string]string
 }
 
-// NewMemoryStore returns the dev/in-memory store. Production injects a
-// tenant-scoped database store.
+// NewMemoryStore returns the dev/in-memory store. A plane with a database pool
+// gets the durable store instead (adapters/postgres); a plane without one runs
+// this, and loses every merge request, review, branch-protection rule and
+// external issue reference on restart — a dev convenience, not a production
+// posture (ADR-0080 decision 4).
 func NewMemoryStore() Store {
 	return &memoryStore{
 		requests: map[string]api.MergeRequest{}, idempotency: map[string]string{},
@@ -625,6 +695,13 @@ func (m *memoryStore) Save(_ context.Context, mr api.MergeRequest) error {
 	}
 	m.requests[mr.ID] = mr
 	return nil
+}
+
+// SaveProjection is the memory store's version-preserving write: the same
+// unguarded overwrite as Save, because the version guard lives in the durable
+// adapter and the in-memory store cannot race itself.
+func (m *memoryStore) SaveProjection(_ context.Context, mr api.MergeRequest) error {
+	return m.Save(nil, mr)
 }
 
 func (m *memoryStore) PutReview(_ context.Context, mergeRequestID string, review Review) error {

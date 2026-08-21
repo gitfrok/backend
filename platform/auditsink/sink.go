@@ -67,6 +67,8 @@ func (s *Sink) dispatch(ctx context.Context, e bus.Event) error {
 		return s.appendApproval(ctx, ev)
 	case platformaudit.MergeRequestMerged:
 		return s.appendMerge(ctx, ev)
+	case platformaudit.MergeRequestMergeCompensated:
+		return s.appendMergeCompensated(ctx, ev)
 	case platformaudit.FindingsScanIngested:
 		return s.appendFindingsScanIngested(ctx, ev)
 	case platformaudit.FindingsTriaged:
@@ -156,6 +158,25 @@ func (s *Sink) appendMerge(ctx context.Context, e platformaudit.MergeRequestMerg
 		Detail: map[string]string{
 			"repository_id": e.RepositoryID, "target_ref": e.TargetRef, "head_revision": e.HeadRevision,
 			"request_id": e.RequestID, "decision_id": e.PolicyDecisionID,
+		},
+		OccurredAt: e.OccurredAt,
+	})
+}
+
+// appendMergeCompensated records the compensation of a merge whose ref move
+// failed after the record had been saved merged (SPEC-0061 AC12, ADR-0084
+// decision 3). The outcome is a denial — the move storage refused — and the
+// detail names why.
+func (s *Sink) appendMergeCompensated(ctx context.Context, e platformaudit.MergeRequestMergeCompensated) error {
+	return s.append(ctx, e.TenantID, auditapi.Entry{
+		TenantID: e.TenantID,
+		Action:   auditapi.Action(platformaudit.ActionMergeRequestMergeCompensated),
+		ActorID:  e.ActorID,
+		Resource: "merge_request/" + e.MergeRequestID,
+		Outcome:  auditapi.OutcomeDenied,
+		Detail: map[string]string{
+			"repository_id": e.RepositoryID, "target_ref": e.TargetRef, "head_revision": e.HeadRevision,
+			"request_id": e.RequestID, "decision_id": e.PolicyDecisionID, "reason": e.Reason,
 		},
 		OccurredAt: e.OccurredAt,
 	})
