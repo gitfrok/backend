@@ -325,6 +325,7 @@ func (s *Service) Review(ctx context.Context, req api.ReviewRequest) (api.MergeR
 	if err := s.bus.Publish(ctx, api.ReviewSubmitted{
 		EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
 		ActorID: req.ActorID, Disposition: req.Disposition, HeadRevision: req.HeadRevision, OccurredAt: now,
+		CreatorID: mr.CreatorID,
 	}); err != nil {
 		return api.MergeRequest{}, err
 	}
@@ -358,11 +359,15 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 
 	// Both counts are facts this context derives: the valid approvals from its own
 	// review log at the current head revision, and the requirement from the
-	// protection rule. Neither can be supplied by a caller (SPEC-0019 AC5).
-	valid, err := s.validApprovals(ctx, mr)
+	// protection rule. Neither can be supplied by a caller (SPEC-0019 AC5). The
+	// actors behind the count are captured here too, so the merge announcement
+	// names exactly who counted AT THE GATE — not whoever approved by the time
+	// the ref move finished (SPEC-0063).
+	approvalActors, err := s.validApprovalActors(ctx, mr)
 	if err != nil {
 		return api.MergeRequest{}, api.ErrDenied
 	}
+	valid := len(approvalActors)
 	protection, protected, err := s.store.Protection(ctx, mr.TenantID, mr.RepositoryID, mr.TargetRef)
 	if err != nil {
 		return api.MergeRequest{}, api.ErrDenied
@@ -415,6 +420,8 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 	if err := s.bus.Publish(ctx, api.MergeRequestMerged{
 		EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
 		ActorID: req.ActorID, TargetRef: mr.TargetRef, HeadRevision: mr.HeadRevision, OccurredAt: now,
+		CreatorID:             mr.CreatorID,
+		CountedApprovalActors: approvalActors,
 	}); err != nil {
 		return api.MergeRequest{}, err
 	}
@@ -503,7 +510,14 @@ func (s *Service) MarkReady(ctx context.Context, req api.ReadyRequest) (api.Merg
 	if err := s.store.Save(ctx, mr); err != nil {
 		return api.MergeRequest{}, saveErr(err)
 	}
-	return mr, nil
+	// The draft's one announcement (SPEC-0064): everything before this was
+	// quiet by decision. Notifications consumes it as the review-requested
+	// fact (SPEC-0063 AC1) — same recipients as an open would have had.
+	return mr, s.bus.Publish(ctx, api.MergeRequestReady{
+		EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
+		ActorID: req.ActorID, HeadRevision: mr.HeadRevision, TargetRef: mr.TargetRef,
+		OccurredAt: mr.UpdatedAt,
+	})
 }
 
 // SetProtection replaces the exact-ref rule and announces it. Repository/Git
@@ -587,20 +601,32 @@ func (s *Service) mergeGateContext(ctx context.Context, mr api.MergeRequest, act
 // still recorded, still audited as review activity — never counts toward the
 // gate, because four eyes means two people who are not the one being merged.
 func (s *Service) validApprovals(ctx context.Context, mr api.MergeRequest) (int, error) {
-	reviews, err := s.store.Reviews(ctx, mr.ID)
+	actors, err := s.validApprovalActors(ctx, mr)
 	if err != nil {
 		return 0, err
 	}
-	count := 0
+	return len(actors), nil
+}
+
+// validApprovalActors names the approvals validApprovals counts. The names are
+// published on MergeRequestMerged so a recipient-deriving consumer needs no
+// reach-back into this context (SPEC-0063); they are still only names — never
+// a count, never an outcome.
+func (s *Service) validApprovalActors(ctx context.Context, mr api.MergeRequest) ([]string, error) {
+	reviews, err := s.store.Reviews(ctx, mr.ID)
+	if err != nil {
+		return nil, err
+	}
+	var actors []string
 	for _, review := range reviews {
 		if review.ActorID == mr.CreatorID {
 			continue
 		}
 		if review.Disposition == api.DispositionApprove && review.HeadRevision == mr.HeadRevision {
-			count++
+			actors = append(actors, review.ActorID)
 		}
 	}
-	return count, nil
+	return actors, nil
 }
 
 func (s *Service) decide(ctx context.Context, principal api.Context, action, resourceType, resourceID string, attributes map[string]string) (policyapi.Decision, bool) {

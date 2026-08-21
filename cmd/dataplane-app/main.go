@@ -24,6 +24,7 @@ import (
 	codereviewv1 "github.com/gitfrok/backend/gen/proto/codereview/v1"
 	gitv1 "github.com/gitfrok/backend/gen/proto/git/v1"
 	identityv1 "github.com/gitfrok/backend/gen/proto/identity/v1"
+	notificationsv1 "github.com/gitfrok/backend/gen/proto/notifications/v1"
 	releasev1 "github.com/gitfrok/backend/gen/proto/release/v1"
 	repositoryv1 "github.com/gitfrok/backend/gen/proto/repository/v1"
 	searchv1 "github.com/gitfrok/backend/gen/proto/search/v1"
@@ -37,6 +38,7 @@ import (
 	csapi "github.com/gitfrok/backend/modules/codesearch/api"
 	"github.com/gitfrok/backend/modules/identity"
 	identityapi "github.com/gitfrok/backend/modules/identity/api"
+	"github.com/gitfrok/backend/modules/notifications"
 	"github.com/gitfrok/backend/modules/policy"
 	policyapi "github.com/gitfrok/backend/modules/policy/api"
 	"github.com/gitfrok/backend/modules/release"
@@ -391,6 +393,26 @@ func main() {
 	} else {
 		grants = identity.NewAuditorGrantsInMemory(dp.policy, dp.bus, witness)
 	}
+
+	// The Notifications context (T-0080, SPEC-0063, ADR-0086). It subscribes to the
+	// same bus events every producer already publishes and writes one durable row per
+	// (recipient, event) — recipients derived server-side, the acting actor excluded.
+	// Durable when this plane has a pool; the in-memory fallback is a dev convenience,
+	// exactly like Code Review's. Recipient derivation reads Identity&Access's
+	// membership view through its api surface (invariant 14), never another module's
+	// tables (invariant 15).
+	var members identityapi.Directory
+	if dbPool != nil {
+		members = identity.NewDirectory(dbPool)
+	} else {
+		members = identity.NewInMemoryDirectory()
+	}
+	nStore, nCreators := notifications.NewMemoryStore()
+	if dbPool != nil {
+		nStore, nCreators = notifications.NewPostgresStore(dbPool)
+	}
+	notificationSvc := notifications.New(nStore, nCreators, notifications.NewDirectory(members))
+	notifications.Subscribe(dp.bus, notificationSvc)
 	// The grants surface is also the decision-time facts source for auditor
 	// pack reads (SPEC-0033 AC7): the evidence service reads grant validity
 	// fresh from it on every evidence.pack.read decision an auditor makes.
@@ -446,6 +468,10 @@ func main() {
 		if dp.imports != nil {
 			codereviewv1.RegisterImportServiceServer(doors.policyServer, codereview.NewImportGRPCServer(dp.imports))
 		}
+		// Notifications (T-0080, SPEC-0063): the bell's read surface — list,
+		// unread count, mark-read — over rows derived server-side from the bus.
+		notificationsv1.RegisterNotificationServiceServer(doors.policyServer,
+			notifications.GRPCServer(notificationSvc, dp.policy))
 		// Credential lifecycle (IssuePAT/ListPATs/RevokePAT) when this plane has
 		// the Git front doors that consume credentials. The door derives the
 		// tenant-scoped principal from the request, so it is only composed where

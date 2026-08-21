@@ -24,6 +24,7 @@ func TestCodeReviewEventShapesMirrorContracts(t *testing.T) {
 		{api.ReviewSubmitted{}, (*coderevieweventsv1.ReviewSubmitted)(nil)},
 		{api.MergeRequestMerged{}, (*coderevieweventsv1.MergeRequestMerged)(nil)},
 		{api.BranchProtectionChanged{}, (*coderevieweventsv1.BranchProtectionChanged)(nil)},
+		{api.MergeRequestReady{}, (*coderevieweventsv1.MergeRequestReady)(nil)},
 	} {
 		if got, want := pair.event.EventName(), string(pair.message.ProtoReflect().Descriptor().FullName()); got != want {
 			t.Fatalf("event name = %q, want %q", got, want)
@@ -41,7 +42,7 @@ func TestCodeReviewEventShapesMirrorContracts(t *testing.T) {
 func TestCodeReviewEventsCarryNoPolicyOutcomeOrReviewText(t *testing.T) {
 	for _, event := range []any{
 		api.MergeRequestOpened{}, api.MergeRequestUpdated{}, api.ReviewSubmitted{},
-		api.MergeRequestMerged{}, api.BranchProtectionChanged{},
+		api.MergeRequestMerged{}, api.BranchProtectionChanged{}, api.MergeRequestReady{},
 	} {
 		fields := goFieldNames(reflect.TypeOf(event))
 		for _, forbidden := range []string{"ALLOWED", "ALLOW", "DECISION", "APPROVALCOUNT", "VALIDAPPROVALS", "COMMENT", "CREDENTIAL", "TOKEN"} {

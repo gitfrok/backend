@@ -45,6 +45,15 @@ func NewPostgres(pool *db.Pool, activeKeyID string, keys map[string][]byte, pdp 
 
 func NewGRPCServer(auth api.Authenticator) *identitygrpc.Server { return identitygrpc.NewServer(auth) }
 
+// NewDirectory builds the read-only tenant membership view on the durable
+// memberships store (SPEC-0063): the same state credential resolution trusts,
+// read through the platform's tenant-scoped transaction. Dev planes and tests
+// build NewInMemoryDirectory instead.
+func NewDirectory(pool *db.Pool) api.Directory { return identitypg.NewDirectory(pool) }
+
+// NewInMemoryDirectory builds the dev/test membership view.
+func NewInMemoryDirectory() api.Directory { return identitymemory.NewDirectory() }
+
 // NewAuditorGrantsInMemory assembles the auditor grant lifecycle on the
 // in-memory store for dev planes and tests (T-0027, SPEC-0033). Lifecycle
 // actions require the PDP port, the witness log AC4 appends to, and the
