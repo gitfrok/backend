@@ -40,6 +40,7 @@ func (s *Server) CreateMergeRequest(ctx context.Context, req *codereviewv1.Creat
 		Context:   principal,
 		SourceRef: req.GetSourceRef(), TargetRef: req.GetTargetRef(),
 		Title: req.GetTitle(), Description: req.GetDescription(),
+		Draft: req.GetDraft(),
 	})
 	if err != nil {
 		return nil, denial()
@@ -92,6 +93,26 @@ func (s *Server) MergeMergeRequest(ctx context.Context, req *codereviewv1.MergeM
 		return nil, denial()
 	}
 	return &codereviewv1.MergeMergeRequestResponse{MergeRequest: toProto(mr)}, nil
+}
+
+// MarkMergeRequestReady is the draft's one door out (ADR-0087, SPEC-0064). The
+// refusal shape matches the rest of this surface: a coarse denial that does not
+// distinguish a missing merge request from one in another tenant or the wrong
+// state.
+func (s *Server) MarkMergeRequestReady(ctx context.Context, req *codereviewv1.MarkMergeRequestReadyRequest) (*codereviewv1.MarkMergeRequestReadyResponse, error) {
+	ctx, principal, err := intoContext(ctx, req.GetContext())
+	if err != nil {
+		return nil, denial()
+	}
+	mr, err := s.requests.MarkReady(ctx, api.ReadyRequest{
+		Context:         principal,
+		MergeRequestID:  req.GetMergeRequestId(),
+		ExpectedVersion: req.GetExpectedVersion(),
+	})
+	if err != nil {
+		return nil, denial()
+	}
+	return &codereviewv1.MarkMergeRequestReadyResponse{MergeRequest: toProto(mr)}, nil
 }
 
 func (s *Server) SetBranchProtection(ctx context.Context, req *codereviewv1.SetBranchProtectionRequest) (*codereviewv1.SetBranchProtectionResponse, error) {
@@ -150,6 +171,8 @@ func stateProto(state api.State) codereviewv1.MergeRequestState {
 		return codereviewv1.MergeRequestState_MERGE_REQUEST_STATE_CLOSED
 	case api.StateMerged:
 		return codereviewv1.MergeRequestState_MERGE_REQUEST_STATE_MERGED
+	case api.StateDraft:
+		return codereviewv1.MergeRequestState_MERGE_REQUEST_STATE_DRAFT
 	default:
 		return codereviewv1.MergeRequestState_MERGE_REQUEST_STATE_UNSPECIFIED
 	}

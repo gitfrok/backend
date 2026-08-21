@@ -54,10 +54,10 @@ func bundleGate(t *testing.T, provider api.FindingsFactsProvider) (*Service, *re
 	return service, refs
 }
 
-// bundleGateMR is the approved merge the gate decides about: one first-party
-// approval against a one-approval rule, so the approval gate is satisfied and
-// any denial below is attributable to the security gate itself (SPEC-0029
-// AC3).
+// bundleGateMR is the approved merge the gate decides about: two first-party
+// non-author approvals — the four-eyes floor (ADR-0085) — against a
+// one-approval rule, so the approval gate is satisfied and any denial below is
+// attributable to the security gate itself (SPEC-0029 AC3).
 func bundleGateMR(t *testing.T, service *Service) api.MergeRequest {
 	t.Helper()
 	ctx := t.Context()
@@ -76,7 +76,7 @@ func bundleGateMR(t *testing.T, service *Service) api.MergeRequest {
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
-	return reviewed
+	return approveAs(t, service, reviewed, "actor-c", "request-review-2")
 }
 
 func mergeUnderGate(t *testing.T, service *Service, mr api.MergeRequest) (api.MergeRequest, error) {

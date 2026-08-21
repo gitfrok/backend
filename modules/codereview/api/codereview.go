@@ -29,6 +29,9 @@ const (
 	StateOpen   State = "OPEN"
 	StateClosed State = "CLOSED"
 	StateMerged State = "MERGED"
+	// StateDraft is a merge request being prepared (ADR-0087, SPEC-0064). It
+	// cannot merge and receives no projections until MarkReady moves it to OPEN.
+	StateDraft State = "DRAFT"
 )
 
 // Disposition is one actor's current position on a merge request. Only APPROVE,
@@ -86,6 +89,9 @@ type OpenRequest struct {
 	Context
 	SourceRef, TargetRef string
 	Title, Description   string
+	// Draft opens the merge request as DRAFT (ADR-0087, SPEC-0064): quiet until
+	// MarkReady. False keeps the pre-draft behaviour exactly.
+	Draft bool
 }
 
 // ReviewRequest records one actor's current disposition. A later submission by
@@ -107,6 +113,10 @@ type MergeRequestCommand struct {
 	MergeRequestID  string
 	ExpectedVersion int64
 }
+
+// ReadyRequest marks a draft ready for review. Same shape as the merge command:
+// the opaque ID and the caller's version for the concurrency pre-check.
+type ReadyRequest = MergeRequestCommand
 
 // ProtectionRequest replaces the exact-ref rule for a target ref.
 type ProtectionRequest struct {
@@ -390,6 +400,10 @@ type MergeRequests interface {
 	Get(context.Context, Context, string) (MergeRequest, error)
 	Review(context.Context, ReviewRequest) (MergeRequest, error)
 	Merge(context.Context, MergeRequestCommand) (MergeRequest, error)
+	// MarkReady is the draft's one door out (ADR-0087, SPEC-0064): DRAFT → OPEN
+	// under its own version bump. Any other state is refused with the surface's
+	// coarse denial.
+	MarkReady(context.Context, ReadyRequest) (MergeRequest, error)
 	SetProtection(context.Context, ProtectionRequest) (BranchProtection, error)
 	// LinkExternalIssue and UnlinkExternalIssue reference an issue that lives
 	// elsewhere (SPEC-0059). They are on this port rather than a new one because a

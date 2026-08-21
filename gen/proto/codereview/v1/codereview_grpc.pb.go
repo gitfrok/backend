@@ -28,13 +28,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MergeRequestService_CreateMergeRequest_FullMethodName  = "/gitsaas.codereview.v1.MergeRequestService/CreateMergeRequest"
-	MergeRequestService_GetMergeRequest_FullMethodName     = "/gitsaas.codereview.v1.MergeRequestService/GetMergeRequest"
-	MergeRequestService_SubmitReview_FullMethodName        = "/gitsaas.codereview.v1.MergeRequestService/SubmitReview"
-	MergeRequestService_MergeMergeRequest_FullMethodName   = "/gitsaas.codereview.v1.MergeRequestService/MergeMergeRequest"
-	MergeRequestService_SetBranchProtection_FullMethodName = "/gitsaas.codereview.v1.MergeRequestService/SetBranchProtection"
-	MergeRequestService_LinkExternalIssue_FullMethodName   = "/gitsaas.codereview.v1.MergeRequestService/LinkExternalIssue"
-	MergeRequestService_UnlinkExternalIssue_FullMethodName = "/gitsaas.codereview.v1.MergeRequestService/UnlinkExternalIssue"
+	MergeRequestService_CreateMergeRequest_FullMethodName    = "/gitsaas.codereview.v1.MergeRequestService/CreateMergeRequest"
+	MergeRequestService_GetMergeRequest_FullMethodName       = "/gitsaas.codereview.v1.MergeRequestService/GetMergeRequest"
+	MergeRequestService_SubmitReview_FullMethodName          = "/gitsaas.codereview.v1.MergeRequestService/SubmitReview"
+	MergeRequestService_MergeMergeRequest_FullMethodName     = "/gitsaas.codereview.v1.MergeRequestService/MergeMergeRequest"
+	MergeRequestService_MarkMergeRequestReady_FullMethodName = "/gitsaas.codereview.v1.MergeRequestService/MarkMergeRequestReady"
+	MergeRequestService_SetBranchProtection_FullMethodName   = "/gitsaas.codereview.v1.MergeRequestService/SetBranchProtection"
+	MergeRequestService_LinkExternalIssue_FullMethodName     = "/gitsaas.codereview.v1.MergeRequestService/LinkExternalIssue"
+	MergeRequestService_UnlinkExternalIssue_FullMethodName   = "/gitsaas.codereview.v1.MergeRequestService/UnlinkExternalIssue"
 )
 
 // MergeRequestServiceClient is the client API for MergeRequestService service.
@@ -45,6 +46,11 @@ type MergeRequestServiceClient interface {
 	GetMergeRequest(ctx context.Context, in *GetMergeRequestRequest, opts ...grpc.CallOption) (*GetMergeRequestResponse, error)
 	SubmitReview(ctx context.Context, in *SubmitReviewRequest, opts ...grpc.CallOption) (*SubmitReviewResponse, error)
 	MergeMergeRequest(ctx context.Context, in *MergeMergeRequestRequest, opts ...grpc.CallOption) (*MergeMergeRequestResponse, error)
+	// MarkMergeRequestReady moves a DRAFT merge request to OPEN (ADR-0087,
+	// SPEC-0064). It is the draft's one transition; a merge request that is not
+	// in DRAFT is refused, and the refusal is the same coarse denial as the rest
+	// of this surface.
+	MarkMergeRequestReady(ctx context.Context, in *MarkMergeRequestReadyRequest, opts ...grpc.CallOption) (*MarkMergeRequestReadyResponse, error)
 	SetBranchProtection(ctx context.Context, in *SetBranchProtectionRequest, opts ...grpc.CallOption) (*SetBranchProtectionResponse, error)
 	// LinkExternalIssue and UnlinkExternalIssue reference an issue that lives in
 	// the customer's own tracker (SPEC-0059, PR-28's accepted scope, ADR-0074).
@@ -112,6 +118,16 @@ func (c *mergeRequestServiceClient) MergeMergeRequest(ctx context.Context, in *M
 	return out, nil
 }
 
+func (c *mergeRequestServiceClient) MarkMergeRequestReady(ctx context.Context, in *MarkMergeRequestReadyRequest, opts ...grpc.CallOption) (*MarkMergeRequestReadyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MarkMergeRequestReadyResponse)
+	err := c.cc.Invoke(ctx, MergeRequestService_MarkMergeRequestReady_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *mergeRequestServiceClient) SetBranchProtection(ctx context.Context, in *SetBranchProtectionRequest, opts ...grpc.CallOption) (*SetBranchProtectionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetBranchProtectionResponse)
@@ -150,6 +166,11 @@ type MergeRequestServiceServer interface {
 	GetMergeRequest(context.Context, *GetMergeRequestRequest) (*GetMergeRequestResponse, error)
 	SubmitReview(context.Context, *SubmitReviewRequest) (*SubmitReviewResponse, error)
 	MergeMergeRequest(context.Context, *MergeMergeRequestRequest) (*MergeMergeRequestResponse, error)
+	// MarkMergeRequestReady moves a DRAFT merge request to OPEN (ADR-0087,
+	// SPEC-0064). It is the draft's one transition; a merge request that is not
+	// in DRAFT is refused, and the refusal is the same coarse denial as the rest
+	// of this surface.
+	MarkMergeRequestReady(context.Context, *MarkMergeRequestReadyRequest) (*MarkMergeRequestReadyResponse, error)
 	SetBranchProtection(context.Context, *SetBranchProtectionRequest) (*SetBranchProtectionResponse, error)
 	// LinkExternalIssue and UnlinkExternalIssue reference an issue that lives in
 	// the customer's own tracker (SPEC-0059, PR-28's accepted scope, ADR-0074).
@@ -188,6 +209,9 @@ func (UnimplementedMergeRequestServiceServer) SubmitReview(context.Context, *Sub
 }
 func (UnimplementedMergeRequestServiceServer) MergeMergeRequest(context.Context, *MergeMergeRequestRequest) (*MergeMergeRequestResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MergeMergeRequest not implemented")
+}
+func (UnimplementedMergeRequestServiceServer) MarkMergeRequestReady(context.Context, *MarkMergeRequestReadyRequest) (*MarkMergeRequestReadyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MarkMergeRequestReady not implemented")
 }
 func (UnimplementedMergeRequestServiceServer) SetBranchProtection(context.Context, *SetBranchProtectionRequest) (*SetBranchProtectionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetBranchProtection not implemented")
@@ -291,6 +315,24 @@ func _MergeRequestService_MergeMergeRequest_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MergeRequestService_MarkMergeRequestReady_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkMergeRequestReadyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MergeRequestServiceServer).MarkMergeRequestReady(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MergeRequestService_MarkMergeRequestReady_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MergeRequestServiceServer).MarkMergeRequestReady(ctx, req.(*MarkMergeRequestReadyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MergeRequestService_SetBranchProtection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetBranchProtectionRequest)
 	if err := dec(in); err != nil {
@@ -367,6 +409,10 @@ var MergeRequestService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MergeMergeRequest",
 			Handler:    _MergeRequestService_MergeMergeRequest_Handler,
+		},
+		{
+			MethodName: "MarkMergeRequestReady",
+			Handler:    _MergeRequestService_MarkMergeRequestReady_Handler,
 		},
 		{
 			MethodName: "SetBranchProtection",

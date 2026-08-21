@@ -555,6 +555,33 @@ func TestAProjectionForAMergeRequestThatIsNotThereIsRefused(t *testing.T) {
 	}
 }
 
+// SPEC-0064 AC6: the durable store round-trips DRAFT unchanged — the column is
+// text, the state is data, and no migration was needed.
+func TestADraftRoundTrips(t *testing.T) {
+	pool := openPool(t)
+	tenant := tenantFor(t)
+	ctx := scopedCtx(t, tenant)
+	store := crpg.New(pool)
+
+	draft := mergeRequest(tenant, "mr-draft")
+	draft.State = api.StateDraft
+	if _, _, err := store.CreateOrGet(ctx, "key-draft", draft); err != nil {
+		t.Fatalf("create draft: %v", err)
+	}
+	got, err := store.Get(ctx, "mr-draft")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != api.StateDraft {
+		t.Fatalf("state = %s, want DRAFT to round-trip", got.State)
+	}
+	// The open lookups the ref-update path projects through never list a draft.
+	open, err := store.OpenForTarget(ctx, tenant, "repo-a", "refs/heads/main")
+	if err != nil || len(open) != 0 {
+		t.Fatalf("a draft appeared in the open lookups: %+v (%v)", open, err)
+	}
+}
+
 // AC1/AC2: the open-merge-request lookups the ref-update path depends on return what they should,
 // and nothing that is closed.
 func TestOpenLookupsSeeOnlyOpenMergeRequests(t *testing.T) {

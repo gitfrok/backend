@@ -222,11 +222,17 @@ func (s *Service) Open(ctx context.Context, req api.OpenRequest) (api.MergeReque
 	}
 
 	now := s.now().UTC()
+	state := api.StateOpen
+	if req.Draft {
+		// A draft is quiet (ADR-0087, SPEC-0064): it merges nothing, receives no
+		// projections, and announces nothing until someone marks it ready.
+		state = api.StateDraft
+	}
 	candidate := api.MergeRequest{
 		ID: s.newID(), TenantID: req.TenantID, RepositoryID: req.RepositoryID,
 		SourceRef: req.SourceRef, TargetRef: req.TargetRef,
 		Title: req.Title, Description: req.Description,
-		CreatorID: req.ActorID, State: api.StateOpen, HeadRevision: headRevision,
+		CreatorID: req.ActorID, State: state, HeadRevision: headRevision,
 		TargetRevision: targetRevision,
 		CreatedAt:      now, UpdatedAt: now, Version: 1,
 	}
@@ -237,21 +243,26 @@ func (s *Service) Open(ctx context.Context, req api.OpenRequest) (api.MergeReque
 	if !created {
 		return mr, nil
 	}
-	if err := s.bus.Publish(ctx, api.MergeRequestOpened{
-		EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
-		SourceRef: mr.SourceRef, TargetRef: mr.TargetRef, CreatorID: mr.CreatorID, OccurredAt: now,
-	}); err != nil {
-		return api.MergeRequest{}, err
-	}
-	// MergeRequestOpened carries no head revision, and attribution consumers
-	// need the (head, target) pair the moment the request exists: the update
-	// event follows the open event on the same path (SPEC-0028).
-	if err := s.bus.Publish(ctx, api.MergeRequestUpdated{
-		EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
-		ActorID: mr.CreatorID, HeadRevision: mr.HeadRevision,
-		SourceRef: mr.SourceRef, TargetRef: mr.TargetRef, OccurredAt: now,
-	}); err != nil {
-		return api.MergeRequest{}, err
+	// A draft announces nothing (ADR-0087 decision 3): the events below are what
+	// attribution consumers and projections key on, and a draft must be invisible
+	// to both until it is ready.
+	if mr.State == api.StateOpen {
+		if err := s.bus.Publish(ctx, api.MergeRequestOpened{
+			EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
+			SourceRef: mr.SourceRef, TargetRef: mr.TargetRef, CreatorID: mr.CreatorID, OccurredAt: now,
+		}); err != nil {
+			return api.MergeRequest{}, err
+		}
+		// MergeRequestOpened carries no head revision, and attribution consumers
+		// need the (head, target) pair the moment the request exists: the update
+		// event follows the open event on the same path (SPEC-0028).
+		if err := s.bus.Publish(ctx, api.MergeRequestUpdated{
+			EventID: s.newID(), MergeRequestID: mr.ID, TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
+			ActorID: mr.CreatorID, HeadRevision: mr.HeadRevision,
+			SourceRef: mr.SourceRef, TargetRef: mr.TargetRef, OccurredAt: now,
+		}); err != nil {
+			return api.MergeRequest{}, err
+		}
 	}
 	return mr, nil
 }
@@ -276,7 +287,9 @@ func (s *Service) Review(ctx context.Context, req api.ReviewRequest) (api.MergeR
 	if err != nil || !validDisposition(req.Disposition) || req.HeadRevision == "" {
 		return api.MergeRequest{}, api.ErrDenied
 	}
-	if mr.State != api.StateOpen {
+	// A draft accepts reviews — early feedback is the point (SPEC-0064 AC5) —
+	// but nothing terminal or merged does.
+	if mr.State != api.StateOpen && mr.State != api.StateDraft {
 		return api.MergeRequest{}, api.ErrDenied
 	}
 	if req.ExpectedVersion != mr.Version {
@@ -458,6 +471,41 @@ func (s *Service) compensateMerge(ctx context.Context, merged api.MergeRequest, 
 	return api.ErrVersionConflict
 }
 
+// MarkReady moves a DRAFT merge request to OPEN (ADR-0087, SPEC-0064). It is
+// the draft's one transition: any other state is refused, the expected-version
+// pre-check produces the same conflict error as every other command, and both
+// revisions are re-read from what Repository/Git last announced — a draft opened
+// against last week's target becomes reviewable against the current one.
+func (s *Service) MarkReady(ctx context.Context, req api.ReadyRequest) (api.MergeRequest, error) {
+	mr, err := s.Get(ctx, req.Context, req.MergeRequestID)
+	if err != nil {
+		return api.MergeRequest{}, api.ErrDenied
+	}
+	if mr.State != api.StateDraft {
+		return api.MergeRequest{}, api.ErrDenied
+	}
+	if req.ExpectedVersion != mr.Version {
+		return api.MergeRequest{}, api.ErrVersionConflict
+	}
+	if !s.allowed(ctx, req.Context, "merge_request.ready", "merge_request", mr.ID, nil) {
+		return api.MergeRequest{}, api.ErrDenied
+	}
+	headRevision, err := s.store.RefRevision(ctx, mr.TenantID, mr.RepositoryID, mr.SourceRef)
+	if err != nil || headRevision == "" {
+		return api.MergeRequest{}, api.ErrDenied
+	}
+	targetRevision, err := s.store.RefRevision(ctx, mr.TenantID, mr.RepositoryID, mr.TargetRef)
+	if err != nil {
+		return api.MergeRequest{}, api.ErrDenied
+	}
+	mr.State, mr.HeadRevision, mr.TargetRevision = api.StateOpen, headRevision, targetRevision
+	mr.Version, mr.UpdatedAt = mr.Version+1, s.now().UTC()
+	if err := s.store.Save(ctx, mr); err != nil {
+		return api.MergeRequest{}, saveErr(err)
+	}
+	return mr, nil
+}
+
 // SetProtection replaces the exact-ref rule and announces it. Repository/Git
 // projects the event; it never reads this context's tables.
 func (s *Service) SetProtection(ctx context.Context, req api.ProtectionRequest) (api.BranchProtection, error) {
@@ -533,8 +581,11 @@ func (s *Service) mergeGateContext(ctx context.Context, mr api.MergeRequest, act
 }
 
 // validApprovals counts approvals made against the merge request's current head
-// revision. A changed head therefore invalidates every earlier approval, which is
-// the whole point of pinning a review to a revision (SPEC-0019 AC4).
+// revision by people who are not the author (ADR-0085, SPEC-0062 AC3). A changed
+// head therefore invalidates every earlier approval, which is the whole point of
+// pinning a review to a revision (SPEC-0019 AC4); and the author's own review —
+// still recorded, still audited as review activity — never counts toward the
+// gate, because four eyes means two people who are not the one being merged.
 func (s *Service) validApprovals(ctx context.Context, mr api.MergeRequest) (int, error) {
 	reviews, err := s.store.Reviews(ctx, mr.ID)
 	if err != nil {
@@ -542,6 +593,9 @@ func (s *Service) validApprovals(ctx context.Context, mr api.MergeRequest) (int,
 	}
 	count := 0
 	for _, review := range reviews {
+		if review.ActorID == mr.CreatorID {
+			continue
+		}
 		if review.Disposition == api.DispositionApprove && review.HeadRevision == mr.HeadRevision {
 			count++
 		}

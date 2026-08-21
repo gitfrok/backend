@@ -92,6 +92,9 @@ func TestAConflictingSaveSurfacesTheVersionConflict(t *testing.T) {
 	service, _, _, _ := guardedHarness(t, store)
 	mr := openOne(t, service, "request-open")
 	mr = approveOne(t, service, mr, "request-review")
+	// The four-eyes floor (ADR-0085): a mergeable merge request needs a second
+	// non-author approval.
+	mr = approveAs(t, service, mr, "actor-c", "request-review-2")
 
 	store.failNextSave = api.ErrVersionConflict
 	if _, err := service.Merge(t.Context(), api.MergeRequestCommand{
@@ -109,6 +112,9 @@ func TestAMergeWhoseSaveConflictsNeverMovesTheRef(t *testing.T) {
 	service, refs, got, _ := guardedHarness(t, store)
 	mr := openOne(t, service, "request-open")
 	mr = approveOne(t, service, mr, "request-review")
+	// The four-eyes floor (ADR-0085): a mergeable merge request needs a second
+	// non-author approval.
+	mr = approveAs(t, service, mr, "actor-c", "request-review-2")
 
 	store.failNextSave = api.ErrVersionConflict
 	if _, err := service.Merge(t.Context(), api.MergeRequestCommand{
@@ -139,6 +145,9 @@ func TestAFailedRefMoveIsCompensatedByAReopenAndAnAuditRecord(t *testing.T) {
 	service, refs, got, compensated := guardedHarness(t, NewMemoryStore())
 	mr := openOne(t, service, "request-open")
 	mr = approveOne(t, service, mr, "request-review")
+	// The four-eyes floor (ADR-0085): a mergeable merge request needs a second
+	// non-author approval.
+	mr = approveAs(t, service, mr, "actor-c", "request-review-2")
 
 	refs.err = errors.New("the ref moved since the merge was decided")
 	if _, err := service.Merge(t.Context(), api.MergeRequestCommand{

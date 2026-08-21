@@ -26,11 +26,14 @@ func (p *recordingPDP) Decide(_ context.Context, req policyapi.Request) (policya
 	if p.deny[req.Action] {
 		return policyapi.Decision{Allowed: false, DecisionID: "decision-deny"}, nil
 	}
-	// The merge rule is the one the PDP evaluates from server-derived counts.
+	// The merge rule is the one the PDP evaluates from server-derived counts,
+	// including the four-eyes floor the bundle enforces beside required_approvals
+	// (ADR-0085) — the fake mirrors the real rule so a service-level test cannot
+	// pass on facts the bundle would refuse.
 	if req.Action == "merge_request.merge" {
 		valid, _ := strconv.Atoi(req.Context["valid_approvals"])
 		required, _ := strconv.Atoi(req.Context["required_approvals"])
-		if valid < required {
+		if valid < required || valid < 2 {
 			return policyapi.Decision{Allowed: false, DecisionID: "decision-insufficient"}, nil
 		}
 	}
@@ -161,6 +164,31 @@ func openOne(t *testing.T, s *Service, requestID string) api.MergeRequest {
 	return mr
 }
 
+// approveAs records one approval by the named actor at the merge request's
+// current head. The four-eyes floor (ADR-0085) means a mergeable merge request
+// needs two of these from two people who are not the author, so tests that land
+// a merge call it twice with distinct actors.
+func approveAs(t *testing.T, s *Service, mr api.MergeRequest, actor, requestID string) api.MergeRequest {
+	t.Helper()
+	reviewed, err := s.Review(t.Context(), api.ReviewRequest{
+		Context:        principal("tenant-a", actor, requestID, "member"),
+		MergeRequestID: mr.ID, Disposition: api.DispositionApprove,
+		HeadRevision: mr.HeadRevision, ExpectedVersion: mr.Version,
+	})
+	if err != nil {
+		t.Fatalf("Review (%s): %v", actor, err)
+	}
+	return reviewed
+}
+
+// approveTwoRecords the floor's worth of approvals — actor-b then actor-c, neither
+// of them the author.
+func approveTwo(t *testing.T, s *Service, mr api.MergeRequest) api.MergeRequest {
+	t.Helper()
+	mr = approveAs(t, s, mr, "actor-b", "request-review")
+	return approveAs(t, s, mr, "actor-c", "request-review-2")
+}
+
 // AC1: open, review, and merge at the current expected version; a replayed
 // request ID is idempotent and a stale version changes nothing.
 func TestOpenReviewMergeAtTheExpectedVersion(t *testing.T) {
@@ -186,6 +214,9 @@ func TestOpenReviewMergeAtTheExpectedVersion(t *testing.T) {
 	if reviewed.Version != 2 {
 		t.Fatalf("version after review = %d, want 2", reviewed.Version)
 	}
+	// The floor (ADR-0085): a mergeable merge request carries two non-author
+	// approvals, so the happy path now reviews twice before it merges.
+	reviewed = approveAs(t, service, reviewed, "actor-c", "request-review-2")
 
 	merged, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
@@ -321,6 +352,7 @@ func TestProtectedRefIsMergedOnlyWithTheRequiredApprovals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
+	reviewed = approveAs(t, service, reviewed, "actor-c", "request-review-2")
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
 		MergeRequestID: mr.ID, ExpectedVersion: reviewed.Version,
@@ -347,6 +379,10 @@ func TestApprovalFromAnotherHeadRevisionDoesNotCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
+	// Two approvals at the current head satisfy the floor (ADR-0085); if the
+	// stale head approval counted, the fact below would read 3 rather than 2.
+	reviewed = approveAs(t, service, reviewed, "actor-c", "request-review-2")
+	reviewed = approveAs(t, service, reviewed, "actor-d", "request-review-3")
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
 		MergeRequestID: mr.ID, ExpectedVersion: reviewed.Version,
@@ -354,7 +390,7 @@ func TestApprovalFromAnotherHeadRevisionDoesNotCount(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 	request, _ := pdp.lastFor("merge_request.merge")
-	if request.Context["valid_approvals"] != "0" {
+	if request.Context["valid_approvals"] != "2" {
 		t.Fatalf("valid_approvals = %q, want an approval from another head to count for nothing", request.Context["valid_approvals"])
 	}
 }
@@ -380,6 +416,11 @@ func TestALaterReviewSupersedesTheSameActorsEarlierOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("superseding Review: %v", err)
 	}
+	// The floor's worth of fresh approvals (ADR-0085); if the superseded
+	// request-changes disposition counted as an approval, the fact below would
+	// read 3 rather than 2.
+	reviewed = approveAs(t, service, reviewed, "actor-c", "request-review-2")
+	reviewed = approveAs(t, service, reviewed, "actor-d", "request-review-3")
 
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
@@ -388,7 +429,7 @@ func TestALaterReviewSupersedesTheSameActorsEarlierOne(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 	request, _ := pdp.lastFor("merge_request.merge")
-	if request.Context["valid_approvals"] != "0" {
+	if request.Context["valid_approvals"] != "2" {
 		t.Fatalf("valid_approvals = %q, want the superseded approval not to count", request.Context["valid_approvals"])
 	}
 }
@@ -400,13 +441,8 @@ func TestEveryMutationAsksThePDP(t *testing.T) {
 	ctx := t.Context()
 
 	mr := openOne(t, service, "request-open")
-	if _, err := service.Review(ctx, api.ReviewRequest{
-		Context:        principal("tenant-a", "actor-b", "request-review", "member"),
-		MergeRequestID: mr.ID, Disposition: api.DispositionApprove,
-		HeadRevision: "sha-head", ExpectedVersion: mr.Version,
-	}); err != nil {
-		t.Fatalf("Review: %v", err)
-	}
+	mr = approveAs(t, service, mr, "actor-b", "request-review")
+	mr = approveAs(t, service, mr, "actor-c", "request-review-2")
 	if _, err := service.SetProtection(ctx, api.ProtectionRequest{
 		Context:   principal("tenant-a", "admin-a", "request-protect", "owner"),
 		TargetRef: "refs/heads/main", RequiredApprovals: 0,
@@ -415,7 +451,7 @@ func TestEveryMutationAsksThePDP(t *testing.T) {
 	}
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
-		MergeRequestID: mr.ID, ExpectedVersion: mr.Version + 1,
+		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
 	}); err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
@@ -468,6 +504,8 @@ func TestAcceptedApprovalAndMergeAreEachAuditedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
+	// The floor (ADR-0085): the merge needs a second non-author approval.
+	reviewed = approveAs(t, service, reviewed, "actor-c", "request-review-2")
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
 		MergeRequestID: mr.ID, ExpectedVersion: reviewed.Version,
@@ -475,8 +513,8 @@ func TestAcceptedApprovalAndMergeAreEachAuditedOnce(t *testing.T) {
 		t.Fatalf("Merge: %v", err)
 	}
 
-	if len(got.approvals) != 1 {
-		t.Fatalf("approval audit records = %d, want exactly 1", len(got.approvals))
+	if len(got.approvals) != 2 {
+		t.Fatalf("approval audit records = %d, want exactly 2 — one per accepting approval", len(got.approvals))
 	}
 	approval := got.approvals[0]
 	if approval.TenantID != "tenant-a" || approval.ActorID != "actor-b" || approval.MergeRequestID != mr.ID ||
@@ -518,6 +556,7 @@ func TestAMergedRequestCannotBeReviewed(t *testing.T) {
 	service, _, _, _ := newService(t)
 	ctx := t.Context()
 	mr := openOne(t, service, "request-open")
+	mr = approveTwo(t, service, mr)
 	merged, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
 		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
@@ -579,6 +618,9 @@ func TestZeroApprovalsStillMarksTheRefProtected(t *testing.T) {
 		t.Fatalf("SetProtection: %v", err)
 	}
 	mr := openOne(t, service, "request-open")
+	// Zero required approvals protects the ref against direct pushes; it does not
+	// lower the platform's four-eyes floor (ADR-0085), so the merge still reviews.
+	mr = approveTwo(t, service, mr)
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
 		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
@@ -625,6 +667,7 @@ func TestMergeNamesTheTargetRevisionItWasDecidedAgainst(t *testing.T) {
 	ctx := t.Context()
 
 	mr := openOne(t, service, "request-open")
+	mr = approveTwo(t, service, mr)
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
 		MergeRequestID: mr.ID, ExpectedVersion: mr.Version,
@@ -670,6 +713,8 @@ func TestRefUpdatedRefreshesTheTargetRevision(t *testing.T) {
 	if current.Version != mr.Version {
 		t.Fatalf("version = %d, want a ref move not to invalidate the caller's version", current.Version)
 	}
+	current = approveAs(t, service, current, "actor-b", "request-review")
+	current = approveAs(t, service, current, "actor-c", "request-review-2")
 	if _, err := service.Merge(ctx, api.MergeRequestCommand{
 		Context:        principal("tenant-a", "actor-a", "request-merge", "member"),
 		MergeRequestID: mr.ID, ExpectedVersion: current.Version,
@@ -799,7 +844,8 @@ func protectedWithApproval(t *testing.T, service *Service) api.MergeRequest {
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
-	return reviewed
+	// The floor (ADR-0085): two non-author approvals make a mergeable base state.
+	return approveAs(t, service, reviewed, "actor-c", "request-review-2")
 }
 
 // The security gate COMPOSES with the approval gate (SPEC-0029 AC5): one
@@ -831,8 +877,8 @@ func TestMergeGateComposesFindingsFactsWithApprovalFacts(t *testing.T) {
 	if !ok {
 		t.Fatal("no merge decision was asked")
 	}
-	// The SPEC-0019 facts stand, unchanged.
-	if req.Context["valid_approvals"] != "1" || req.Context["required_approvals"] != "1" {
+	// The SPEC-0019 facts stand, unchanged — now carrying the floor's two.
+	if req.Context["valid_approvals"] != "2" || req.Context["required_approvals"] != "1" {
 		t.Fatalf("approval facts = %v, want the composed SPEC-0019 facts", req.Context)
 	}
 	// The findings facts join them under the reviewed vocabulary.
