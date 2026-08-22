@@ -8,7 +8,11 @@
 # scratch this image would build, pass its digest and signature checks, start,
 # serve health, and then fail every Git operation with "executable file not found".
 # ADR-0048 records the exception and the cost; the two plane images stay on scratch.
-FROM docker.io/library/golang:1.26.0-alpine3.22 AS build
+# ADR-0089: the builder is Alpine 3.23 while the runtime stage below stays on
+# 3.22.2. Not an oversight — Alpine 3.22 carries no Go 1.27 image, and this build
+# is CGO_ENABLED=0, so nothing from the builder reaches the shipped layers. The
+# runtime base carries the shipped git; moving it is an ADR-0048 decision.
+FROM docker.io/library/golang:1.27.0-alpine3.23 AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./

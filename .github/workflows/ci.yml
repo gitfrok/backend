@@ -24,7 +24,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          # Floor comes from go.mod (ADR-0023 pins Go 1.26); keep the two in step.
+          # Floor comes from go.mod (ADR-0089 pins Go 1.27); keep the two in step.
           go-version-file: go.mod
           cache: true
 

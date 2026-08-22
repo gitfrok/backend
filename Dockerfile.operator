@@ -4,7 +4,7 @@
 # binary it converges. Its digest is pinned and signed in deploy/releases/ like every
 # other first-party release; the install no longer accepts a customer-supplied operator
 # image.
-FROM docker.io/library/golang:1.26.0-alpine3.22 AS build
+FROM docker.io/library/golang:1.27.0-alpine3.23 AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
