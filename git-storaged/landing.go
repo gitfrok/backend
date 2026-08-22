@@ -162,9 +162,20 @@ func (s *Server) landRebase(ctx context.Context, path string, current, sourceRev
 	// --ref-action=print is the whole safety story: replay names what it
 	// WOULD update and touches nothing itself; the only ref move is this
 	// function's caller, through the same compare-and-swap every landing takes.
-	output, err := s.command(ctx, "git", "-C", path, "replay",
+	// `git replay` writes commits, so it needs a committer identity like every
+	// other producing path here. Without one it exits 128 with "unable to
+	// auto-detect email address" — which this function used to report as
+	// merge_conflict. The service's own identity is the committer; the AUTHOR is
+	// deliberately NOT set, because replay carries each replayed commit's
+	// original author forward and AC4 requires that authorship survive.
+	name, email := s.landingIdentity()
+	replay := s.command(ctx, "git", "-C", path, "replay",
 		"--onto="+current, "--ref="+refLabel, "--ref-action=print",
-		current+".."+sourceRevision).Output()
+		current+".."+sourceRevision)
+	replay.Env = append(os.Environ(),
+		"GIT_COMMITTER_NAME="+name, "GIT_COMMITTER_EMAIL="+email,
+	)
+	output, err := replay.Output()
 	if err != nil {
 		// A replay that cannot complete cleanly refuses before anything moves;
 		// `git replay` writes nothing to the object database until it succeeds.
