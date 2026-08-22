@@ -584,7 +584,6 @@ type AgentMessage struct {
 	Seq       int64                  `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`                             // monotonic per stream; used for acks/resume
 	SentAt    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=sent_at,json=sentAt,proto3" json:"sent_at,omitempty"`
 	// Types that are assignable to Payload:
-	//
 	//	*AgentMessage_Register
 	//	*AgentMessage_Heartbeat
 	//	*AgentMessage_ActualState
@@ -814,7 +813,6 @@ type ControlPlaneMessage struct {
 	SentAt    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=sent_at,json=sentAt,proto3" json:"sent_at,omitempty"`
 	AckSeq    int64                  `protobuf:"varint,4,opt,name=ack_seq,json=ackSeq,proto3" json:"ack_seq,omitempty"` // highest agent seq CP has durably processed
 	// Types that are assignable to Payload:
-	//
 	//	*ControlPlaneMessage_RegisterAck
 	//	*ControlPlaneMessage_DesiredState
 	//	*ControlPlaneMessage_Command

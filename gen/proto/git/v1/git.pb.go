@@ -293,7 +293,6 @@ type UploadPackRequest struct {
 	unknownFields protoimpl.UnknownFields
 
 	// Types that are assignable to Payload:
-	//
 	//	*UploadPackRequest_Context
 	//	*UploadPackRequest_Data
 	//	*UploadPackRequest_Close
@@ -431,7 +430,6 @@ type ReceivePackRequest struct {
 	unknownFields protoimpl.UnknownFields
 
 	// Types that are assignable to Payload:
-	//
 	//	*ReceivePackRequest_Context
 	//	*ReceivePackRequest_Data
 	//	*ReceivePackRequest_Close

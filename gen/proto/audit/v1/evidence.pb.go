@@ -1066,7 +1066,6 @@ type ControlSectionRecord struct {
 	// schema defect; UNSPECIFIED sections are not assembled.
 	//
 	// Types that are assignable to Detail:
-	//
 	//	*ControlSectionRecord_Approval
 	//	*ControlSectionRecord_PolicyDecision
 	//	*ControlSectionRecord_ScanGate
@@ -2234,7 +2233,6 @@ type GetEvidencePackResponse struct {
 	// authoritative until the final chunk arrives.
 	FinalChunk bool `protobuf:"varint,2,opt,name=final_chunk,json=finalChunk,proto3" json:"final_chunk,omitempty"`
 	// Types that are assignable to Content:
-	//
 	//	*GetEvidencePackResponse_Header
 	//	*GetEvidencePackResponse_Section
 	//	*GetEvidencePackResponse_Appendix
