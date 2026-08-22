@@ -67,6 +67,17 @@ func NewPostgres(pool *db.Pool, b bus.Bus, auth api.Authorizer) api.Repositories
 // It reports whether the wiring took. A false means the caller holds a Repositories that is not this
 // module's service, which is a composition bug: settings writes will refuse with
 // api.ErrNoAdministrationPoint rather than proceeding unauthorized.
+// AsSettings exposes the composed service's settings port to a composition
+// root that needs to READ it for another context's derivation (SPEC-0065:
+// Code Review reads the landing policy at merge time). It hands over the same
+// surface the wire serves; nil when r is not this module's service.
+func AsSettings(r api.Repositories) api.Settings {
+	if svc, ok := r.(*app.Service); ok {
+		return svc
+	}
+	return nil
+}
+
 func AttachSettings(r api.Repositories, admin api.Administrator, witness api.Witness) bool {
 	svc, ok := r.(*app.Service)
 	if !ok {

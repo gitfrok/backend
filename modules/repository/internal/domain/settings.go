@@ -74,3 +74,38 @@ func (r Repository) WithArchived(archived bool, actorID string, at time.Time) (R
 	r.SettingsUpdatedBy = actorID
 	return r, true, nil
 }
+
+// The landing vocabulary, held here beside the aggregate field it names. The
+// strings are what the record stores and what the merge path reads; the wire
+// enum mirrors them one-to-one.
+const (
+	LandingUnset       = ""
+	LandingMergeCommit = "merge_commit"
+	LandingSquash      = "squash"
+	LandingRebase      = "rebase"
+)
+
+// ErrUnknownLandingStrategy reports a strategy the product does not know. A
+// typo'd strategy must refuse rather than degrade silently to unset: an
+// operator who chose squash would otherwise be running fast-forward landings
+// and never learn it.
+var ErrUnknownLandingStrategy = errors.New("repository: unknown landing strategy")
+
+// WithLanding states the landing policy whole (SPEC-0065): strategy and trunk
+// mode together on every change. An empty strategy is the absence of an
+// explicit choice, not an error.
+func (r Repository) WithLanding(strategy string, trunkBased bool, actorID string, at time.Time) (Repository, error) {
+	if actorID == "" {
+		return Repository{}, errors.New("repository: an actor is required to change settings")
+	}
+	switch strategy {
+	case LandingUnset, LandingMergeCommit, LandingSquash, LandingRebase:
+	default:
+		return Repository{}, ErrUnknownLandingStrategy
+	}
+	r.MergeStrategy = strategy
+	r.TrunkBased = trunkBased
+	r.SettingsUpdatedAt = at.UTC()
+	r.SettingsUpdatedBy = actorID
+	return r, nil
+}

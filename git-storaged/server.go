@@ -45,6 +45,12 @@ type Config struct {
 	PDP            policyapi.DecisionPoint
 	Events         bus.Bus
 
+	// LandingIdentity is the author and committer produced merge commits carry
+	// (SPEC-0065 AC2): the platform's own service identity, never a caller's
+	// name. Defaults apply when unset.
+	LandingIdentityName  string
+	LandingIdentityEmail string
+
 	// Coordinator gates push acknowledgment on the sync-replica durability quorum (SPEC-0018,
 	// ADR-0047). It is required: a storage node that has no quorum cannot acknowledge a push and
 	// must deny writes it cannot durably replicate. Single-node dev runs are served by an
@@ -93,6 +99,15 @@ type Server struct {
 
 	refMu   sync.Mutex
 	refSubs []*refSubscriber
+
+	// The identity produced commits are authored and committed as (SPEC-0065
+	// AC2), configured per environment with defaults an unset deployment says
+	// only about itself. The rebase-landing capability probe caches here too.
+	landingName       string
+	landingEmail      string
+	replayMu          sync.Mutex
+	replayProvenCache bool
+	replayProvenVal   bool
 }
 
 // NewServer validates process wiring and the live-repository filesystem before the service accepts
@@ -129,6 +144,7 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 	if command == nil {
 		command = exec.CommandContext
 	}
+
 	pageKey := make([]byte, 32)
 	if _, err := rand.Read(pageKey); err != nil {
 		return nil, fmt.Errorf("git-storaged: generate tree page key: %w", err)
@@ -149,6 +165,8 @@ func newServer(config Config, mount mountChecker) (*Server, error) {
 		protection:    config.Protection,
 		objects:       config.Objects,
 		sourceLFS:     newSourceLFSClient(),
+		landingName:   config.LandingIdentityName,
+		landingEmail:  config.LandingIdentityEmail,
 	}
 	bus.SubscribeTyped(config.Events, server.forwardRefUpdate)
 	return server, nil

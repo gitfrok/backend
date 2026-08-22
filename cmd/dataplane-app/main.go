@@ -307,6 +307,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "dataplane: merge gate findings facts did not compose (T-0025)")
 			os.Exit(1)
 		}
+		// The landing policy (T-0082, SPEC-0065, ADR-0088) is read from the
+		// repository record at merge time through the same settings surface the
+		// wire serves. Only a durable plane has records to read; an in-memory
+		// dev plane lands legacy, byte-for-byte.
+		if dbPool != nil {
+			if settings := repository.AsSettings(dp.repositories); settings != nil {
+				codereview.AttachLanding(dp.codeReview, repoLandingSource{settings: settings})
+			}
+		}
 		// Ref updates cross the process boundary in the other direction: the
 		// receive-pack path announces RefUpdated on git-storaged's bus, and this
 		// plane subscribes and republishes so the repository projection, search,

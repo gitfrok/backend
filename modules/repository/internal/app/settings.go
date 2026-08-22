@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strconv"
 
 	"github.com/gitfrok/backend/modules/repository/api"
 	"github.com/gitfrok/backend/modules/repository/internal/domain"
@@ -135,6 +136,37 @@ func (s *Service) SetArchived(ctx context.Context, a api.ArchiveRequest) (api.Se
 	return settingsOf(updated), nil
 }
 
+// SetLanding states the landing policy whole (SPEC-0065, ADR-0088): strategy
+// and trunk mode travel together. The aggregate validates the vocabulary and
+// stamps the who-and-when; the audit record names what the policy now is,
+// because "who changed what a merge produces here" is its own question.
+func (s *Service) SetLanding(ctx context.Context, l api.LandingRequest) (api.SettingsView, error) {
+	if l.TenantID == "" || l.RepoID == "" {
+		return api.SettingsView{}, errors.New("app: tenant and repository required")
+	}
+	if err := s.mayAdminister(ctx, l.TenantID, l.RepoID, l.ActorID, l.ActorRoles, api.ActionLandingChanged); err != nil {
+		return api.SettingsView{}, err
+	}
+	repo, err := s.load(ctx, l.TenantID, l.RepoID)
+	if err != nil {
+		return api.SettingsView{}, err
+	}
+	updated, err := repo.WithLanding(l.Strategy, l.TrunkBased, l.ActorID, s.now())
+	if err != nil {
+		return api.SettingsView{}, err
+	}
+	if err := s.store.Save(ctx, updated); err != nil {
+		return api.SettingsView{}, err
+	}
+	if err := s.witnessAct(ctx, l.TenantID, l.RepoID, l.ActorID, api.ActionLandingChanged, false, map[string]string{
+		"strategy":    updated.MergeStrategy,
+		"trunk_based": strconv.FormatBool(updated.TrunkBased),
+	}); err != nil {
+		return api.SettingsView{}, err
+	}
+	return settingsOf(updated), nil
+}
+
 // mayAdminister asks the PDP and records a refusal that reached it.
 //
 // A refusal is audited before it is returned, with the outcome marked denied: PR-30 asks that each
@@ -200,6 +232,8 @@ func settingsOf(r domain.Repository) api.SettingsView {
 		ArchivedAt:        r.ArchivedAt,
 		SettingsUpdatedAt: r.SettingsUpdatedAt,
 		SettingsUpdatedBy: r.SettingsUpdatedBy,
+		MergeStrategy:     r.MergeStrategy,
+		TrunkBased:        r.TrunkBased,
 	}
 }
 

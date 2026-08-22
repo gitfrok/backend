@@ -526,9 +526,10 @@ var RepositoryRegistry_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	RepositorySettings_GetSettings_FullMethodName    = "/gitsaas.repository.v1.RepositorySettings/GetSettings"
-	RepositorySettings_UpdateSettings_FullMethodName = "/gitsaas.repository.v1.RepositorySettings/UpdateSettings"
-	RepositorySettings_SetArchived_FullMethodName    = "/gitsaas.repository.v1.RepositorySettings/SetArchived"
+	RepositorySettings_GetSettings_FullMethodName      = "/gitsaas.repository.v1.RepositorySettings/GetSettings"
+	RepositorySettings_UpdateSettings_FullMethodName   = "/gitsaas.repository.v1.RepositorySettings/UpdateSettings"
+	RepositorySettings_SetArchived_FullMethodName      = "/gitsaas.repository.v1.RepositorySettings/SetArchived"
+	RepositorySettings_SetLandingPolicy_FullMethodName = "/gitsaas.repository.v1.RepositorySettings/SetLandingPolicy"
 )
 
 // RepositorySettingsClient is the client API for RepositorySettings service.
@@ -570,6 +571,14 @@ type RepositorySettingsClient interface {
 	// vocabulary in repository/api/readonly.go — a git-write-path decision, not
 	// a setting.
 	SetArchived(ctx context.Context, in *SetArchivedRequest, opts ...grpc.CallOption) (*SetArchivedResponse, error)
+	// SetLandingPolicy states the landing policy whole (SPEC-0065, ADR-0088):
+	// the strategy and whether trunk-based mode constrains it, together on
+	// every call, for the same reason UpdateSettings is a write of the settings
+	// a repository has rather than a patch. It changes what a REVIEWED merge
+	// produces; it can never change who may land or whether (ADR-0088 decision
+	// 3), which is why it is a setting at all. Administrator-gated and audited
+	// exactly like every other write here.
+	SetLandingPolicy(ctx context.Context, in *SetLandingPolicyRequest, opts ...grpc.CallOption) (*SetLandingPolicyResponse, error)
 }
 
 type repositorySettingsClient struct {
@@ -604,6 +613,16 @@ func (c *repositorySettingsClient) SetArchived(ctx context.Context, in *SetArchi
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetArchivedResponse)
 	err := c.cc.Invoke(ctx, RepositorySettings_SetArchived_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *repositorySettingsClient) SetLandingPolicy(ctx context.Context, in *SetLandingPolicyRequest, opts ...grpc.CallOption) (*SetLandingPolicyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetLandingPolicyResponse)
+	err := c.cc.Invoke(ctx, RepositorySettings_SetLandingPolicy_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -649,6 +668,14 @@ type RepositorySettingsServer interface {
 	// vocabulary in repository/api/readonly.go — a git-write-path decision, not
 	// a setting.
 	SetArchived(context.Context, *SetArchivedRequest) (*SetArchivedResponse, error)
+	// SetLandingPolicy states the landing policy whole (SPEC-0065, ADR-0088):
+	// the strategy and whether trunk-based mode constrains it, together on
+	// every call, for the same reason UpdateSettings is a write of the settings
+	// a repository has rather than a patch. It changes what a REVIEWED merge
+	// produces; it can never change who may land or whether (ADR-0088 decision
+	// 3), which is why it is a setting at all. Administrator-gated and audited
+	// exactly like every other write here.
+	SetLandingPolicy(context.Context, *SetLandingPolicyRequest) (*SetLandingPolicyResponse, error)
 	mustEmbedUnimplementedRepositorySettingsServer()
 }
 
@@ -667,6 +694,9 @@ func (UnimplementedRepositorySettingsServer) UpdateSettings(context.Context, *Up
 }
 func (UnimplementedRepositorySettingsServer) SetArchived(context.Context, *SetArchivedRequest) (*SetArchivedResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetArchived not implemented")
+}
+func (UnimplementedRepositorySettingsServer) SetLandingPolicy(context.Context, *SetLandingPolicyRequest) (*SetLandingPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetLandingPolicy not implemented")
 }
 func (UnimplementedRepositorySettingsServer) mustEmbedUnimplementedRepositorySettingsServer() {}
 func (UnimplementedRepositorySettingsServer) testEmbeddedByValue()                            {}
@@ -743,6 +773,24 @@ func _RepositorySettings_SetArchived_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RepositorySettings_SetLandingPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetLandingPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RepositorySettingsServer).SetLandingPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RepositorySettings_SetLandingPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RepositorySettingsServer).SetLandingPolicy(ctx, req.(*SetLandingPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RepositorySettings_ServiceDesc is the grpc.ServiceDesc for RepositorySettings service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -761,6 +809,10 @@ var RepositorySettings_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetArchived",
 			Handler:    _RepositorySettings_SetArchived_Handler,
+		},
+		{
+			MethodName: "SetLandingPolicy",
+			Handler:    _RepositorySettings_SetLandingPolicy_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

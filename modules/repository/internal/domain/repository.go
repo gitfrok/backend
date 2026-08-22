@@ -35,6 +35,15 @@ type Repository struct {
 	// instant, or an instant with no actor, is half a record.
 	SettingsUpdatedAt time.Time
 	SettingsUpdatedBy string
+	// MergeStrategy is the landing policy's strategy: empty means no explicit
+	// choice, and merges land exactly as they always did — fast-forward when
+	// possible (SPEC-0065 AC1). The vocabulary lives in api so the aggregate
+	// stays a dumb holder of what the record says.
+	MergeStrategy string
+	// TrunkBased constrains the shape of landings, never who may land or
+	// whether: merge commits are refused, fast-forward preferred, rebase the
+	// fallback (ADR-0088). It is a property of the record like archival is.
+	TrunkBased bool
 }
 
 // ErrCrossTenant guards against tenant leakage inside the domain.

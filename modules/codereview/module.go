@@ -91,6 +91,25 @@ func NewPostgres(pool *db.Pool, refs RefMover, pdp policyapi.DecisionPoint, even
 // while this context is composed before it; a merge surface with no provider
 // leaves the security gate disengaged rather than engaged on nothing. It
 // reports false when the surface has no merge gate to attach to.
+// LandingPolicySource is the landing-policy reader port, aliased so cmd/ can
+// wire one without naming an internal package (ADR-0025).
+type LandingPolicySource = app.LandingPolicies
+
+// AttachLanding wires the landing-policy reader onto the merge path
+// (SPEC-0065). Post-construction like every cross-context fact source; false
+// means requests is not the module's own service and the legacy landing stays.
+func AttachLanding(requests api.MergeRequests, source LandingPolicySource) bool {
+	type sink interface {
+		SetLandingPolicies(app.LandingPolicies)
+	}
+	s, ok := requests.(sink)
+	if !ok {
+		return false
+	}
+	s.SetLandingPolicies(source)
+	return true
+}
+
 func AttachFindingsFacts(requests api.MergeRequests, provider api.FindingsFactsProvider) bool {
 	type factsSink interface {
 		SetFindingsFacts(api.FindingsFactsProvider)

@@ -24,6 +24,7 @@ type fakeSettings struct {
 	gotQ    api.SettingsQuery
 	gotU    api.SettingsUpdate
 	gotA    api.ArchiveRequest
+	gotL    api.LandingRequest
 	archive int
 }
 
@@ -40,6 +41,11 @@ func (f *fakeSettings) UpdateSettings(_ context.Context, u api.SettingsUpdate) (
 func (f *fakeSettings) SetArchived(_ context.Context, a api.ArchiveRequest) (api.SettingsView, error) {
 	f.gotA = a
 	f.archive++
+	return f.view, f.err
+}
+
+func (f *fakeSettings) SetLanding(_ context.Context, l api.LandingRequest) (api.SettingsView, error) {
+	f.gotL = l
 	return f.view, f.err
 }
 

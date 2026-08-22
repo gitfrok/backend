@@ -44,6 +44,10 @@ func TestMain(m *testing.M) {
 			// it ALTERs the table 0001 creates.
 			err = applyMigration(ctx, dsn, "migrations/0002_repository_settings.sql")
 		}
+		if err == nil {
+			// 0003 adds the landing-policy columns (T-0082, SPEC-0065), same reason.
+			err = applyMigration(ctx, dsn, "migrations/0003_repository_landing.sql")
+		}
 		cancel()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "repository postgres tests: could not self-apply migration: %v\n", err)

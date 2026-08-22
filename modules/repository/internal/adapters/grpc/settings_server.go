@@ -127,7 +127,63 @@ func settingsMessage(v api.SettingsView) *repositoryv1.Settings {
 		ArchivedAt:        rfc3339OrEmpty(v.ArchivedAt),
 		SettingsUpdatedAt: rfc3339OrEmpty(v.SettingsUpdatedAt),
 		SettingsUpdatedBy: v.SettingsUpdatedBy,
+		MergeStrategy:     strategyProto(v.MergeStrategy),
+		TrunkBased:        v.TrunkBased,
 	}
+}
+
+// strategyProto maps the domain's landing vocabulary onto the wire enum. The
+// empty string is the absence of an explicit choice, so it maps to
+// UNSPECIFIED — which is exactly what UNSPECIFIED means on this field.
+func strategyProto(strategy string) repositoryv1.MergeStrategy {
+	switch strategy {
+	case "merge_commit":
+		return repositoryv1.MergeStrategy_MERGE_STRATEGY_MERGE_COMMIT
+	case "squash":
+		return repositoryv1.MergeStrategy_MERGE_STRATEGY_SQUASH
+	case "rebase":
+		return repositoryv1.MergeStrategy_MERGE_STRATEGY_REBASE
+	default:
+		return repositoryv1.MergeStrategy_MERGE_STRATEGY_UNSPECIFIED
+	}
+}
+
+// strategyDomain maps the wire enum back onto the domain vocabulary.
+func strategyDomain(strategy repositoryv1.MergeStrategy) string {
+	switch strategy {
+	case repositoryv1.MergeStrategy_MERGE_STRATEGY_MERGE_COMMIT:
+		return "merge_commit"
+	case repositoryv1.MergeStrategy_MERGE_STRATEGY_SQUASH:
+		return "squash"
+	case repositoryv1.MergeStrategy_MERGE_STRATEGY_REBASE:
+		return "rebase"
+	default:
+		return ""
+	}
+}
+
+// SetLandingPolicy states the landing policy whole (SPEC-0065, ADR-0088).
+// An unknown strategy is refused by name — like invalidName, it is about the
+// field the caller just sent — and every other failure is the one coarse
+// denial.
+func (s *SettingsServer) SetLandingPolicy(ctx context.Context, req *repositoryv1.SetLandingPolicyRequest) (*repositoryv1.SetLandingPolicyResponse, error) {
+	rc := req.GetContext()
+	if !verified(rc) {
+		return nil, denial()
+	}
+	ctx = tenancy.WithTenant(ctx, tenancy.ID(rc.GetTenantId()))
+	view, err := s.settings.SetLanding(ctx, api.LandingRequest{
+		TenantID:   rc.GetTenantId(),
+		RepoID:     rc.GetRepositoryId(),
+		ActorID:    rc.GetActorId(),
+		ActorRoles: rc.GetActorRoles(),
+		Strategy:   strategyDomain(req.GetStrategy()),
+		TrunkBased: req.GetTrunkBased(),
+	})
+	if err != nil {
+		return nil, denial()
+	}
+	return &repositoryv1.SetLandingPolicyResponse{Settings: settingsMessage(view)}, nil
 }
 
 // rfc3339OrEmpty renders an instant, or nothing at all when there is no instant to render.

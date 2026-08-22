@@ -66,10 +66,26 @@ func (s *Server) MergeRef(ctx context.Context, req *gitv1.MergeRefRequest) (*git
 		return nil, unavailable()
 	}
 
+	// The landing plan (SPEC-0065, ADR-0088), when present, may produce commits
+	// before the ref moves. Absent, this is the legacy landing: move the ref to
+	// the revision named, byte-for-byte as always (AC1). Either way the move
+	// below is one compare-and-swap on git's own terms — a landing that loses
+	// its race has produced objects no ref points at and nothing else.
+	landed := revision
+	shape := gitv1.LandingShape_LANDING_SHAPE_UNSPECIFIED
+	if plan := req.GetLanding(); plan.GetStrategy() != gitv1.LandingStrategy_LANDING_STRATEGY_UNSPECIFIED || plan.GetTrunkBased() {
+		var err error
+		landed, shape, err = s.resolveLanding(ctx, repository.path, current, revision, targetRef, plan)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// A merge is a write, so it takes the same durability path as a push: the ref
 	// move is acknowledged only once the primary and the in-sync replica have both
-	// acknowledged it under the leased term (SPEC-0018).
-	if err := s.updateRef(ctx, repository.path, targetRef, revision, current); err != nil {
+	// acknowledged it under the leased term (SPEC-0018). A produced commit takes
+	// that path too — the ref either moved to it or did not (SPEC-0065 AC6).
+	if err := s.updateRef(ctx, repository.path, targetRef, landed, current); err != nil {
 		return nil, unavailable()
 	}
 	if err := s.requireQuorum(ctx, repository); err != nil {
@@ -82,14 +98,19 @@ func (s *Server) MergeRef(ctx context.Context, req *gitv1.MergeRefRequest) (*git
 		RepoID:     repository.repositoryID,
 		Ref:        targetRef,
 		OldSha:     zeroSHA(current),
-		NewSha:     revision,
+		NewSha:     landed,
 		ActorID:    repository.actorID,
 		ActorRoles: slices.Clone(repository.actorRoles),
 		OccurredAt: time.Now().UTC(),
 	}); err != nil {
 		return nil, unavailable()
 	}
-	return &gitv1.MergeRefResponse{TargetRef: targetRef, Revision: revision}, nil
+	return &gitv1.MergeRefResponse{
+		TargetRef:      targetRef,
+		Revision:       revision,
+		LandedRevision: landed,
+		LandedShape:    shape,
+	}, nil
 }
 
 // currentRef returns the revision targetRef points at, or "" when it does not

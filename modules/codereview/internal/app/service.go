@@ -31,6 +31,20 @@ type MergeRefCommand struct {
 	ActorRoles              []string
 	TargetRef, Revision     string
 	ExpectedCurrentRevision string
+	// Landing carries the repository's landing policy (SPEC-0065) when this
+	// context could read one. It is a server-derived fact read at merge time,
+	// never a caller field: api.MergeRequestCommand cannot express a strategy,
+	// which is what makes AC7 hold by construction. Nil means the legacy
+	// landing — byte-for-byte today's move.
+	Landing *LandingPlan
+}
+
+// LandingPlan is the policy the ref mover executes on storage's side.
+type LandingPlan struct {
+	Strategy              string // domain vocabulary: "" | merge_commit | squash | rebase
+	TrunkBased            bool
+	MessageTitle          string
+	MergeRequestReference string
 }
 
 // RefMover is Repository/Git's contract boundary for moving a ref. Code Review
@@ -107,6 +121,10 @@ type Service struct {
 	// disengaged and the SPEC-0019 approval gate stands alone, exactly as
 	// before T-0025.
 	findings api.FindingsFactsProvider
+	// landings reads the repository's landing policy at merge time
+	// (SPEC-0065). Nil means this plane composed no repository settings: the
+	// legacy landing applies, byte-for-byte.
+	landings LandingPolicies
 }
 
 type Option func(*Service)
@@ -138,6 +156,25 @@ func (s *Service) SubscribeRefUpdates(events bus.Bus) {
 // disengaged rather than engaged on nothing.
 func (s *Service) SetFindingsFacts(provider api.FindingsFactsProvider) {
 	s.findings = provider
+}
+
+// LandingPolicies reads one repository's landing policy (SPEC-0065). It is a
+// port, not a parameter: AC7 makes the strategy a server-side read from the
+// repository record at merge time, so no caller field can choose it.
+type LandingPolicies interface {
+	// LandingFor reports the policy as the record holds it. found is false
+	// when no explicit policy exists — which means the legacy landing, not a
+	// default guess. An error refuses the merge: guessing a history shape
+	// because the record was unreadable would be worse than refusing.
+	LandingFor(ctx context.Context, tenantID, actorID string, roles []string, repoID string) (strategy string, trunkBased bool, found bool, err error)
+}
+
+// SetLandingPolicies attaches the landing-policy reader, post-construction
+// like every cross-context fact source. A service without one lands legacy —
+// the composition that has no repository settings to read has nothing to
+// change behaviour over.
+func (s *Service) SetLandingPolicies(reader LandingPolicies) {
+	s.landings = reader
 }
 
 func (s *Service) onRefUpdated(ctx context.Context, event repoapi.RefUpdated) error {
@@ -404,12 +441,35 @@ func (s *Service) Merge(ctx context.Context, req api.MergeRequestCommand) (api.M
 	// the merge fails rather than landing on state nobody decided about. The
 	// record already says MERGED, so the refusal is compensated: a re-open under
 	// its own version bump and a named audit record (SPEC-0061 AC12).
+	// The landing policy is a server-side read from the repository record at
+	// merge time (SPEC-0065 AC7) — after the gate has said yes, before the ref
+	// moves. An unreadable record refuses rather than guessing: silently
+	// changing the history shape because a read failed would be worse than the
+	// coarse refusal every other failure produces. No policy wired, or none
+	// recorded, means the legacy landing byte-for-byte.
+	var plan *LandingPlan
+	if s.landings != nil {
+		strategy, trunkBased, found, err := s.landings.LandingFor(ctx,
+			req.TenantID, req.ActorID, req.ActorRoles, mr.RepositoryID)
+		if err != nil {
+			return api.MergeRequest{}, api.ErrDenied
+		}
+		if found {
+			plan = &LandingPlan{
+				Strategy:              strategy,
+				TrunkBased:            trunkBased,
+				MessageTitle:          mr.Title,
+				MergeRequestReference: mr.ID,
+			}
+		}
+	}
 	if err := s.refs.MoveRef(ctx, MergeRefCommand{
 		TenantID: mr.TenantID, RepositoryID: mr.RepositoryID,
 		ActorID: req.ActorID, RequestID: req.RequestID,
 		ActorRoles: slices.Clone(req.ActorRoles),
 		TargetRef:  mr.TargetRef, Revision: mr.HeadRevision,
 		ExpectedCurrentRevision: mr.TargetRevision,
+		Landing:                 plan,
 	}); err != nil {
 		if compErr := s.compensateMerge(ctx, mr, req.ActorID, req.RequestID, decision.DecisionID, err.Error()); compErr != nil {
 			return api.MergeRequest{}, compErr

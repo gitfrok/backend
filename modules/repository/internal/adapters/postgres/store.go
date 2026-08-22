@@ -62,16 +62,20 @@ func (s *Store) Save(ctx context.Context, r domain.Repository) error {
 	return s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO repo.repositories
-			      (tenant_id, repo_id, name, description, archived_at, settings_updated_at, settings_updated_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			      (tenant_id, repo_id, name, description, archived_at, settings_updated_at, settings_updated_by,
+			       merge_strategy, trunk_based)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			 ON CONFLICT (tenant_id, repo_id) DO UPDATE SET
 			      name                = EXCLUDED.name,
 			      description         = EXCLUDED.description,
 			      archived_at         = EXCLUDED.archived_at,
 			      settings_updated_at = EXCLUDED.settings_updated_at,
-			      settings_updated_by = EXCLUDED.settings_updated_by`,
+			      settings_updated_by = EXCLUDED.settings_updated_by,
+			      merge_strategy      = EXCLUDED.merge_strategy,
+			      trunk_based         = EXCLUDED.trunk_based`,
 			string(r.Tenant), string(r.ID), r.Name, r.Description,
 			nullableTime(r.ArchivedAt), nullableTime(r.SettingsUpdatedAt), nullableString(r.SettingsUpdatedBy),
+			r.MergeStrategy, r.TrunkBased,
 		)
 		if err != nil {
 			return fmt.Errorf("repository postgres: save %s: %w", r.ID, err)
@@ -92,13 +96,16 @@ func (s *Store) Load(ctx context.Context, tenant domain.TenantID, id domain.Repo
 	}
 	var r domain.Repository
 	err = s.pool.InTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		var tenantID, repoID, name, description string
+		var tenantID, repoID, name, description, mergeStrategy string
+		var trunkBased bool
 		var archivedAt, settingsUpdatedAt *time.Time
 		var settingsUpdatedBy *string
 		if err := tx.QueryRow(ctx,
-			`SELECT tenant_id, repo_id, name, description, archived_at, settings_updated_at, settings_updated_by
+			`SELECT tenant_id, repo_id, name, description, archived_at, settings_updated_at, settings_updated_by,
+			        merge_strategy, trunk_based
 			   FROM repo.repositories WHERE repo_id = $1`, string(id),
-		).Scan(&tenantID, &repoID, &name, &description, &archivedAt, &settingsUpdatedAt, &settingsUpdatedBy); err != nil {
+		).Scan(&tenantID, &repoID, &name, &description, &archivedAt, &settingsUpdatedAt, &settingsUpdatedBy,
+			&mergeStrategy, &trunkBased); err != nil {
 			return err
 		}
 		r = domain.Repository{
@@ -109,6 +116,8 @@ func (s *Store) Load(ctx context.Context, tenant domain.TenantID, id domain.Repo
 			ArchivedAt:        timeOrZero(archivedAt),
 			SettingsUpdatedAt: timeOrZero(settingsUpdatedAt),
 			SettingsUpdatedBy: stringOrEmpty(settingsUpdatedBy),
+			MergeStrategy:     mergeStrategy,
+			TrunkBased:        trunkBased,
 		}
 		return nil
 	})

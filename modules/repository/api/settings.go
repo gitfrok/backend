@@ -37,6 +37,15 @@ type SettingsView struct {
 	ArchivedAt        time.Time
 	SettingsUpdatedAt time.Time
 	SettingsUpdatedBy string
+	// MergeStrategy is the landing policy's strategy: empty is the absence of
+	// an explicit choice, and merges land exactly as they always did
+	// (SPEC-0065 AC1). The vocabulary is the domain's: "merge_commit",
+	// "squash", "rebase".
+	MergeStrategy string
+	// TrunkBased constrains landing shape — merge commits refused,
+	// fast-forward preferred, rebase the fallback — never who may land or
+	// whether (ADR-0088 decision 3).
+	TrunkBased bool
 }
 
 // Archived reports whether the repository carries the archived label.
@@ -75,6 +84,20 @@ type ArchiveRequest struct {
 	Archived   bool
 }
 
+// LandingRequest states the landing policy whole (SPEC-0065, ADR-0088):
+// strategy and trunk mode together on every call, for the same reason a
+// settings update is a write of the settings rather than a patch.
+type LandingRequest struct {
+	TenantID   string
+	RepoID     string
+	ActorID    string
+	ActorRoles []string
+	// Strategy is one of the domain's landing vocabulary values, or empty to
+	// clear an explicit choice back to unset.
+	Strategy   string
+	TrunkBased bool
+}
+
 // Settings is the context's settings port: one read, two writes, and nothing that could express a
 // visibility, a member or a policy.
 type Settings interface {
@@ -83,6 +106,10 @@ type Settings interface {
 	UpdateSettings(ctx context.Context, u SettingsUpdate) (SettingsView, error)
 	// SetArchived sets or clears the archived label. It changes no authorization or read outcome.
 	SetArchived(ctx context.Context, a ArchiveRequest) (SettingsView, error)
+	// SetLanding states the landing policy whole (SPEC-0065, ADR-0088). It
+	// changes what a reviewed merge produces; it can never change who may land
+	// or whether — that is why it is a setting at all.
+	SetLanding(ctx context.Context, l LandingRequest) (SettingsView, error)
 }
 
 // Administrator answers whether one verified caller may administer one repository.
@@ -110,6 +137,11 @@ const (
 	// settings change because it is a separate question in an investigation: "who renamed this"
 	// and "who archived this" are not asked together.
 	ActionArchivalChanged = "repository.archival.changed"
+	// ActionLandingChanged records a landing-policy change (SPEC-0065). A
+	// separate action for the same reason archival is: "who changed what a
+	// merge produces here" is its own question, and the answer is evidence
+	// when history shape surprises someone.
+	ActionLandingChanged = "repository.landing.changed"
 )
 
 // WitnessEntry is one settings act as this context states it.
